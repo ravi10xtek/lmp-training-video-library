@@ -13,6 +13,13 @@ create table if not exists video_feedback (
 
 create index if not exists video_feedback_video_id_idx on video_feedback(video_id);
 
+-- Explicit FK to profiles so PostgREST can embed the author name
+alter table video_feedback
+  drop constraint if exists video_feedback_user_id_profiles_fkey;
+alter table video_feedback
+  add constraint video_feedback_user_id_profiles_fkey
+  foreign key (user_id) references profiles(id) on delete cascade;
+
 alter table video_feedback enable row level security;
 
 -- Admins can read all feedback
