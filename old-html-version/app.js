@@ -582,7 +582,9 @@ async function handleRecordingStop() {
     showToast('Feedback saved', 'success');
     loadFeedback(currentVideoId);
   } catch (err) {
-    showToast('Could not save feedback: ' + (err.message || err), 'error');
+    console.error('[feedback] save failed:', err);
+    const detail = err?.message || err?.error || err?.statusText || JSON.stringify(err) || 'Unknown error';
+    showToast('Could not save feedback: ' + detail, 'error');
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg> Record feedback';
