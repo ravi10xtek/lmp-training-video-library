@@ -148,10 +148,13 @@ function updateCounts() {
   const ops  = allVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
   const prop = allVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
   const plmb = allVideos.filter(v => v.categories?.slug === 'plumbing-training').length;
+  const drafts = allVideos.filter(v => v.status === 'draft' || v.status === 'done').length;
   document.getElementById('count-all').textContent = total;
   document.getElementById('count-ops').textContent = ops;
   document.getElementById('count-prop').textContent = prop;
   document.getElementById('count-plmb').textContent = plmb;
+  const draftEl = document.getElementById('count-drafts');
+  if (draftEl) draftEl.textContent = drafts;
 }
 
 // ══════════════════════════════════════════════════════
@@ -195,6 +198,15 @@ function filterStatus(status, el) {
   renderVideos();
 }
 
+function filterDrafts(el) {
+  currentStatus = 'drafts';
+  currentFilter = 'all';
+  currentSubcatFilter = 'all';
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  renderVideos();
+}
+
 function handleSearch(val) {
   currentSearch = val.toLowerCase();
   renderVideos();
@@ -206,7 +218,10 @@ function getFilteredVideos() {
     if (!isAdmin && v.status !== 'published') return false;
     if (currentFilter !== 'all' && v.categories?.slug !== currentFilter) return false;
     if (currentSubcatFilter !== 'all' && v.subcategories?.slug !== currentSubcatFilter) return false;
-    if (currentStatus && v.status !== currentStatus) return false;
+    if (currentStatus === 'drafts') {
+      if (!isAdmin) return false;
+      if (v.status !== 'draft' && v.status !== 'done') return false;
+    } else if (currentStatus && v.status !== currentStatus) return false;
     if (currentSearch) {
       const q = currentSearch;
       if (!v.title?.toLowerCase().includes(q) &&
@@ -287,8 +302,16 @@ function renderVideos() {
 
 function renderVideoCard(v, isAdmin) {
   const typeClass = v.video_type ? `type-${v.video_type.toLowerCase()}` : 'status-empty';
-  const statusColor = v.status === 'published' ? 'var(--teal)' : 'var(--muted)';
-  const statusLabel = v.status === 'published' ? 'Published' : 'Empty slot';
+  const STATUS_META = {
+    published: { color: 'var(--teal)', label: 'Published' },
+    draft:     { color: '#f5a524',     label: 'Draft' },
+    done:      { color: '#3b82f6',     label: 'Done' },
+    raw:       { color: 'var(--muted)', label: 'Raw' },
+    empty:     { color: 'var(--muted)', label: 'Empty slot' },
+  };
+  const statusMeta = STATUS_META[v.status] || STATUS_META.empty;
+  const statusColor = statusMeta.color;
+  const statusLabel = statusMeta.label;
 
   const hasPlayableVideo = Boolean(v.video_url || v.storage_key);
 
@@ -301,14 +324,15 @@ function renderVideoCard(v, isAdmin) {
 
   const duration = v.duration_seconds ? formatDuration(v.duration_seconds) : '';
 
-  const clickAction = v.status === 'published' && hasPlayableVideo
+  const playableStatus = v.status === 'published' || v.status === 'draft' || v.status === 'done';
+  const clickAction = playableStatus && hasPlayableVideo
     ? `onclick="openVideo('${v.id}')"`
     : isAdmin ? `onclick="openEditVideo('${v.id}')"` : '';
 
   return `<div class="video-card ${v.status !== 'published' ? 'empty' : ''}" ${clickAction}>
     <div class="card-thumb">
       ${thumb}
-      ${v.status === 'published' && hasPlayableVideo ? `
+      ${playableStatus && hasPlayableVideo ? `
         <div class="play-overlay">
           <div class="play-btn-circle">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="white"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -318,7 +342,7 @@ function renderVideoCard(v, isAdmin) {
     <div class="card-body">
       <div class="card-tags">
         ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
-        ${v.status !== 'published' ? `<span class="card-tag status-empty">${statusLabel}</span>` : ''}
+        ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
       </div>
       <div class="card-title">${v.title}</div>
       <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>

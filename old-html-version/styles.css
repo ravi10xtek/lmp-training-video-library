@@ -990,6 +990,18 @@ html, body {
   transition: width 0.15s ease-out;
 }
 
+/* ── DRAFT / DONE BADGES ── */
+.card-tag.status-draft {
+  background: rgba(245, 165, 36, 0.15);
+  color: #f5a524;
+  border: 1px solid rgba(245, 165, 36, 0.3);
+}
+.card-tag.status-done {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
 /* ── ADMIN FEEDBACK ── */
 .feedback-section {
   margin-top: 24px;
