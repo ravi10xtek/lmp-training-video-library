@@ -990,6 +990,92 @@ html, body {
   transition: width 0.15s ease-out;
 }
 
+/* ── ADMIN FEEDBACK ── */
+.feedback-section {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.feedback-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+.feedback-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+.feedback-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.record-timer {
+  font-variant-numeric: tabular-nums;
+  color: #ff4d4d;
+  font-weight: 600;
+  font-size: 14px;
+}
+.record-btn-recording {
+  background: #ff4d4d !important;
+  color: white !important;
+}
+.record-btn-recording svg {
+  animation: pulse-record 1s infinite;
+}
+@keyframes pulse-record {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.feedback-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.feedback-item {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.feedback-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.feedback-item-author {
+  font-weight: 600;
+  color: var(--text);
+}
+.feedback-item audio {
+  width: 100%;
+  height: 36px;
+}
+.feedback-delete {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.feedback-delete:hover {
+  color: #ff4d4d;
+  background: rgba(255, 77, 77, 0.1);
+}
+.feedback-empty {
+  color: var(--muted);
+  font-size: 13px;
+  font-style: italic;
+  padding: 12px 0;
+}
+
 /* ── RESPONSIVE ── */
 @media (max-width: 768px) {
   .sidebar { display: none; }

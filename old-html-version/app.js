@@ -22,6 +22,14 @@ let currentSearch = '';
 let editingVideoId = null;
 let pendingWasabiFile = null;
 let pendingThumbnail = null;
+let currentVideoId = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordingStream = null;
+let recordingStartTime = 0;
+let recordingTimerInterval = null;
+const FEEDBACK_BUCKET = 'video-feedback';
+const MAX_RECORDING_MS = 3 * 60 * 1000;
 
 const WASABI_UPLOAD_INIT_FUNCTION = 'wasabi-upload-init';
 const WASABI_TRANSFER_FUNCTION = 'wasabi-transfer';
@@ -377,6 +385,15 @@ async function openVideo(id) {
 
   modal.classList.add('open');
 
+  currentVideoId = v.id;
+  const feedbackSection = document.getElementById('feedback-section');
+  if (currentProfile?.role === 'admin') {
+    feedbackSection.classList.remove('hidden');
+    loadFeedback(v.id);
+  } else {
+    feedbackSection.classList.add('hidden');
+  }
+
   // Track watch
   if (currentUser) {
     sb.from('watch_progress').upsert({
@@ -390,6 +407,186 @@ async function openVideo(id) {
 function closeVideoModal() {
   document.getElementById('video-modal').classList.remove('open');
   document.getElementById('video-player').innerHTML = '';
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+  }
+  currentVideoId = null;
+}
+
+// ══════════════════════════════════════════════════════
+// ADMIN FEEDBACK — voice notes per video
+// ══════════════════════════════════════════════════════
+async function loadFeedback(videoId) {
+  const list = document.getElementById('feedback-list');
+  list.innerHTML = '<div class="feedback-empty">Loading…</div>';
+
+  const { data, error } = await sb
+    .from('video_feedback')
+    .select('id, user_id, audio_path, duration_seconds, created_at, profiles:user_id(full_name)')
+    .eq('video_id', videoId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
+    return;
+  }
+
+  if (!data || data.length === 0) {
+    list.innerHTML = '<div class="feedback-empty">No feedback yet. Record one above.</div>';
+    return;
+  }
+
+  const items = await Promise.all(data.map(async (fb) => {
+    const { data: signed } = await sb.storage
+      .from(FEEDBACK_BUCKET)
+      .createSignedUrl(fb.audio_path, 60 * 60);
+    const url = signed?.signedUrl || '';
+    const name = fb.profiles?.full_name || 'Admin';
+    const when = new Date(fb.created_at).toLocaleString();
+    const canDelete = fb.user_id === currentUser?.id;
+    return `
+      <div class="feedback-item">
+        <div class="feedback-item-header">
+          <span><span class="feedback-item-author">${name}</span> · ${when}</span>
+          ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}', '${fb.audio_path}')">Delete</button>` : ''}
+        </div>
+        <audio controls src="${url}"></audio>
+      </div>`;
+  }));
+
+  list.innerHTML = items.join('');
+}
+
+async function deleteFeedback(id, path) {
+  if (!confirm('Delete this feedback?')) return;
+  await sb.storage.from(FEEDBACK_BUCKET).remove([path]).catch(() => {});
+  const { error } = await sb.from('video_feedback').delete().eq('id', id);
+  if (error) {
+    showToast('Could not delete: ' + error.message, 'error');
+    return;
+  }
+  showToast('Feedback deleted', 'success');
+  if (currentVideoId) loadFeedback(currentVideoId);
+}
+
+async function toggleRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+    return;
+  }
+  await startRecording();
+}
+
+async function startRecording() {
+  if (currentProfile?.role !== 'admin' || !currentVideoId) return;
+
+  try {
+    recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    showToast('Microphone access denied', 'error');
+    return;
+  }
+
+  const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : (MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '');
+
+  try {
+    mediaRecorder = mimeType
+      ? new MediaRecorder(recordingStream, { mimeType })
+      : new MediaRecorder(recordingStream);
+  } catch (err) {
+    showToast('Recording not supported in this browser', 'error');
+    stopMicStream();
+    return;
+  }
+
+  recordedChunks = [];
+  mediaRecorder.addEventListener('dataavailable', (e) => {
+    if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+  });
+  mediaRecorder.addEventListener('stop', handleRecordingStop);
+
+  mediaRecorder.start();
+  recordingStartTime = Date.now();
+
+  const btn = document.getElementById('record-btn');
+  btn.classList.add('record-btn-recording');
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Stop';
+
+  const timer = document.getElementById('record-timer');
+  timer.classList.remove('hidden');
+  timer.textContent = '0:00';
+  recordingTimerInterval = setInterval(updateRecordingTimer, 250);
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+  }
+}
+
+function stopMicStream() {
+  if (recordingStream) {
+    recordingStream.getTracks().forEach((t) => t.stop());
+    recordingStream = null;
+  }
+}
+
+function updateRecordingTimer() {
+  const elapsed = Date.now() - recordingStartTime;
+  if (elapsed >= MAX_RECORDING_MS) {
+    stopRecording();
+    return;
+  }
+  const total = Math.floor(elapsed / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  document.getElementById('record-timer').textContent = `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function handleRecordingStop() {
+  clearInterval(recordingTimerInterval);
+  recordingTimerInterval = null;
+  const durationMs = Date.now() - recordingStartTime;
+  const durationSec = Math.max(1, Math.round(durationMs / 1000));
+
+  const btn = document.getElementById('record-btn');
+  btn.classList.remove('record-btn-recording');
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg> Uploading…';
+  btn.disabled = true;
+  document.getElementById('record-timer').classList.add('hidden');
+
+  stopMicStream();
+
+  const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'audio/webm' });
+  recordedChunks = [];
+
+  const ext = (blob.type.includes('webm') ? 'webm' : 'ogg');
+  const path = `${currentVideoId}/${currentUser.id}-${Date.now()}.${ext}`;
+
+  try {
+    const { error: upErr } = await sb.storage
+      .from(FEEDBACK_BUCKET)
+      .upload(path, blob, { contentType: blob.type, upsert: false });
+    if (upErr) throw upErr;
+
+    const { error: insErr } = await sb.from('video_feedback').insert({
+      video_id: currentVideoId,
+      user_id: currentUser.id,
+      audio_path: path,
+      duration_seconds: durationSec,
+    });
+    if (insErr) throw insErr;
+
+    showToast('Feedback saved', 'success');
+    loadFeedback(currentVideoId);
+  } catch (err) {
+    showToast('Could not save feedback: ' + (err.message || err), 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg> Record feedback';
+  }
 }
 
 function closeModal(e) {

@@ -141,6 +141,20 @@
       <div class="modal-title" id="modal-title"></div>
       <div class="modal-desc" id="modal-desc"></div>
       <div class="modal-meta" id="modal-meta"></div>
+
+      <div class="feedback-section hidden" id="feedback-section">
+        <div class="feedback-header">
+          <h3>Admin feedback</h3>
+          <div class="feedback-controls">
+            <button class="btn btn-primary btn-sm" id="record-btn" onclick="toggleRecording()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+              Record feedback
+            </button>
+            <span class="record-timer hidden" id="record-timer">0:00</span>
+          </div>
+        </div>
+        <div class="feedback-list" id="feedback-list"></div>
+      </div>
     </div>
   </div>
 </div>
