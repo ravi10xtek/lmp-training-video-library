@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LMP Training Library</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/@supabase/supabase-js@2"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ══════════════════════════
+     LOGIN PAGE
+══════════════════════════ -->
+<div id="login-page">
+  <div class="login-box">
+    <div class="login-logo">
+      <div class="login-logo-mark">LM</div>
+      <div class="login-title">Training Library</div>
+      <div class="login-sub">Loch Monster Plumbing</div>
+    </div>
+    <div class="login-card">
+      <div class="form-group">
+        <label class="form-label" for="email">Email</label>
+        <input class="form-input" type="email" id="email" placeholder="you@lochmonsterplumbing.com" autocomplete="email">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="password">Password</label>
+        <input class="form-input" type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+      </div>
+      <button class="btn btn-primary" id="login-btn" onclick="handleLogin()">Sign in</button>
+      <div class="login-error" id="login-error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════
+     APP SHELL
+══════════════════════════ -->
+<div id="app">
+
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="topbar-logo">
+      <div class="topbar-logo-mark">LM</div>
+      Training Library
+    </div>
+    <div class="topbar-search">
+      <svg class="topbar-search-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" id="search-input" placeholder="Search videos…" oninput="handleSearch(this.value)">
+    </div>
+    <div class="topbar-right">
+      <div class="topbar-user">
+        <div class="topbar-avatar" id="user-avatar">?</div>
+        <span id="user-name"></span>
+        <span class="topbar-badge" id="user-badge">Worker</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="handleLogout()">Sign out</button>
+    </div>
+  </div>
+
+  <!-- BODY -->
+  <div class="app-body">
+
+    <!-- SIDEBAR -->
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Browse</div>
+        <div class="sidebar-item active all" onclick="filterCategory('all', this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+          All videos
+          <span class="sidebar-count" id="count-all">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Categories</div>
+        <div class="sidebar-item ops" onclick="filterCategory('lmp-operations', this)">
+          <div class="sidebar-dot" style="background:var(--cat-ops)"></div>
+          LMP Operations
+          <span class="sidebar-count" id="count-ops">—</span>
+        </div>
+        <div class="sidebar-item prop" onclick="filterCategory('properties-contacts', this)">
+          <div class="sidebar-dot" style="background:var(--cat-prop)"></div>
+          Properties & Contacts
+          <span class="sidebar-count" id="count-prop">—</span>
+        </div>
+        <div class="sidebar-item plmb" onclick="filterCategory('plumbing-training', this)">
+          <div class="sidebar-dot" style="background:var(--cat-plmb)"></div>
+          Plumbing Training
+          <span class="sidebar-count" id="count-plmb">—</span>
+        </div>
+      </div>
+
+      <div class="sidebar-divider"></div>
+
+      <div class="sidebar-section">
+        <div class="sidebar-section-label">Status</div>
+        <div class="sidebar-item all" onclick="filterStatus('published', this)">
+          <div class="sidebar-dot" style="background:var(--teal)"></div>
+          Published
+        </div>
+        <div class="sidebar-item all" onclick="filterStatus('empty', this)">
+          <div class="sidebar-dot" style="background:var(--muted)"></div>
+          Empty slots
+        </div>
+      </div>
+
+      <!-- Admin only -->
+      <div id="sidebar-admin" class="hidden">
+        <div class="sidebar-divider"></div>
+        <div class="sidebar-section">
+          <div class="sidebar-section-label">Admin</div>
+          <div class="sidebar-item all" onclick="showAdmin()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+            Manage videos
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- MAIN -->
+    <div class="main" id="main-content">
+      <div class="loading"><div class="spinner"></div> Loading videos…</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ══════════════════════════
+     VIDEO PLAYER MODAL
+══════════════════════════ -->
+<div class="modal-overlay" id="video-modal" onclick="closeModal(event)">
+  <div class="modal">
+    <button class="modal-close" onclick="closeVideoModal()">✕</button>
+    <div class="video-wrapper" id="video-player"></div>
+    <div class="modal-info">
+      <div class="modal-tags" id="modal-tags"></div>
+      <div class="modal-title" id="modal-title"></div>
+      <div class="modal-desc" id="modal-desc"></div>
+      <div class="modal-meta" id="modal-meta"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════
+     ADD/EDIT VIDEO MODAL
+══════════════════════════ -->
+<div class="modal-overlay" id="admin-modal" onclick="closeAdminModal(event)">
+  <div class="modal" style="max-width:600px">
+    <button class="modal-close" onclick="document.getElementById('admin-modal').classList.remove('open')">✕</button>
+    <div class="modal-info">
+      <h3 style="font-family:var(--font-head);font-size:18px;margin-bottom:20px;color:var(--white)" id="admin-modal-title">Add video</h3>
+
+      <div class="form-group">
+        <label class="form-label">Video title</label>
+        <input class="form-input" id="v-title" placeholder="e.g. Greenbrier — Property Overview">
+      </div>
+
+      <input type="hidden" id="v-source" value="wasabi">
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select class="form-select" id="v-category" onchange="loadSubcats(this.value)">
+            <option value="">Select category…</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sub-category</label>
+          <select class="form-select" id="v-subcat">
+            <option value="">Select sub-category…</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Video type</label>
+          <select class="form-select" id="v-type">
+            <option value="">No type yet</option>
+            <option value="INTRO">INTRO</option>
+            <option value="HOW-TO">HOW-TO</option>
+            <option value="WALKTHROUGH">WALKTHROUGH</option>
+            <option value="PROCESS">PROCESS</option>
+            <option value="DEEP-DIVE">DEEP-DIVE</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Status</label>
+          <select class="form-select" id="v-status">
+            <option value="empty">Empty slot</option>
+            <option value="published">Published</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="wasabi-field-group">
+        <div class="form-group">
+          <label class="form-label">Upload video file</label>
+          <input class="form-input" id="v-wasabi-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="handleWasabiFileSelected(this.files)">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Wasabi video URL <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional fallback if you already have a URL)</span></label>
+          <input class="form-input" id="v-wasabi-url" placeholder="https://...">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Storage key</label>
+          <input class="form-input" id="v-storage-key" placeholder="videos/uuid/file.mp4">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Description (optional)</label>
+        <textarea class="form-input" id="v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical"></textarea>
+      </div>
+
+      <div id="upload-progress-wrap" class="upload-progress-wrap hidden" aria-live="polite">
+        <div class="upload-progress-label-row">
+          <span id="upload-progress-label">Uploading…</span>
+          <span id="upload-progress-pct">0%</span>
+        </div>
+        <div class="upload-progress-track">
+          <div class="upload-progress-bar" id="upload-progress-bar"></div>
+        </div>
+      </div>
+
+      <div class="admin-btn-row" style="display:flex; gap:12px; margin-top:24px; padding-top:24px; border-top:var(--glass-border)">
+        <button class="btn btn-danger hidden" id="delete-video-btn" onclick="deleteVideo()" style="margin-right:auto">Delete Video</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('admin-modal').classList.remove('open')">Cancel</button>
+        <button class="btn btn-primary" id="save-video-btn" onclick="saveVideo()" style="margin-top:0; width:auto">Save video</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
+
+<script src="app.js?v=20260519e"></script>
+</body>
+</html>

@@ -1,0 +1,857 @@
+// ══════════════════════════════════════════════════════
+// CONFIGURATION — Replace with your Supabase details
+// ══════════════════════════════════════════════════════
+const SUPABASE_URL = 'https://tdxwsgfjkpurtjmgwabr.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkeHdzZ2Zqa3B1cnRqbWd3YWJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNjE3NzAsImV4cCI6MjA5NDczNzc3MH0.9t1S-8kw6LCp7WDDTvs7Um0REVCvIoQt-d8xoF9ITbA';
+
+// ══════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+let currentUser = null;
+let currentProfile = null;
+let allVideos = [];
+let allCategories = [];
+let allSubcats = [];
+let currentFilter = 'all';
+let currentSubcatFilter = 'all';
+let currentStatus = null;
+let currentSearch = '';
+let editingVideoId = null;
+let pendingWasabiFile = null;
+let pendingThumbnail = null;
+
+const WASABI_UPLOAD_INIT_FUNCTION = 'wasabi-upload-init';
+const WASABI_TRANSFER_FUNCTION = 'wasabi-transfer';
+const WASABI_PLAYBACK_FUNCTION = 'wasabi-playback-url';
+const VIDEO_STAGING_BUCKET = 'video-uploads';
+/** Supabase global storage limit is often 50MB — use direct Wasabi above this. */
+const STAGING_MAX_BYTES = 45 * 1024 * 1024;
+
+// ══════════════════════════════════════════════════════
+// AUTH
+// ══════════════════════════════════════════════════════
+async function handleLogin() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const btn = document.getElementById('login-btn');
+  const err = document.getElementById('login-error');
+
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  err.style.display = 'none';
+
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+
+  if (error) {
+    err.textContent = error.message;
+    err.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+    return;
+  }
+
+  await initApp(data.user);
+}
+
+async function handleLogout() {
+  await sb.auth.signOut();
+  currentUser = null;
+  currentProfile = null;
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('login-page').style.display = 'flex';
+}
+
+// ══════════════════════════════════════════════════════
+// INIT APP
+// ══════════════════════════════════════════════════════
+async function initApp(user) {
+  currentUser = user;
+
+  // Get profile
+  const { data: profile } = await sb.from('profiles').select('*').eq('id', user.id).single();
+  currentProfile = profile;
+
+  // Show app
+  document.getElementById('login-page').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+
+  // Set user UI
+  const initials = (profile?.full_name || user.email).split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+  document.getElementById('user-avatar').textContent = initials;
+  document.getElementById('user-name').textContent = profile?.full_name || user.email;
+
+  const badge = document.getElementById('user-badge');
+  if (profile?.role === 'admin') {
+    badge.textContent = 'Admin';
+    badge.classList.add('admin');
+    document.getElementById('sidebar-admin').classList.remove('hidden');
+  }
+
+  // Load data
+  await Promise.all([loadCategories(), loadVideos()]);
+}
+
+// ══════════════════════════════════════════════════════
+// DATA LOADING
+// ══════════════════════════════════════════════════════
+async function loadCategories() {
+  const { data: cats } = await sb.from('categories').select('*').order('sort_order');
+  const { data: subs } = await sb.from('subcategories').select('*').order('sort_order');
+  allCategories = cats || [];
+  allSubcats = subs || [];
+
+  // Populate admin category select
+  const catSel = document.getElementById('v-category');
+  catSel.innerHTML = '<option value="">Select category…</option>';
+  allCategories.forEach(c => {
+    catSel.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+  });
+}
+
+async function loadSubcats(catId) {
+  const sel = document.getElementById('v-subcat');
+  sel.innerHTML = '<option value="">Select sub-category…</option>';
+  allSubcats.filter(s => s.category_id === catId).forEach(s => {
+    sel.innerHTML += `<option value="${s.id}">${s.name}</option>`;
+  });
+}
+
+async function loadVideos() {
+  const isAdmin = currentProfile?.role === 'admin';
+  let query = sb.from('videos').select(`
+    *,
+    categories(name, slug, color),
+    subcategories(name, slug)
+  `).order('sort_order').order('title');
+
+  const { data, error } = await query;
+  allVideos = data || [];
+
+  // Update counts
+  updateCounts();
+  renderVideos();
+}
+
+function updateCounts() {
+  const total = allVideos.filter(v => currentProfile?.role === 'admin' || v.status === 'published').length;
+  const ops  = allVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
+  const prop = allVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
+  const plmb = allVideos.filter(v => v.categories?.slug === 'plumbing-training').length;
+  document.getElementById('count-all').textContent = total;
+  document.getElementById('count-ops').textContent = ops;
+  document.getElementById('count-prop').textContent = prop;
+  document.getElementById('count-plmb').textContent = plmb;
+}
+
+// ══════════════════════════════════════════════════════
+// FILTERING & RENDERING
+// ══════════════════════════════════════════════════════
+function filterCategory(slug, el) {
+  currentFilter = slug;
+  
+  // Auto-select first subcategory if not 'all'
+  if (slug !== 'all') {
+    const category = allCategories.find(c => c.slug === slug);
+    if (category) {
+      const subcats = allSubcats.filter(s => s.category_id === category.id);
+      if (subcats.length > 0) {
+        currentSubcatFilter = subcats[0].slug;
+      } else {
+        currentSubcatFilter = 'all';
+      }
+    }
+  } else {
+    currentSubcatFilter = 'all';
+  }
+  
+  currentStatus = null;
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  renderVideos();
+}
+
+function filterSubcat(slug) {
+  currentSubcatFilter = slug;
+  renderVideos();
+}
+
+function filterStatus(status, el) {
+  currentStatus = status;
+  currentFilter = 'all';
+  currentSubcatFilter = 'all';
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  el.classList.add('active');
+  renderVideos();
+}
+
+function handleSearch(val) {
+  currentSearch = val.toLowerCase();
+  renderVideos();
+}
+
+function getFilteredVideos() {
+  const isAdmin = currentProfile?.role === 'admin';
+  return allVideos.filter(v => {
+    if (!isAdmin && v.status !== 'published') return false;
+    if (currentFilter !== 'all' && v.categories?.slug !== currentFilter) return false;
+    if (currentSubcatFilter !== 'all' && v.subcategories?.slug !== currentSubcatFilter) return false;
+    if (currentStatus && v.status !== currentStatus) return false;
+    if (currentSearch) {
+      const q = currentSearch;
+      if (!v.title?.toLowerCase().includes(q) &&
+          !v.description?.toLowerCase().includes(q) &&
+          !v.categories?.name?.toLowerCase().includes(q) &&
+          !v.subcategories?.name?.toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function renderVideos() {
+  const videos = getFilteredVideos();
+  const isAdmin = currentProfile?.role === 'admin';
+  const main = document.getElementById('main-content');
+
+  // Stats
+  const published = allVideos.filter(v => v.status === 'published').length;
+  const empty = allVideos.filter(v => v.status === 'empty').length;
+
+  let html = '';
+
+  // Admin stats bar
+  if (isAdmin) {
+    html += `<div class="stats-bar">
+      <div class="stat-card"><div class="stat-val teal">${published}</div><div class="stat-lbl">Published</div></div>
+      <div class="stat-card"><div class="stat-val" style="color:var(--muted)">${empty}</div><div class="stat-lbl">Empty slots</div></div>
+      <div class="stat-card"><div class="stat-val blue">${allVideos.length}</div><div class="stat-lbl">Total slots</div></div>
+    </div>`;
+  }
+
+  // Page header
+  const catLabel = currentFilter === 'all' ? 'All Videos' :
+    allCategories.find(c => c.slug === currentFilter)?.name || 'Videos';
+  html += `<div class="page-header">
+    <div class="page-title">${catLabel}</div>
+    <div class="page-sub">${videos.length} video${videos.length !== 1 ? 's' : ''}${currentSearch ? ` matching "${currentSearch}"` : ''}</div>
+  </div>`;
+
+  // Render Subcategory Tabs
+  if (currentFilter !== 'all' && !currentSearch) {
+    const category = allCategories.find(c => c.slug === currentFilter);
+    if (category) {
+      const subcats = allSubcats.filter(s => s.category_id === category.id);
+      if (subcats.length > 0) {
+        html += `<div class="filter-tabs">`;
+        subcats.forEach(s => {
+          html += `<button class="filter-tab ${currentSubcatFilter === s.slug ? 'active' : ''}" onclick="filterSubcat('${s.slug}')">${s.name}</button>`;
+        });
+        html += `</div>`;
+      }
+    }
+  }
+
+  // Admin add button
+  if (isAdmin) {
+    html += `<div style="margin-bottom:20px">
+      <button class="btn btn-primary btn-sm" style="width:auto" onclick="openAddVideo()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add video slot
+      </button>
+    </div>`;
+  }
+
+  if (videos.length === 0) {
+    html += `<div class="empty-state">
+      <h3>No videos found</h3>
+      <p>${currentSearch ? 'Try a different search term' : 'No videos in this category yet'}</p>
+    </div>`;
+  } else {
+    html += `<div class="video-grid">`;
+    videos.forEach(v => { html += renderVideoCard(v, isAdmin); });
+    html += `</div>`;
+  }
+
+  main.innerHTML = html;
+}
+
+function renderVideoCard(v, isAdmin) {
+  const typeClass = v.video_type ? `type-${v.video_type.toLowerCase()}` : 'status-empty';
+  const statusColor = v.status === 'published' ? 'var(--teal)' : 'var(--muted)';
+  const statusLabel = v.status === 'published' ? 'Published' : 'Empty slot';
+
+  const hasPlayableVideo = Boolean(v.video_url || v.storage_key);
+
+  const thumb = v.thumbnail_url
+    ? `<img src="${v.thumbnail_url}" alt="" class="card-thumb-img" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block">`
+    : `<div class="card-thumb-empty">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>${hasPlayableVideo ? 'Video ready' : 'No video yet'}</span>
+      </div>`;
+
+  const duration = v.duration_seconds ? formatDuration(v.duration_seconds) : '';
+
+  const clickAction = v.status === 'published' && hasPlayableVideo
+    ? `onclick="openVideo('${v.id}')"`
+    : isAdmin ? `onclick="openEditVideo('${v.id}')"` : '';
+
+  return `<div class="video-card ${v.status !== 'published' ? 'empty' : ''}" ${clickAction}>
+    <div class="card-thumb">
+      ${thumb}
+      ${v.status === 'published' && hasPlayableVideo ? `
+        <div class="play-overlay">
+          <div class="play-btn-circle">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="white"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          </div>
+        </div>` : ''}
+    </div>
+    <div class="card-body">
+      <div class="card-tags">
+        ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
+        ${v.status !== 'published' ? `<span class="card-tag status-empty">${statusLabel}</span>` : ''}
+      </div>
+      <div class="card-title">${v.title}</div>
+      <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>
+      <div class="card-footer">
+        <span class="card-status">
+          <span class="status-dot" style="background:${statusColor}; box-shadow: 0 0 8px ${statusColor}"></span>
+          ${statusLabel}
+        </span>
+      </div>
+    </div>
+    ${isAdmin ? `<div style="position:absolute;top:12px;right:12px;z-index:2">
+      <button class="btn btn-ghost btn-sm" style="padding:4px 12px;font-size:11px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2)" onclick="event.stopPropagation();openEditVideo('${v.id}')">Edit</button>
+    </div>` : ''}
+  </div>`;
+}
+
+// ══════════════════════════════════════════════════════
+// VIDEO PLAYER
+// ══════════════════════════════════════════════════════
+async function resolveWasabiPlaybackUrl(v) {
+  if (v.video_url) return v.video_url;
+  if (!v.storage_key) return null;
+
+  const { data, error } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+    body: { storageKey: v.storage_key, videoId: v.id }
+  });
+
+  if (error) throw error;
+  return data?.playbackUrl || data?.url || null;
+}
+
+async function openVideo(id) {
+  const v = allVideos.find(x => x.id === id);
+  if (!v) return;
+
+  const modal = document.getElementById('video-modal');
+  const typeClass = v.video_type ? `type-${v.video_type.toLowerCase()}` : '';
+  try {
+    const playbackUrl = await resolveWasabiPlaybackUrl(v);
+    if (!playbackUrl) {
+      showToast('No playback URL available for this video', 'error');
+      return;
+    }
+    document.getElementById('video-player').innerHTML = `
+      <video controls autoplay playsinline style="width:100%;height:100%;background:black">
+        <source src="${playbackUrl}">
+        Your browser does not support HTML5 video.
+      </video>`;
+  } catch (err) {
+    showToast('Could not load video playback URL', 'error');
+    return;
+  }
+
+  document.getElementById('modal-tags').innerHTML = `
+    ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
+    <span class="card-tag" style="background:rgba(255,255,255,0.08);color:var(--muted)">${v.categories?.name || ''}</span>
+    ${v.subcategories?.name ? `<span class="card-tag" style="background:rgba(255,255,255,0.06);color:var(--muted)">${v.subcategories.name}</span>` : ''}`;
+
+  document.getElementById('modal-title').textContent = v.title;
+  document.getElementById('modal-desc').textContent = v.description || 'No description provided.';
+  document.getElementById('modal-meta').innerHTML = `
+    <div class="modal-meta-item"><strong>${v.video_type || '—'}</strong>Type</div>
+    <div class="modal-meta-item"><strong>${v.subcategories?.name || '—'}</strong>Sub-category</div>`;
+
+  modal.classList.add('open');
+
+  // Track watch
+  if (currentUser) {
+    sb.from('watch_progress').upsert({
+      user_id: currentUser.id,
+      video_id: v.id,
+      last_watched_at: new Date().toISOString()
+    }, { onConflict: 'user_id,video_id' });
+  }
+}
+
+function closeVideoModal() {
+  document.getElementById('video-modal').classList.remove('open');
+  document.getElementById('video-player').innerHTML = '';
+}
+
+function closeModal(e) {
+  if (e.target === document.getElementById('video-modal')) closeVideoModal();
+}
+
+// ══════════════════════════════════════════════════════
+// ADMIN — ADD / EDIT VIDEO
+// ══════════════════════════════════════════════════════
+function showAdmin() {
+  openAddVideo();
+}
+
+function openAddVideo() {
+  editingVideoId = null;
+  pendingWasabiFile = null;
+  pendingThumbnail = null;
+  document.getElementById('admin-modal-title').textContent = 'Add video slot';
+  document.getElementById('v-title').value = '';
+  document.getElementById('v-category').value = '';
+  document.getElementById('v-subcat').innerHTML = '<option value="">Select sub-category…</option>';
+  document.getElementById('v-type').value = '';
+  document.getElementById('v-status').value = 'empty';
+  document.getElementById('v-wasabi-file').value = '';
+  document.getElementById('v-wasabi-url').value = '';
+  document.getElementById('v-storage-key').value = '';
+  document.getElementById('v-desc').value = '';
+  document.getElementById('delete-video-btn').classList.add('hidden');
+  hideUploadProgress();
+  document.getElementById('admin-modal').classList.add('open');
+}
+
+function openEditVideo(id) {
+  const v = allVideos.find(x => x.id === id);
+  if (!v) return;
+
+  editingVideoId = id;
+  pendingWasabiFile = null;
+  pendingThumbnail = null;
+  document.getElementById('admin-modal-title').textContent = 'Edit video';
+  document.getElementById('v-title').value = v.title || '';
+  document.getElementById('v-category').value = v.category_id || '';
+  loadSubcats(v.category_id).then(() => {
+    document.getElementById('v-subcat').value = v.subcategory_id || '';
+  });
+  document.getElementById('v-type').value = v.video_type || '';
+  document.getElementById('v-status').value = v.status || 'empty';
+  document.getElementById('v-wasabi-file').value = '';
+  document.getElementById('v-wasabi-url').value = v.video_url || '';
+  document.getElementById('v-storage-key').value = v.storage_key || '';
+  document.getElementById('v-desc').value = v.description || '';
+  document.getElementById('delete-video-btn').classList.remove('hidden');
+  hideUploadProgress();
+  document.getElementById('admin-modal').classList.add('open');
+}
+
+function handleWasabiFileSelected(files) {
+  pendingWasabiFile = files && files.length ? files[0] : null;
+  pendingThumbnail = null;
+  hideUploadProgress();
+
+  if (pendingWasabiFile) {
+    generateThumbnailDataUri(pendingWasabiFile)
+      .then((dataUri) => {
+        pendingThumbnail = dataUri;
+      })
+      .catch((err) => {
+        console.warn('Thumbnail generation failed:', err);
+        pendingThumbnail = null;
+      });
+  }
+}
+
+function generateThumbnailDataUri(file, seekSeconds = 1) {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    const objectUrl = URL.createObjectURL(file);
+    video.src = objectUrl;
+
+    let done = false;
+    const finish = (fn) => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(objectUrl);
+      fn();
+    };
+
+    video.addEventListener('loadedmetadata', () => {
+      const target = Math.min(seekSeconds, Math.max(0, (video.duration || 2) * 0.1));
+      try { video.currentTime = target; } catch (_) { /* ignore */ }
+    });
+
+    video.addEventListener('seeked', () => {
+      try {
+        const canvas = document.createElement('canvas');
+        const targetWidth = 320;
+        const scale = video.videoWidth ? targetWidth / video.videoWidth : 1;
+        canvas.width = targetWidth;
+        canvas.height = Math.round((video.videoHeight || 180) * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUri = canvas.toDataURL('image/jpeg', 0.6);
+        finish(() => resolve(dataUri));
+      } catch (err) {
+        finish(() => reject(err));
+      }
+    });
+
+    video.addEventListener('error', () => {
+      finish(() => reject(new Error('Could not load video for thumbnail')));
+    });
+
+    setTimeout(() => {
+      finish(() => reject(new Error('Thumbnail generation timed out')));
+    }, 15000);
+  });
+}
+
+function showUploadProgress() {
+  const wrap = document.getElementById('upload-progress-wrap');
+  if (wrap) wrap.classList.remove('hidden');
+  setUploadProgress(0, 'Starting…');
+}
+
+function hideUploadProgress() {
+  const wrap = document.getElementById('upload-progress-wrap');
+  if (wrap) wrap.classList.add('hidden');
+  setUploadProgress(0, '');
+}
+
+function setUploadProgress(percent, label) {
+  const pct = Math.min(100, Math.max(0, Math.round(percent)));
+  const bar = document.getElementById('upload-progress-bar');
+  const pctEl = document.getElementById('upload-progress-pct');
+  const labelEl = document.getElementById('upload-progress-label');
+  if (bar) bar.style.width = pct + '%';
+  if (pctEl) pctEl.textContent = pct + '%';
+  if (labelEl && label) labelEl.textContent = label;
+}
+
+function isObjectSizeExceededError(err) {
+  const m = (err?.message || String(err)).toLowerCase();
+  return m.includes('maximum size') || m.includes('maximum allowed') || m.includes('too large') || m.includes('exceeded');
+}
+
+function xhrPresignedPutUpload(uploadUrl, file, contentType, onRatio) {
+  return new Promise((resolve, reject) => {
+    const ct = (contentType && contentType.trim()) || 'application/octet-stream';
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && onRatio) onRatio(e.loaded / e.total);
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 200 || xhr.status === 204 || (xhr.status >= 200 && xhr.status < 300)) {
+        resolve();
+        return;
+      }
+      console.error('[wasabi-upload] PUT HTTP', xhr.status);
+      console.error('[wasabi-upload] response body:\n' + (xhr.responseText || '(empty)'));
+      const codeMatch = xhr.responseText?.match(/<Code>([^<]+)<\/Code>/);
+      const msgMatch = xhr.responseText?.match(/<Message>([^<]+)<\/Message>/);
+      const code = codeMatch ? codeMatch[1] : '';
+      const msg = msgMatch ? msgMatch[1] : '';
+      const short = code || msg
+        ? `${code}${code && msg ? ' — ' : ''}${msg}`
+        : (xhr.responseText || '').slice(0, 180);
+      reject(new Error(`Wasabi upload failed (${xhr.status}): ${short || 'see console for full XML'}`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('Network error while uploading to Wasabi')));
+    xhr.open('PUT', uploadUrl);
+    xhr.setRequestHeader('Content-Type', ct);
+    xhr.send(file);
+  });
+}
+
+async function xhrSupabaseStorageUpload(storagePath, file, contentType, onRatio) {
+  const { data: sessionData } = await sb.auth.getSession();
+  const token = sessionData?.session?.access_token;
+  if (!token) throw new Error('Not signed in');
+
+  const url = `${SUPABASE_URL}/storage/v1/object/${VIDEO_STAGING_BUCKET}/${storagePath}`;
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && onRatio) onRatio(e.loaded / e.total);
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve();
+        return;
+      }
+      let msg = xhr.responseText || '';
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed?.message) msg = parsed.message;
+        if (parsed?.error) msg = parsed.error;
+      } catch (_) { /* ignore */ }
+      reject(new Error(msg || `Staging upload failed (${xhr.status})`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('Network error while uploading to staging')));
+    xhr.open('POST', url);
+    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+    xhr.setRequestHeader('Content-Type', contentType);
+    xhr.setRequestHeader('x-upsert', 'false');
+    xhr.send(file);
+  });
+}
+
+function sanitizeUploadFileName(fileName) {
+  return (fileName || 'video.mp4').replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+async function parseFunctionError(error) {
+  let msg = error?.message || String(error);
+  try {
+    if (error?.context && typeof error.context.json === 'function') {
+      const body = await error.context.json();
+      if (body?.error) msg = body.error;
+    }
+  } catch (_) { /* ignore */ }
+  return msg;
+}
+
+async function uploadViaWasabiDirect(file, onProgress) {
+  const contentType = (file.type && file.type.trim()) || 'application/octet-stream';
+  onProgress?.(3, 'Preparing upload…');
+
+  const { data, error } = await sb.functions.invoke(WASABI_UPLOAD_INIT_FUNCTION, {
+    body: {
+      fileName: file.name,
+      fileType: contentType,
+      fileSize: file.size,
+    },
+  });
+
+  if (error) {
+    const msg = await parseFunctionError(error);
+    if (msg.includes('Admin') || msg.includes('401') || msg.includes('Unauthorized')) {
+      throw new Error('Upload denied: sign in as an admin user.');
+    }
+    throw new Error('Upload init failed: ' + msg);
+  }
+
+  const uploadUrl = data?.uploadUrl;
+  const signedContentType = data?.contentType || contentType;
+  const storageKey = data?.storageKey;
+  if (!uploadUrl || !storageKey) {
+    throw new Error('Invalid upload init response. Redeploy wasabi-upload-init.');
+  }
+
+  onProgress?.(8, 'Uploading to Wasabi…');
+  await xhrPresignedPutUpload(uploadUrl, file, signedContentType, (ratio) => {
+    onProgress?.(8 + ratio * 88, 'Uploading to Wasabi…');
+  });
+
+  onProgress?.(100, 'Upload complete');
+  return { storageKey, publicUrl: data?.publicUrl || null };
+}
+
+async function uploadViaStaging(file, onProgress) {
+  const contentType = (file.type && file.type.trim()) || 'application/octet-stream';
+  const storagePath = `${currentUser.id}/${crypto.randomUUID()}-${sanitizeUploadFileName(file.name)}`;
+
+  onProgress?.(5, 'Uploading (staging)…');
+  await xhrSupabaseStorageUpload(storagePath, file, contentType, (ratio) => {
+    onProgress?.(5 + ratio * 60, 'Uploading…');
+  });
+
+  onProgress?.(70, 'Copying to Wasabi…');
+  const { data, error } = await sb.functions.invoke(WASABI_TRANSFER_FUNCTION, {
+    body: { storagePath, contentType },
+  });
+
+  if (error) {
+    await sb.storage.from(VIDEO_STAGING_BUCKET).remove([storagePath]).catch(() => {});
+    const msg = await parseFunctionError(error);
+    throw new Error('Transfer to Wasabi failed: ' + msg);
+  }
+
+  const storageKey = data?.storageKey;
+  if (!storageKey) throw new Error('Transfer returned no storage key.');
+
+  onProgress?.(100, 'Upload complete');
+  return { storageKey, publicUrl: data?.publicUrl || null };
+}
+
+/**
+ * Small files: Supabase staging (if under plan limit).
+ * Large files or size errors: direct Wasabi upload (up to 5GB).
+ */
+async function uploadToWasabiViaEdgeFunction(file, onProgress) {
+  if (!currentUser?.id) throw new Error('You must be signed in to upload.');
+  if (currentProfile?.role !== 'admin') throw new Error('Upload denied: admin account required.');
+
+  if (file.size > STAGING_MAX_BYTES) {
+    return uploadViaWasabiDirect(file, onProgress);
+  }
+
+  try {
+    return await uploadViaStaging(file, onProgress);
+  } catch (err) {
+    if (!isObjectSizeExceededError(err)) throw err;
+    onProgress?.(2, 'File too large for staging — using direct upload…');
+    return uploadViaWasabiDirect(file, onProgress);
+  }
+}
+
+async function saveVideo() {
+  const btn = document.getElementById('save-video-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  const payload = {
+    title: document.getElementById('v-title').value.trim(),
+    video_source: 'wasabi',
+    category_id: document.getElementById('v-category').value || null,
+    subcategory_id: document.getElementById('v-subcat').value || null,
+    video_type: document.getElementById('v-type').value || null,
+    status: document.getElementById('v-status').value,
+    youtube_id: null,
+    video_url: document.getElementById('v-wasabi-url').value.trim() || null,
+    storage_key: document.getElementById('v-storage-key').value.trim() || null,
+    description: document.getElementById('v-desc').value.trim() || null,
+  };
+
+  if (pendingThumbnail) {
+    payload.thumbnail_url = pendingThumbnail;
+  }
+
+  if (!payload.title) {
+    showToast('Please enter a title', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Save video';
+    return;
+  }
+
+  if (pendingWasabiFile) {
+    btn.textContent = 'Uploading…';
+    showUploadProgress();
+    try {
+      const result = await uploadToWasabiViaEdgeFunction(pendingWasabiFile, (pct, label) => {
+        setUploadProgress(pct, label);
+      });
+      payload.storage_key = result.storageKey;
+      payload.video_url = result.publicUrl || payload.video_url || null;
+      // Reflect the captured key in the UI so it's visible and recoverable if the save fails.
+      document.getElementById('v-storage-key').value = result.storageKey;
+      if (result.publicUrl) document.getElementById('v-wasabi-url').value = result.publicUrl;
+      pendingWasabiFile = null;
+      document.getElementById('v-wasabi-file').value = '';
+    } catch (uploadErr) {
+      hideUploadProgress();
+      showToast('Upload failed: ' + (uploadErr.message || 'Unknown error'), 'error');
+      btn.disabled = false;
+      btn.textContent = 'Save video';
+      return;
+    }
+    hideUploadProgress();
+  }
+
+  if (!payload.storage_key && !payload.video_url) {
+    showToast('Upload a file or provide a Wasabi video URL/storage key', 'error');
+    btn.disabled = false;
+    btn.textContent = 'Save video';
+    return;
+  }
+
+  let error;
+  if (editingVideoId) {
+    ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
+  } else {
+    payload.created_by = currentUser.id;
+    ({ error } = await sb.from('videos').insert(payload));
+  }
+
+  if (error) {
+    showToast('Error: ' + error.message, 'error');
+  } else {
+    showToast(editingVideoId ? 'Video updated' : 'Video slot created', 'success');
+    document.getElementById('admin-modal').classList.remove('open');
+    await loadVideos();
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Save video';
+}
+
+async function deleteVideo() {
+  if (!editingVideoId) return;
+  if (!confirm('Are you sure you want to delete this video slot? This cannot be undone.')) return;
+
+  const btn = document.getElementById('delete-video-btn');
+  btn.disabled = true;
+  btn.textContent = 'Deleting…';
+
+  const { error } = await sb.from('videos').delete().eq('id', editingVideoId);
+
+  if (error) {
+    showToast('Error: ' + error.message, 'error');
+  } else {
+    showToast('Video deleted', 'success');
+    document.getElementById('admin-modal').classList.remove('open');
+    await loadVideos();
+  }
+
+  btn.disabled = false;
+  btn.textContent = 'Delete Video';
+}
+
+function closeAdminModal(e) {
+  if (e.target === document.getElementById('admin-modal'))
+    document.getElementById('admin-modal').classList.remove('open');
+}
+
+// ══════════════════════════════════════════════════════
+// UTILITIES
+// ══════════════════════════════════════════════════════
+function formatDuration(secs) {
+  if (!secs) return '';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m} min`;
+}
+
+function showToast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `toast show ${type}`;
+  setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ══════════════════════════════════════════════════════
+// BOOT — check existing session
+// ══════════════════════════════════════════════════════
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) {
+    await initApp(session.user);
+  }
+
+  // Listen for auth changes
+  sb.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_OUT') {
+      document.getElementById('app').style.display = 'none';
+      document.getElementById('login-page').style.display = 'flex';
+    }
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeVideoModal();
+      document.getElementById('admin-modal').classList.remove('open');
+    }
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      document.getElementById('search-input').focus();
+    }
+  });
+})();

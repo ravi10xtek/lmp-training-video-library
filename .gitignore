@@ -1,0 +1,16 @@
+.DS_Store
+node_modules/
+dist/
+.env
+.env.local
+.env.*.local
+*.log
+.vscode/
+.idea/
+
+# Supabase CLI working files
+supabase/.temp/
+supabase/.branches/
+
+# Unused Vite starter
+frontend/
