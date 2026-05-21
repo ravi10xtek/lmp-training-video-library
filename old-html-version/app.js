@@ -1166,7 +1166,9 @@ function notifClick(videoId) {
 // REVIEWER — mark as reviewed & notify
 // ══════════════════════════════════════════════════════
 async function markReviewed() {
-  if (!currentVideoId || !currentProfile?.is_reviewer) return;
+  const isAdmin = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
+  if (!currentVideoId || (!isAdmin && !isReviewer)) return;
   const v = allVideos.find(x => x.id === currentVideoId);
   if (!v) return;
 
