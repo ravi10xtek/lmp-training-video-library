@@ -144,10 +144,12 @@ async function loadVideos() {
 }
 
 function updateCounts() {
-  const total = allVideos.filter(v => currentProfile?.role === 'admin' || v.status === 'published').length;
-  const ops  = allVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
-  const prop = allVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
-  const plmb = allVideos.filter(v => v.categories?.slug === 'plumbing-training').length;
+  const isAdmin = currentProfile?.role === 'admin';
+  const visibleVideos = allVideos.filter(v => v.status !== 'draft' && v.status !== 'done' && (isAdmin || v.status === 'published'));
+  const total = visibleVideos.length;
+  const ops  = visibleVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
+  const prop = visibleVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
+  const plmb = visibleVideos.filter(v => v.categories?.slug === 'plumbing-training').length;
   const drafts = allVideos.filter(v => v.status === 'draft' || v.status === 'done').length;
   document.getElementById('count-all').textContent = total;
   document.getElementById('count-ops').textContent = ops;
@@ -216,12 +218,15 @@ function getFilteredVideos() {
   const isAdmin = currentProfile?.role === 'admin';
   return allVideos.filter(v => {
     if (!isAdmin && v.status !== 'published') return false;
+    const isDraftVideo = v.status === 'draft' || v.status === 'done';
+    if (currentStatus === 'drafts') {
+      if (!isAdmin || !isDraftVideo) return false;
+    } else {
+      if (isDraftVideo) return false;
+      if (currentStatus && v.status !== currentStatus) return false;
+    }
     if (currentFilter !== 'all' && v.categories?.slug !== currentFilter) return false;
     if (currentSubcatFilter !== 'all' && v.subcategories?.slug !== currentSubcatFilter) return false;
-    if (currentStatus === 'drafts') {
-      if (!isAdmin) return false;
-      if (v.status !== 'draft' && v.status !== 'done') return false;
-    } else if (currentStatus && v.status !== currentStatus) return false;
     if (currentSearch) {
       const q = currentSearch;
       if (!v.title?.toLowerCase().includes(q) &&
