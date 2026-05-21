@@ -441,7 +441,7 @@ async function openVideo(id) {
     feedbackSection.classList.add('hidden');
   }
   const reviewerSection = document.getElementById('reviewer-section');
-  if (isReviewer) {
+  if (isAdmin || isReviewer) {
     reviewerSection.classList.remove('hidden');
     updateReviewedBtnState(v);
   } else {
