@@ -70,10 +70,10 @@ Deno.serve(async (req) => {
         // Allow admins to preview unpublished records.
         const { data: profile } = await supabase
           .from("profiles")
-          .select("role")
+          .select("role, is_reviewer")
           .eq("id", userId)
           .single();
-        if (profile?.role !== "admin") {
+        if (profile?.role !== "admin" && !profile?.is_reviewer) {
           return jsonResponse(403, { error: "Not allowed to view unpublished video" });
         }
       }

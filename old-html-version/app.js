@@ -28,6 +28,10 @@ let recordedChunks = [];
 let recordingStream = null;
 let recordingStartTime = 0;
 let recordingTimerInterval = null;
+let allNotifications = [];
+let notifPanelOpen = false;
+let notifSubscription = null;
+const NOTIFY_FUNCTION = 'notify-review';
 const FEEDBACK_BUCKET = 'video-feedback';
 const MAX_RECORDING_MS = 3 * 60 * 1000;
 
@@ -65,6 +69,8 @@ async function handleLogin() {
 }
 
 async function handleLogout() {
+  if (notifSubscription) { sb.removeChannel(notifSubscription); notifSubscription = null; }
+  allNotifications = [];
   await sb.auth.signOut();
   currentUser = null;
   currentProfile = null;
@@ -97,9 +103,19 @@ async function initApp(user) {
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
   }
+  if (profile?.is_reviewer) {
+    badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
+    badge.classList.add('admin');
+    document.getElementById('sidebar-admin').classList.remove('hidden');
+  }
+  if (profile?.role === 'admin' || profile?.is_reviewer) {
+    document.getElementById('notif-wrap').classList.remove('hidden');
+  }
 
   // Load data
   await Promise.all([loadCategories(), loadVideos()]);
+  await loadNotifications();
+  subscribeToNotifications();
 }
 
 // ══════════════════════════════════════════════════════
@@ -415,12 +431,21 @@ async function openVideo(id) {
   modal.classList.add('open');
 
   currentVideoId = v.id;
+  const isAdmin = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
   const feedbackSection = document.getElementById('feedback-section');
-  if (currentProfile?.role === 'admin') {
+  if (isAdmin || isReviewer) {
     feedbackSection.classList.remove('hidden');
     loadFeedback(v.id);
   } else {
     feedbackSection.classList.add('hidden');
+  }
+  const reviewerSection = document.getElementById('reviewer-section');
+  if (isReviewer) {
+    reviewerSection.classList.remove('hidden');
+    updateReviewedBtnState(v);
+  } else {
+    reviewerSection.classList.add('hidden');
   }
 
   // Track watch
@@ -990,6 +1015,8 @@ async function saveVideo() {
     return;
   }
 
+  const prevStatus = editingVideoId ? allVideos.find(v => v.id === editingVideoId)?.status : null;
+
   let error;
   if (editingVideoId) {
     ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
@@ -1002,6 +1029,9 @@ async function saveVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast(editingVideoId ? 'Video updated' : 'Video slot created', 'success');
+    if (editingVideoId && payload.status === 'done' && prevStatus !== 'done') {
+      notifyOnStatusDone(editingVideoId, payload.title);
+    }
     document.getElementById('admin-modal').classList.remove('open');
     await loadVideos();
   }
@@ -1055,6 +1085,156 @@ function showToast(msg, type = 'success') {
 }
 
 // ══════════════════════════════════════════════════════
+// NOTIFICATIONS
+// ══════════════════════════════════════════════════════
+async function loadNotifications() {
+  const { data } = await sb.from('notifications')
+    .select('*, videos(title)')
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false })
+    .limit(30);
+  allNotifications = data || [];
+  renderNotificationBell();
+}
+
+function subscribeToNotifications() {
+  notifSubscription = sb.channel(`notifs-${currentUser.id}`)
+    .on('postgres_changes', {
+      event: 'INSERT',
+      schema: 'public',
+      table: 'notifications',
+      filter: `user_id=eq.${currentUser.id}`,
+    }, payload => {
+      allNotifications.unshift(payload.new);
+      renderNotificationBell();
+      showToast(payload.new.title, 'success');
+    })
+    .subscribe();
+}
+
+function renderNotificationBell() {
+  const unread = allNotifications.filter(n => !n.read).length;
+  const badge = document.getElementById('notif-badge');
+  if (!badge) return;
+  badge.textContent = unread;
+  badge.classList.toggle('hidden', unread === 0);
+}
+
+function toggleNotifPanel(e) {
+  e.stopPropagation();
+  const panel = document.getElementById('notif-panel');
+  notifPanelOpen = !notifPanelOpen;
+  panel.classList.toggle('hidden', !notifPanelOpen);
+  if (notifPanelOpen) {
+    renderNotifPanel();
+    markAllNotifsRead();
+  }
+}
+
+function renderNotifPanel() {
+  const list = document.getElementById('notif-list');
+  if (!allNotifications.length) {
+    list.innerHTML = '<div class="notif-empty">No notifications yet</div>';
+    return;
+  }
+  list.innerHTML = allNotifications.slice(0, 25).map(n => `
+    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}')">
+      <div class="notif-title">${n.title}</div>
+      ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
+      <div class="notif-time">${timeAgo(n.created_at)}</div>
+    </div>
+  `).join('');
+}
+
+async function markAllNotifsRead() {
+  const unreadIds = allNotifications.filter(n => !n.read).map(n => n.id);
+  if (!unreadIds.length) return;
+  await sb.from('notifications').update({ read: true }).in('id', unreadIds);
+  allNotifications.forEach(n => n.read = true);
+  renderNotificationBell();
+}
+
+function notifClick(videoId) {
+  if (!videoId) return;
+  document.getElementById('notif-panel').classList.add('hidden');
+  notifPanelOpen = false;
+  const v = allVideos.find(x => x.id === videoId);
+  if (v && (v.video_url || v.storage_key)) openVideo(videoId);
+}
+
+// ══════════════════════════════════════════════════════
+// REVIEWER — mark as reviewed & notify
+// ══════════════════════════════════════════════════════
+async function markReviewed() {
+  if (!currentVideoId || !currentProfile?.is_reviewer) return;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v) return;
+
+  const btn = document.getElementById('mark-reviewed-btn');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+
+  const type = v.status === 'done' ? 'round2_reviewed' : 'round1_reviewed';
+  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type, videoId: currentVideoId, videoTitle: v.title },
+  });
+
+  if (error) {
+    showToast('Could not send review notification', 'error');
+    btn.disabled = false;
+    updateReviewedBtnState(v);
+    return;
+  }
+
+  v.review_round = type === 'round2_reviewed' ? 2 : 1;
+  v.reviewed_at = new Date().toISOString();
+  showToast(
+    type === 'round2_reviewed' ? 'Final approval sent!' : 'Review submitted — admins notified',
+    'success'
+  );
+  btn.disabled = false;
+  updateReviewedBtnState(v);
+}
+
+function updateReviewedBtnState(v) {
+  const btn = document.getElementById('mark-reviewed-btn');
+  const statusEl = document.getElementById('reviewer-status');
+  if (!btn || !v) return;
+  const reviewedDate = v.reviewed_at ? new Date(v.reviewed_at).toLocaleDateString() : '';
+  const checkSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+
+  if (v.status === 'done' && v.review_round >= 2) {
+    btn.innerHTML = `${checkSvg} Final Approval Sent`;
+    statusEl.textContent = `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`;
+  } else if (v.status === 'done') {
+    btn.innerHTML = `${checkSvg} Give Final Approval`;
+    statusEl.textContent = 'Video has been revised — click to give final approval';
+  } else if (v.review_round >= 1) {
+    btn.innerHTML = `${checkSvg} Reviewed (Round 1)`;
+    statusEl.textContent = `Reviewed${reviewedDate ? ' on ' + reviewedDate : ''} — waiting for revisions`;
+  } else {
+    btn.innerHTML = `${checkSvg} Mark as Reviewed`;
+    statusEl.textContent = '';
+  }
+}
+
+function notifyOnStatusDone(videoId, videoTitle) {
+  sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'video_ready', videoId, videoTitle },
+  }).catch(err => console.warn('[notify video_ready]', err));
+}
+
+function timeAgo(isoString) {
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+// ══════════════════════════════════════════════════════
 // BOOT — check existing session
 // ══════════════════════════════════════════════════════
 (async () => {
@@ -1076,10 +1256,22 @@ function showToast(msg, type = 'success') {
     if (e.key === 'Escape') {
       closeVideoModal();
       document.getElementById('admin-modal').classList.remove('open');
+      document.getElementById('notif-panel')?.classList.add('hidden');
+      notifPanelOpen = false;
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
       document.getElementById('search-input').focus();
+    }
+  });
+
+  // Close notification panel on outside click
+  document.addEventListener('click', e => {
+    if (!notifPanelOpen) return;
+    const wrap = document.getElementById('notif-wrap');
+    if (wrap && !wrap.contains(e.target)) {
+      document.getElementById('notif-panel').classList.add('hidden');
+      notifPanelOpen = false;
     }
   });
 })();
