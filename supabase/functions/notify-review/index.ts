@@ -8,12 +8,12 @@ const corsHeaders = {
 
 const SUPABASE_URL             = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const RESEND_API_KEY            = Deno.env.get("RESEND_API_KEY");
-const FROM_EMAIL                = Deno.env.get("NOTIFY_FROM_EMAIL") ||
-  "Training Library <no-reply@lochmonsterplumbing.com>";
+const TWILIO_ACCOUNT_SID       = Deno.env.get("TWILIO_ACCOUNT_SID");
+const TWILIO_AUTH_TOKEN        = Deno.env.get("TWILIO_AUTH_TOKEN");
+const TWILIO_FROM_NUMBER       = Deno.env.get("TWILIO_FROM_NUMBER");
 
 type NotifyBody = {
-  type: "round1_reviewed" | "round2_reviewed" | "video_ready";
+  type: "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
   videoId: string;
   videoTitle: string;
 };
@@ -56,13 +56,12 @@ Deno.serve(async (req) => {
       return json(400, { error: "type, videoId, and videoTitle are required" });
     }
 
-    // Find recipients
-    let recipientsQuery = supabase.from("profiles").select("id");
+    // Find recipients (include phone_number for SMS)
+    let recipientsQuery = supabase.from("profiles").select("id, phone_number");
     if (type === "video_ready") {
-      // Notify the reviewer(s)
       recipientsQuery = recipientsQuery.eq("is_reviewer", true);
     } else {
-      // Notify all admins except the person who clicked Reviewed
+      // round1_reviewed, round2_reviewed, more_changes_requested all notify other admins
       recipientsQuery = recipientsQuery.eq("role", "admin").neq("id", caller.id);
     }
     const { data: recipients } = await recipientsQuery;
@@ -71,14 +70,17 @@ Deno.serve(async (req) => {
     // Build notification copy
     const callerName = callerProfile.full_name || "Reviewer";
     const notifTitle =
-      type === "round1_reviewed" ? `${callerName} reviewed: ${videoTitle}` :
-      type === "round2_reviewed" ? `${callerName} approved: ${videoTitle} — ready to publish` :
-                                   `Video ready for review: ${videoTitle}`;
+      type === "round1_reviewed"        ? `${callerName} reviewed: ${videoTitle}` :
+      type === "round2_reviewed"        ? `${callerName} approved: ${videoTitle} — ready to publish` :
+      type === "more_changes_requested" ? `${callerName} requested more changes: ${videoTitle}` :
+                                          `Video ready for review: ${videoTitle}`;
     const notifMessage =
       type === "round1_reviewed"
         ? `${callerName} has reviewed "${videoTitle}" and left audio feedback. Please revise and mark as Done.`
         : type === "round2_reviewed"
         ? `${callerName} has given final approval for "${videoTitle}". You can now publish it.`
+        : type === "more_changes_requested"
+        ? `${callerName} reviewed "${videoTitle}" and needs more changes. Please revise and mark as Done again.`
         : `"${videoTitle}" has been revised and is ready for your final review.`;
 
     // Insert in-app notifications
@@ -92,35 +94,44 @@ Deno.serve(async (req) => {
       }))
     );
 
-    // Update review round on the video (reviewer actions only)
+    // Update video based on action type
     if (type === "round1_reviewed" || type === "round2_reviewed") {
       await supabase.from("videos").update({
         review_round: type === "round2_reviewed" ? 2 : 1,
         reviewed_at:  new Date().toISOString(),
         reviewed_by:  caller.id,
       }).eq("id", videoId);
+    } else if (type === "more_changes_requested") {
+      // Reset back to draft so the editor can revise again
+      await supabase.from("videos").update({
+        status:      "draft",
+        review_round: 1,
+      }).eq("id", videoId);
     }
 
-    // Send emails via Resend — skipped gracefully if key not configured
-    if (RESEND_API_KEY) {
+    // Send SMS via Twilio — skipped gracefully if secrets not configured
+    if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
+      const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+      const credentials = btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`);
+      const smsBody = `LMP Training Library: ${notifTitle}`;
+
       await Promise.allSettled(
-        recipients.map(async (r) => {
-          const { data: { user } } = await supabase.auth.admin.getUserById(r.id);
-          if (!user?.email) return;
-          await fetch("https://api.resend.com/emails", {
-            method: "POST",
-            headers: {
-              "Authorization": `Bearer ${RESEND_API_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              from: FROM_EMAIL,
-              to:   user.email,
-              subject: notifTitle,
-              text: notifMessage + "\n\nLog in to the Training Library to view this video.",
-            }),
-          });
-        })
+        recipients
+          .filter((r) => r.phone_number)
+          .map((r) =>
+            fetch(twilioUrl, {
+              method: "POST",
+              headers: {
+                "Authorization": `Basic ${credentials}`,
+                "Content-Type": "application/x-www-form-urlencoded",
+              },
+              body: new URLSearchParams({
+                From: TWILIO_FROM_NUMBER,
+                To:   r.phone_number!,
+                Body: smsBody,
+              }).toString(),
+            })
+          )
       );
     }
 

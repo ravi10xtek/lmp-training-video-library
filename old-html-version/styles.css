@@ -1219,6 +1219,39 @@ html, body {
 }
 
 /* ── REVIEWER SECTION ── */
+.reviewer-buttons {
+  display: flex;
+  gap: 10px;
+}
+.reviewer-buttons .btn-reviewer {
+  flex: 1;
+}
+.btn-more-changes {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.12), rgba(253, 160, 133, 0.12));
+  border: 1px solid rgba(246, 211, 101, 0.3);
+  border-radius: 10px;
+  color: var(--amber);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-more-changes:hover {
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.22), rgba(253, 160, 133, 0.22));
+  border-color: rgba(246, 211, 101, 0.55);
+  box-shadow: 0 0 24px rgba(246, 211, 101, 0.18);
+}
+.btn-more-changes:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .reviewer-section {
   margin-top: 20px;
   padding-top: 20px;

@@ -1200,24 +1200,66 @@ async function markReviewed() {
 
 function updateReviewedBtnState(v) {
   const btn = document.getElementById('mark-reviewed-btn');
+  const moreBtn = document.getElementById('more-changes-btn');
   const statusEl = document.getElementById('reviewer-status');
   if (!btn || !v) return;
   const reviewedDate = v.reviewed_at ? new Date(v.reviewed_at).toLocaleDateString() : '';
   const checkSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  const editSvg  = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+
+  // Show "More Changes" button only when awaiting final approval (status=done, not yet approved)
+  const awaitingFinalApproval = v.status === 'done' && v.review_round < 2;
+  moreBtn?.classList.toggle('hidden', !awaitingFinalApproval);
 
   if (v.status === 'done' && v.review_round >= 2) {
     btn.innerHTML = `${checkSvg} Final Approval Sent`;
+    btn.disabled = true;
     statusEl.textContent = `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`;
   } else if (v.status === 'done') {
     btn.innerHTML = `${checkSvg} Give Final Approval`;
-    statusEl.textContent = 'Video has been revised — click to give final approval';
+    btn.disabled = false;
+    statusEl.textContent = 'Video has been revised — approve or request more changes';
   } else if (v.review_round >= 1) {
     btn.innerHTML = `${checkSvg} Reviewed (Round 1)`;
+    btn.disabled = false;
     statusEl.textContent = `Reviewed${reviewedDate ? ' on ' + reviewedDate : ''} — waiting for revisions`;
   } else {
     btn.innerHTML = `${checkSvg} Mark as Reviewed`;
+    btn.disabled = false;
     statusEl.textContent = '';
   }
+}
+
+async function requestMoreChanges() {
+  const isAdmin = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
+  if (!currentVideoId || (!isAdmin && !isReviewer)) return;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v || v.status !== 'done') return;
+
+  const moreBtn = document.getElementById('more-changes-btn');
+  const reviewedBtn = document.getElementById('mark-reviewed-btn');
+  moreBtn.disabled = true;
+  reviewedBtn.disabled = true;
+  moreBtn.textContent = 'Sending…';
+
+  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'more_changes_requested', videoId: currentVideoId, videoTitle: v.title },
+  });
+
+  if (error) {
+    showToast('Could not send notification', 'error');
+    moreBtn.disabled = false;
+    reviewedBtn.disabled = false;
+    updateReviewedBtnState(v);
+    return;
+  }
+
+  // Edge function resets status to draft server-side — reflect locally
+  v.status = 'draft';
+  v.review_round = 1;
+  showToast('More changes requested — editors notified', 'success');
+  updateReviewedBtnState(v);
 }
 
 function notifyOnStatusDone(videoId, videoTitle) {
