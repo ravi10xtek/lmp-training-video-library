@@ -1218,6 +1218,67 @@ html, body {
   font-size: 13px;
 }
 
+/* ── WORKFLOW SECTIONS (reviewer + editor) ── */
+.workflow-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.workflow-section-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 12px;
+}
+.btn-mark-done {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, rgba(79, 172, 254, 0.12), rgba(24, 95, 165, 0.12));
+  border: 1px solid rgba(79, 172, 254, 0.3);
+  border-radius: 10px;
+  color: var(--teal-l);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-mark-done:hover {
+  background: linear-gradient(135deg, rgba(79, 172, 254, 0.22), rgba(24, 95, 165, 0.22));
+  border-color: rgba(79, 172, 254, 0.55);
+  box-shadow: 0 0 24px rgba(79, 172, 254, 0.18);
+}
+.btn-mark-done:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-publish {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, rgba(0, 242, 254, 0.15), rgba(0, 200, 180, 0.15));
+  border: 1px solid rgba(0, 242, 254, 0.4);
+  border-radius: 10px;
+  color: var(--teal);
+  font-size: 14px;
+  font-weight: 700;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-publish:hover {
+  background: linear-gradient(135deg, rgba(0, 242, 254, 0.25), rgba(0, 200, 180, 0.25));
+  border-color: rgba(0, 242, 254, 0.6);
+  box-shadow: 0 0 28px rgba(0, 242, 254, 0.25);
+}
+.btn-publish:disabled { opacity: 0.45; cursor: not-allowed; }
+
 /* ── REVIEWER SECTION ── */
 .reviewer-buttons {
   display: flex;

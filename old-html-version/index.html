@@ -174,7 +174,9 @@
         <div class="feedback-list" id="feedback-list"></div>
       </div>
 
-      <div class="reviewer-section hidden" id="reviewer-section">
+      <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
+      <div class="workflow-section hidden" id="reviewer-section">
+        <div class="workflow-section-label">Review decision</div>
         <div class="reviewer-buttons">
           <button class="btn-reviewer" id="mark-reviewed-btn" onclick="markReviewed()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
@@ -186,6 +188,20 @@
           </button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
+      </div>
+
+      <!-- EDITOR ACTIONS (other admins) -->
+      <div class="workflow-section hidden" id="editor-section">
+        <div class="workflow-section-label">Video status</div>
+        <button class="btn-mark-done hidden" id="mark-done-btn" onclick="markAsDone()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+          Mark as Done
+        </button>
+        <button class="btn-publish hidden" id="publish-btn" onclick="publishVideo()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg>
+          Publish Video
+        </button>
+        <div class="reviewer-status" id="editor-status"></div>
       </div>
     </div>
   </div>

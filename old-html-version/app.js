@@ -440,12 +440,22 @@ async function openVideo(id) {
   } else {
     feedbackSection.classList.add('hidden');
   }
+  // Reviewer section — Joe only
   const reviewerSection = document.getElementById('reviewer-section');
-  if (isAdmin || isReviewer) {
+  if (isReviewer) {
     reviewerSection.classList.remove('hidden');
     updateReviewedBtnState(v);
   } else {
     reviewerSection.classList.add('hidden');
+  }
+
+  // Editor section — other admins (not the reviewer)
+  const editorSection = document.getElementById('editor-section');
+  if (isAdmin && !isReviewer) {
+    editorSection.classList.remove('hidden');
+    updateEditorBtnState(v);
+  } else {
+    editorSection.classList.add('hidden');
   }
 
   // Track watch
@@ -1166,9 +1176,8 @@ function notifClick(videoId) {
 // REVIEWER — mark as reviewed & notify
 // ══════════════════════════════════════════════════════
 async function markReviewed() {
-  const isAdmin = currentProfile?.role === 'admin';
   const isReviewer = currentProfile?.is_reviewer === true;
-  if (!currentVideoId || (!isAdmin && !isReviewer)) return;
+  if (!currentVideoId || !isReviewer) return;
   const v = allVideos.find(x => x.id === currentVideoId);
   if (!v) return;
 
@@ -1214,15 +1223,18 @@ function updateReviewedBtnState(v) {
   if (v.status === 'done' && v.review_round >= 2) {
     btn.innerHTML = `${checkSvg} Final Approval Sent`;
     btn.disabled = true;
+    moreBtn?.classList.add('hidden');
     statusEl.textContent = `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`;
   } else if (v.status === 'done') {
     btn.innerHTML = `${checkSvg} Give Final Approval`;
     btn.disabled = false;
-    statusEl.textContent = 'Video has been revised — approve or request more changes';
-  } else if (v.review_round >= 1) {
-    btn.innerHTML = `${checkSvg} Reviewed (Round 1)`;
-    btn.disabled = false;
-    statusEl.textContent = `Reviewed${reviewedDate ? ' on ' + reviewedDate : ''} — waiting for revisions`;
+    statusEl.textContent = 'Revised and ready — approve or request more changes';
+  } else if (v.status === 'draft' && v.review_round >= 1) {
+    // Joe sent more changes, now waiting for the editor to revise
+    btn.innerHTML = `⏳ Waiting for revisions`;
+    btn.disabled = true;
+    moreBtn?.classList.add('hidden');
+    statusEl.textContent = 'You requested more changes — editor has been notified';
   } else {
     btn.innerHTML = `${checkSvg} Mark as Reviewed`;
     btn.disabled = false;
@@ -1260,6 +1272,90 @@ async function requestMoreChanges() {
   v.review_round = 1;
   showToast('More changes requested — editors notified', 'success');
   updateReviewedBtnState(v);
+}
+
+// ── EDITOR ACTIONS ───────────────────────────────────
+function updateEditorBtnState(v) {
+  const markDoneBtn = document.getElementById('mark-done-btn');
+  const publishBtn  = document.getElementById('publish-btn');
+  const statusEl    = document.getElementById('editor-status');
+  if (!markDoneBtn || !v) return;
+
+  // "Mark as Done" — only after Joe has reviewed at least once
+  const showMarkDone = v.status === 'draft' && v.review_round >= 1;
+  // "Publish" — only after Joe gave final approval
+  const showPublish  = v.status === 'done' && v.review_round >= 2;
+
+  markDoneBtn.classList.toggle('hidden', !showMarkDone);
+  publishBtn.classList.toggle('hidden', !showPublish);
+
+  if (showMarkDone) {
+    statusEl.textContent = 'Joe requested changes — click when revisions are ready';
+  } else if (showPublish) {
+    statusEl.textContent = 'Joe gave final approval — ready to publish';
+  } else if (v.status === 'draft' && v.review_round === 0) {
+    statusEl.textContent = 'Waiting for Joe\'s first review';
+  } else if (v.status === 'done' && v.review_round < 2) {
+    statusEl.textContent = 'Waiting for Joe\'s final approval';
+  } else if (v.status === 'published') {
+    statusEl.textContent = 'Published ✓';
+  } else {
+    statusEl.textContent = '';
+  }
+}
+
+async function markAsDone() {
+  if (!currentVideoId) return;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v || v.status !== 'draft') return;
+
+  const btn = document.getElementById('mark-done-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+
+  const { error } = await sb.from('videos').update({ status: 'done' }).eq('id', currentVideoId);
+  if (error) {
+    showToast('Could not update status: ' + error.message, 'error');
+    btn.disabled = false;
+    updateEditorBtnState(v);
+    return;
+  }
+
+  // Notify reviewer
+  sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
+  }).catch(err => console.warn('[markAsDone notify]', err));
+
+  v.status = 'done';
+  showToast('Marked as done — Joe has been notified', 'success');
+  btn.disabled = false;
+  updateEditorBtnState(v);
+}
+
+async function publishVideo() {
+  if (!currentVideoId) return;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v) return;
+
+  if (!confirm(`Publish "${v.title}"? It will become visible to all workers.`)) return;
+
+  const btn = document.getElementById('publish-btn');
+  btn.disabled = true;
+  btn.textContent = 'Publishing…';
+
+  const { error } = await sb.from('videos').update({ status: 'published' }).eq('id', currentVideoId);
+  if (error) {
+    showToast('Could not publish: ' + error.message, 'error');
+    btn.disabled = false;
+    return;
+  }
+
+  v.status = 'published';
+  showToast(`"${v.title}" is now live!`, 'success');
+  btn.disabled = false;
+  updateEditorBtnState(v);
+  closeVideoModal();
+  await loadVideos();
 }
 
 function notifyOnStatusDone(videoId, videoTitle) {
