@@ -1118,8 +1118,31 @@ function subscribeToNotifications() {
       allNotifications.unshift(payload.new);
       renderNotificationBell();
       showToast(payload.new.title, 'success');
+      // If the modal is open for this video, refresh button state immediately
+      if (currentVideoId && payload.new.video_id === currentVideoId) {
+        refreshCurrentVideo();
+      }
     })
     .subscribe();
+}
+
+async function refreshCurrentVideo() {
+  if (!currentVideoId) return;
+  const { data: video } = await sb.from('videos')
+    .select('*, categories(name, slug, color), subcategories(name, slug)')
+    .eq('id', currentVideoId)
+    .single();
+  if (!video) return;
+
+  // Update local allVideos array
+  const idx = allVideos.findIndex(v => v.id === currentVideoId);
+  if (idx !== -1) allVideos[idx] = video;
+
+  // Refresh whichever button section is visible
+  const isReviewer = currentProfile?.is_reviewer === true;
+  const isAdmin    = currentProfile?.role === 'admin';
+  if (isReviewer) updateReviewedBtnState(video);
+  if (isAdmin && !isReviewer) updateEditorBtnState(video);
 }
 
 function renderNotificationBell() {
