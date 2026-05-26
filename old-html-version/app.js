@@ -1118,6 +1118,7 @@ async function loadNotifications() {
 }
 
 function subscribeToNotifications() {
+  // ── Bell notifications ──────────────────────────────────────────────
   notifSubscription = sb.channel(`notifs-${currentUser.id}`)
     .on('postgres_changes', {
       event: 'INSERT',
@@ -1128,26 +1129,31 @@ function subscribeToNotifications() {
       allNotifications.unshift(payload.new);
       renderNotificationBell();
       showToast(payload.new.title, 'success');
-      // Always refresh the allVideos cache for this video so stale data
-      // never reaches openVideo() when the card is clicked later.
-      // Also update the open modal's buttons if it's showing this video.
-      const vid = payload.new.video_id;
-      if (vid) {
-        sb.from('videos')
-          .select('*, categories(name, slug, color), subcategories(name, slug)')
-          .eq('id', vid).single()
-          .then(({ data: fresh }) => {
-            if (!fresh) return;
-            const idx = allVideos.findIndex(v => v.id === fresh.id);
-            if (idx !== -1) allVideos[idx] = fresh;
-            // If this video is currently open in the modal, refresh buttons now
-            if (currentVideoId === fresh.id) {
-              const isReviewer = currentProfile?.is_reviewer === true;
-              const isAdmin    = currentProfile?.role === 'admin';
-              if (isReviewer) updateReviewedBtnState(fresh);
-              if (isAdmin && !isReviewer) updateEditorBtnState(fresh);
-            }
-          });
+    })
+    .subscribe();
+
+  // ── Video status changes (real-time modal refresh) ──────────────────
+  // Fires whenever any video row is updated in the DB — covers status
+  // changes from the edge function (more_changes_requested, reviewed, etc.)
+  // Requires: ALTER PUBLICATION supabase_realtime ADD TABLE videos;
+  sb.channel('video-status-changes')
+    .on('postgres_changes', {
+      event: 'UPDATE',
+      schema: 'public',
+      table: 'videos',
+    }, payload => {
+      const updated = payload.new;
+      // Merge into allVideos cache (keep existing joined category data)
+      const idx = allVideos.findIndex(v => v.id === updated.id);
+      if (idx !== -1) {
+        allVideos[idx] = { ...allVideos[idx], ...updated };
+        // If this video is open in the modal, refresh the workflow buttons now
+        if (currentVideoId === updated.id) {
+          const isReviewer = currentProfile?.is_reviewer === true;
+          const isAdmin    = currentProfile?.role === 'admin';
+          if (isReviewer) updateReviewedBtnState(allVideos[idx]);
+          if (isAdmin && !isReviewer) updateEditorBtnState(allVideos[idx]);
+        }
       }
     })
     .subscribe();
