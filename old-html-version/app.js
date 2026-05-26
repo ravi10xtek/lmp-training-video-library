@@ -1425,6 +1425,51 @@ function timeAgo(isoString) {
 }
 
 // ══════════════════════════════════════════════════════
+// MOBILE SIDEBAR
+// ══════════════════════════════════════════════════════
+function toggleSidebar() {
+  const sidebar  = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  const isOpen   = sidebar.classList.contains('open');
+  if (isOpen) {
+    closeSidebar();
+  } else {
+    sidebar.classList.add('open');
+    backdrop.classList.add('visible');
+    document.body.style.overflow = 'hidden'; // prevent background scroll
+  }
+}
+
+function closeSidebar() {
+  const sidebar  = document.getElementById('sidebar');
+  const backdrop = document.getElementById('sidebar-backdrop');
+  sidebar.classList.remove('open');
+  backdrop.classList.remove('visible');
+  document.body.style.overflow = '';
+}
+
+// Auto-close sidebar when a nav item is tapped on mobile
+document.addEventListener('click', e => {
+  if (window.innerWidth > 768) return;
+  const item = e.target.closest('.sidebar-item');
+  if (item) closeSidebar();
+});
+
+// ── Sync mobile search input with desktop search state ──
+document.addEventListener('DOMContentLoaded', () => {
+  const mobileInput = document.getElementById('search-input-mobile');
+  const desktopInput = document.getElementById('search-input');
+  if (mobileInput && desktopInput) {
+    mobileInput.addEventListener('input', () => {
+      desktopInput.value = mobileInput.value;
+    });
+    desktopInput.addEventListener('input', () => {
+      mobileInput.value = desktopInput.value;
+    });
+  }
+});
+
+// ══════════════════════════════════════════════════════
 // BOOT — check existing session
 // ══════════════════════════════════════════════════════
 (async () => {
@@ -1448,10 +1493,14 @@ function timeAgo(isoString) {
       document.getElementById('admin-modal').classList.remove('open');
       document.getElementById('notif-panel')?.classList.add('hidden');
       notifPanelOpen = false;
+      closeSidebar();
     }
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
       e.preventDefault();
-      document.getElementById('search-input').focus();
+      const si = window.innerWidth <= 768
+        ? document.getElementById('search-input-mobile')
+        : document.getElementById('search-input');
+      si?.focus();
     }
   });
 

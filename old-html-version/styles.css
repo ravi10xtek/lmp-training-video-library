@@ -1376,12 +1376,237 @@ html, body {
   min-height: 16px;
 }
 
-/* ── RESPONSIVE ── */
+/* ══════════════════════════════════════
+   HAMBURGER BUTTON (hidden on desktop)
+══════════════════════════════════════ */
+.hamburger {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--white);
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 8px;
+  flex-shrink: 0;
+  transition: background .2s;
+}
+.hamburger:hover { background: rgba(255,255,255,0.08); }
+
+/* ══════════════════════════════════════
+   TOPBAR TWO-ROW STRUCTURE
+══════════════════════════════════════ */
+.topbar-row1 {
+  display: contents; /* On desktop: all items flow directly in .topbar flexbox */
+}
+.topbar-row2 { display: none; } /* Hidden on desktop */
+
+/* Mobile search duplicate hidden on desktop */
+.topbar-search-mobile { display: none; }
+
+/* ══════════════════════════════════════
+   SIDEBAR BACKDROP (mobile overlay)
+══════════════════════════════════════ */
+.sidebar-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  z-index: 199;
+}
+.sidebar-backdrop.visible { display: block; }
+
+/* Sidebar close button (mobile only) */
+.sidebar-close {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 8px;
+  transition: color .2s;
+  margin-left: auto;
+  margin-right: 12px;
+  margin-top: -4px;
+  margin-bottom: 8px;
+}
+.sidebar-close:hover { color: var(--white); }
+
+/* Sidebar sign-out (mobile only) */
+.sidebar-signout-wrap {
+  display: none;
+  padding: 16px 24px 8px;
+  border-top: var(--glass-border);
+  margin-top: 8px;
+}
+.sidebar-signout-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  font-family: var(--font-body);
+  cursor: pointer;
+  padding: 8px 0;
+  transition: color .2s;
+}
+.sidebar-signout-btn:hover { color: var(--white); }
+
+/* ══════════════════════════════════════
+   RESPONSIVE — TABLET  (≤ 960px)
+══════════════════════════════════════ */
+@media (max-width: 960px) {
+  .topbar-username { display: none; }
+  .topbar-badge    { display: none; }
+  .topbar-signout  { display: none; }
+  .topbar-search   { max-width: 340px; }
+}
+
+/* ══════════════════════════════════════
+   RESPONSIVE — MOBILE  (≤ 768px)
+══════════════════════════════════════ */
 @media (max-width: 768px) {
-  .sidebar { display: none; }
-  .stats-bar { grid-template-columns: 1fr 1fr; }
+
+  /* — TOPBAR — */
+  .topbar {
+    height: auto;
+    padding: 0;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .topbar-row1 {
+    display: flex;         /* Become a real flex row on mobile */
+    align-items: center;
+    width: 100%;
+    padding: 0 12px;
+    height: 56px;
+    gap: 8px;
+  }
+
+  .topbar-row2 {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0 12px 10px;
+  }
+
+  /* Show hamburger, hide desktop search */
+  .hamburger { display: flex; }
+  .topbar-search-desktop { display: none; }
+  .topbar-search-mobile  { display: block; flex: 1; }
+
+  /* Compress logo on mobile */
+  .topbar-logo { gap: 8px; }
+  .topbar-logo-mark { width: 32px; height: 32px; font-size: 13px; border-radius: 8px; }
+  .topbar-logo-text { font-size: 15px; }
+
+  /* Right side: keep notif bell + avatar only */
+  .topbar-right  { gap: 12px; margin-left: auto; }
+  .topbar-username { display: none; }
+  .topbar-badge    { display: none; }
+  .topbar-signout  { display: none; }
+
+  /* — SIDEBAR — */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 100%;
+    width: 280px;
+    z-index: 200;
+    transform: translateX(-100%);
+    transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+    padding-top: 16px;
+    border-right: var(--glass-border);
+  }
+  .sidebar.open { transform: translateX(0); }
+
+  .sidebar-close { display: flex; }
+  .sidebar-signout-wrap { display: block; }
+
+  /* — MAIN CONTENT — */
+  .main { padding: 20px 16px; }
+  .app-body { overflow: visible; }
+
+  /* — VIDEO GRID — */
+  .video-grid { grid-template-columns: 1fr; gap: 12px; }
+
+  /* — STATS BAR — */
+  .stats-bar { grid-template-columns: 1fr 1fr; gap: 12px; }
+
+  /* — FORMS — */
   .form-row { grid-template-columns: 1fr; }
-  .video-grid { grid-template-columns: 1fr; }
-  .main { padding: 24px; }
-  .topbar { padding: 0 20px; }
+
+  /* — VIDEO MODAL — bottom sheet on mobile */
+  .modal-overlay {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .modal {
+    max-width: 100%;
+    max-height: 95dvh;
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    transform: translateY(40px);
+  }
+
+  .modal-overlay.open .modal {
+    transform: translateY(0);
+  }
+
+  /* — ADMIN / EDIT MODAL — */
+  #admin-modal .modal {
+    max-height: 92dvh;
+    overflow-y: auto;
+  }
+
+  /* — NOTIFICATION PANEL — */
+  .notif-panel {
+    position: fixed;
+    top: 108px;   /* below 2-row topbar (~56px + ~44px + buffer) */
+    left: 8px;
+    right: 8px;
+    width: auto;
+    max-height: 60dvh;
+    border-radius: 14px;
+  }
+
+  /* — PAGE HEADER — */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .page-header .btn { width: 100%; justify-content: center; }
+
+  /* — REVIEWER BUTTONS — */
+  .reviewer-buttons { flex-direction: column; }
+  .btn-reviewer, .btn-more-changes { width: 100%; justify-content: center; }
+
+  /* — ADMIN BTN ROW — */
+  .admin-btn-row {
+    flex-wrap: wrap;
+  }
+  .admin-btn-row .btn { flex: 1 1 auto; min-width: 120px; }
+
+  /* — VIDEO WRAPPER — */
+  .video-wrapper { border-radius: 8px; }
+
+  /* — MODAL INFO padding — */
+  .modal-info { padding: 16px; }
+  .modal { padding: 0; }
+}
+
+/* ══════════════════════════════════════
+   RESPONSIVE — SMALL PHONE  (≤ 380px)
+══════════════════════════════════════ */
+@media (max-width: 380px) {
+  .topbar-logo-text { display: none; }
+  .stats-bar { grid-template-columns: 1fr; }
 }
