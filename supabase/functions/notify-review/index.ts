@@ -56,7 +56,24 @@ Deno.serve(async (req) => {
       return json(400, { error: "type, videoId, and videoTitle are required" });
     }
 
-    // Find recipients (include phone_number for SMS)
+    // ── Update video status FIRST (must happen regardless of recipients) ──
+    if (type === "round1_reviewed" || type === "round2_reviewed") {
+      const { error: vidErr } = await supabase.from("videos").update({
+        review_round: type === "round2_reviewed" ? 2 : 1,
+        reviewed_at:  new Date().toISOString(),
+        reviewed_by:  caller.id,
+      }).eq("id", videoId);
+      if (vidErr) console.error("[notify-review] video update error:", vidErr);
+    } else if (type === "more_changes_requested") {
+      // Reset back to draft so the editor can revise again
+      const { error: vidErr } = await supabase.from("videos").update({
+        status:       "draft",
+        review_round: 1,
+      }).eq("id", videoId);
+      if (vidErr) console.error("[notify-review] video status reset error:", vidErr);
+    }
+
+    // ── Find recipients for notifications ──
     let recipientsQuery = supabase.from("profiles").select("id, phone_number");
     if (type === "video_ready") {
       recipientsQuery = recipientsQuery.eq("is_reviewer", true);
@@ -93,21 +110,6 @@ Deno.serve(async (req) => {
         message:  notifMessage,
       }))
     );
-
-    // Update video based on action type
-    if (type === "round1_reviewed" || type === "round2_reviewed") {
-      await supabase.from("videos").update({
-        review_round: type === "round2_reviewed" ? 2 : 1,
-        reviewed_at:  new Date().toISOString(),
-        reviewed_by:  caller.id,
-      }).eq("id", videoId);
-    } else if (type === "more_changes_requested") {
-      // Reset back to draft so the editor can revise again
-      await supabase.from("videos").update({
-        status:      "draft",
-        review_round: 1,
-      }).eq("id", videoId);
-    }
 
     // Send SMS via Twilio — skipped gracefully if secrets not configured
     if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
