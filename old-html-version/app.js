@@ -1239,28 +1239,40 @@ async function markReviewed() {
 
   const btn = document.getElementById('mark-reviewed-btn');
   btn.disabled = true;
-  btn.textContent = 'Sending…';
+  btn.textContent = 'Saving…';
 
-  const type = v.status === 'done' ? 'round2_reviewed' : 'round1_reviewed';
-  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
-    body: { type, videoId: currentVideoId, videoTitle: v.title },
-  });
+  const type       = v.status === 'done' ? 'round2_reviewed' : 'round1_reviewed';
+  const newRound   = type === 'round2_reviewed' ? 2 : 1;
+  const reviewedAt = new Date().toISOString();
+
+  // 1. Write to DB directly — triggers Ravi's realtime subscription instantly
+  const { error } = await sb.from('videos').update({
+    review_round: newRound,
+    reviewed_at:  reviewedAt,
+    reviewed_by:  currentUser.id,
+  }).eq('id', currentVideoId);
 
   if (error) {
-    showToast('Could not send review notification', 'error');
+    showToast('Could not submit review: ' + error.message, 'error');
     btn.disabled = false;
     updateReviewedBtnState(v);
     return;
   }
 
-  v.review_round = type === 'round2_reviewed' ? 2 : 1;
-  v.reviewed_at = new Date().toISOString();
+  // 2. Update local state & UI immediately
+  v.review_round = newRound;
+  v.reviewed_at  = reviewedAt;
   showToast(
     type === 'round2_reviewed' ? 'Final approval sent!' : 'Review submitted — admins notified',
     'success'
   );
   btn.disabled = false;
   updateReviewedBtnState(v);
+
+  // 3. Fire edge function in background for bell notifications + SMS only
+  sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type, videoId: currentVideoId, videoTitle: v.title },
+  }).catch(err => console.warn('[markReviewed notify]', err));
 }
 
 function updateReviewedBtnState(v) {
@@ -1280,57 +1292,68 @@ function updateReviewedBtnState(v) {
     btn.innerHTML = `${checkSvg} Final Approval Sent`;
     btn.disabled = true;
     moreBtn?.classList.add('hidden');
-    statusEl.textContent = `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`;
+    setStatusText(statusEl, `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`);
   } else if (v.status === 'done') {
     btn.innerHTML = `${checkSvg} Give Final Approval`;
     btn.disabled = false;
-    statusEl.textContent = 'Revised and ready — approve or request more changes';
+    setStatusText(statusEl, 'Revised and ready — approve or request more changes');
   } else if (v.status === 'draft' && v.review_round >= 1) {
-    // Joe sent more changes, now waiting for the editor to revise
     btn.innerHTML = `⏳ Waiting for revisions`;
     btn.disabled = true;
     moreBtn?.classList.add('hidden');
-    statusEl.textContent = 'You requested more changes — editor has been notified';
+    setStatusText(statusEl, 'You requested more changes — editor has been notified');
   } else {
     btn.innerHTML = `${checkSvg} Mark as Reviewed`;
     btn.disabled = false;
-    statusEl.textContent = '';
+    setStatusText(statusEl, '');
   }
 }
 
 async function requestMoreChanges() {
-  const isAdmin = currentProfile?.role === 'admin';
   const isReviewer = currentProfile?.is_reviewer === true;
-  if (!currentVideoId || (!isAdmin && !isReviewer)) return;
+  if (!currentVideoId || !isReviewer) return;
   const v = allVideos.find(x => x.id === currentVideoId);
   if (!v || v.status !== 'done') return;
 
-  const moreBtn = document.getElementById('more-changes-btn');
+  const moreBtn    = document.getElementById('more-changes-btn');
   const reviewedBtn = document.getElementById('mark-reviewed-btn');
-  moreBtn.disabled = true;
+  moreBtn.disabled    = true;
   reviewedBtn.disabled = true;
-  moreBtn.textContent = 'Sending…';
+  moreBtn.textContent = 'Saving…';
 
-  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
-    body: { type: 'more_changes_requested', videoId: currentVideoId, videoTitle: v.title },
-  });
+  // 1. Write to DB directly — triggers Ravi's realtime subscription instantly
+  const { error } = await sb.from('videos').update({
+    status:       'draft',
+    review_round: 1,
+  }).eq('id', currentVideoId);
 
   if (error) {
-    showToast('Could not send notification', 'error');
-    moreBtn.disabled = false;
+    showToast('Could not request changes: ' + error.message, 'error');
+    moreBtn.disabled    = false;
     reviewedBtn.disabled = false;
     updateReviewedBtnState(v);
     return;
   }
 
-  // Edge function resets status to draft server-side — reflect locally
-  v.status = 'draft';
+  // 2. Update local state & UI immediately
+  v.status       = 'draft';
   v.review_round = 1;
   showToast('More changes requested — editors notified', 'success');
   updateReviewedBtnState(v);
+
+  // 3. Fire edge function in background for bell notifications + SMS only
+  sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'more_changes_requested', videoId: currentVideoId, videoTitle: v.title },
+  }).catch(err => console.warn('[requestMoreChanges notify]', err));
 }
 
 // ── EDITOR ACTIONS ───────────────────────────────────
+function setStatusText(el, text) {
+  if (!el || el.textContent === text) return;
+  el.style.opacity = '0';
+  setTimeout(() => { el.textContent = text; el.style.opacity = '1'; }, 150);
+}
+
 function updateEditorBtnState(v) {
   const submitBtn   = document.getElementById('submit-review-btn');
   const markDoneBtn = document.getElementById('mark-done-btn');
@@ -1346,19 +1369,13 @@ function updateEditorBtnState(v) {
   markDoneBtn.classList.toggle('hidden', !showMarkDone);
   publishBtn.classList.toggle('hidden', !showPublish);
 
-  if (showSubmit) {
-    statusEl.textContent = 'Upload done — submit when ready for Joe to review';
-  } else if (showMarkDone) {
-    statusEl.textContent = 'Joe requested changes — click when revisions are ready';
-  } else if (showPublish) {
-    statusEl.textContent = 'Joe gave final approval — ready to publish';
-  } else if (v.status === 'done' && v.review_round < 2) {
-    statusEl.textContent = 'Waiting for Joe\'s final approval';
-  } else if (v.status === 'published') {
-    statusEl.textContent = 'Published ✓';
-  } else {
-    statusEl.textContent = '';
-  }
+  const text =
+    showSubmit   ? 'Upload done — submit when ready for Joe to review' :
+    showMarkDone ? 'Joe requested changes — click when revisions are ready' :
+    showPublish  ? 'Joe gave final approval — ready to publish' :
+    v.status === 'done' && v.review_round < 2 ? 'Waiting for Joe\'s final approval' :
+    v.status === 'published' ? 'Published ✓' : '';
+  setStatusText(statusEl, text);
 }
 
 async function submitForReview() {
@@ -1370,21 +1387,16 @@ async function submitForReview() {
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
-  // Notify reviewer (Joe)
-  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
-    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
-  });
-
-  if (error) {
-    showToast('Could not send notification', 'error');
-    btn.disabled = false;
-    updateEditorBtnState(v);
-    return;
-  }
-
+  // 1. Touch the video row so Joe's realtime subscription picks it up
+  //    (no status change needed here — draft+round=0 is correct state)
+  //    Fire edge function in background for the bell notification
   showToast('Submitted for review — Joe has been notified', 'success');
   btn.disabled = false;
   updateEditorBtnState(v);
+
+  sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
+  }).catch(err => console.warn('[submitForReview notify]', err));
 }
 
 async function markAsDone() {

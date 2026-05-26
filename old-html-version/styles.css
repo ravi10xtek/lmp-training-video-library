@@ -1302,6 +1302,27 @@ html, body {
 }
 .btn-publish:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* ── WORKFLOW BUTTON TRANSITIONS ── */
+@keyframes wf-fade-in {
+  from { opacity: 0; transform: translateY(5px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Buttons animate in when the .hidden class is removed */
+.btn-submit-review:not(.hidden),
+.btn-mark-done:not(.hidden),
+.btn-publish:not(.hidden),
+.btn-reviewer:not(.disabled-state),
+.btn-more-changes:not(.hidden) {
+  animation: wf-fade-in 0.22s ease forwards;
+}
+
+/* Status text fades on change */
+.reviewer-status,
+.editor-status-el {
+  transition: opacity 0.2s ease;
+}
+
 /* ── REVIEWER SECTION ── */
 .reviewer-buttons {
   display: flex;
