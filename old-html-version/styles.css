@@ -1232,6 +1232,29 @@ html, body {
   color: var(--muted);
   margin-bottom: 12px;
 }
+.btn-submit-review {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.12), rgba(253, 160, 133, 0.12));
+  border: 1px solid rgba(246, 211, 101, 0.3);
+  border-radius: 10px;
+  color: var(--amber);
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-submit-review:hover {
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.22), rgba(253, 160, 133, 0.22));
+  border-color: rgba(246, 211, 101, 0.55);
+  box-shadow: 0 0 24px rgba(246, 211, 101, 0.18);
+}
+.btn-submit-review:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn-mark-done {
   display: flex;
   align-items: center;

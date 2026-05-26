@@ -1276,25 +1276,26 @@ async function requestMoreChanges() {
 
 // ── EDITOR ACTIONS ───────────────────────────────────
 function updateEditorBtnState(v) {
+  const submitBtn   = document.getElementById('submit-review-btn');
   const markDoneBtn = document.getElementById('mark-done-btn');
   const publishBtn  = document.getElementById('publish-btn');
   const statusEl    = document.getElementById('editor-status');
   if (!markDoneBtn || !v) return;
 
-  // "Mark as Done" — only after Joe has reviewed at least once
+  const showSubmit   = v.status === 'draft' && v.review_round === 0;
   const showMarkDone = v.status === 'draft' && v.review_round >= 1;
-  // "Publish" — only after Joe gave final approval
-  const showPublish  = v.status === 'done' && v.review_round >= 2;
+  const showPublish  = v.status === 'done'  && v.review_round >= 2;
 
+  submitBtn?.classList.toggle('hidden', !showSubmit);
   markDoneBtn.classList.toggle('hidden', !showMarkDone);
   publishBtn.classList.toggle('hidden', !showPublish);
 
-  if (showMarkDone) {
+  if (showSubmit) {
+    statusEl.textContent = 'Upload done — submit when ready for Joe to review';
+  } else if (showMarkDone) {
     statusEl.textContent = 'Joe requested changes — click when revisions are ready';
   } else if (showPublish) {
     statusEl.textContent = 'Joe gave final approval — ready to publish';
-  } else if (v.status === 'draft' && v.review_round === 0) {
-    statusEl.textContent = 'Waiting for Joe\'s first review';
   } else if (v.status === 'done' && v.review_round < 2) {
     statusEl.textContent = 'Waiting for Joe\'s final approval';
   } else if (v.status === 'published') {
@@ -1302,6 +1303,32 @@ function updateEditorBtnState(v) {
   } else {
     statusEl.textContent = '';
   }
+}
+
+async function submitForReview() {
+  if (!currentVideoId) return;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v || v.status !== 'draft' || v.review_round !== 0) return;
+
+  const btn = document.getElementById('submit-review-btn');
+  btn.disabled = true;
+  btn.textContent = 'Sending…';
+
+  // Notify reviewer (Joe)
+  const { error } = await sb.functions.invoke(NOTIFY_FUNCTION, {
+    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
+  });
+
+  if (error) {
+    showToast('Could not send notification', 'error');
+    btn.disabled = false;
+    updateEditorBtnState(v);
+    return;
+  }
+
+  showToast('Submitted for review — Joe has been notified', 'success');
+  btn.disabled = false;
+  updateEditorBtnState(v);
 }
 
 async function markAsDone() {
