@@ -1494,17 +1494,47 @@ html, body {
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 12px;
   color: var(--muted);
+  width: 100%;
+  text-align: center;
+  padding: 0 16px;
 }
-.capture-audio-display svg { opacity: 0.5; }
+.capture-audio-display svg { opacity: 0.5; flex-shrink: 0; }
 #capture-timer-display {
   font-size: 28px;
   font-weight: 700;
   font-family: var(--font-head);
   color: var(--white);
   letter-spacing: 2px;
+  display: block;
+  text-align: center;
+  width: 100%;
 }
+
+/* Flip camera button — overlaid on preview */
+.capture-flip-btn {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 10;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  color: #fff;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.2s;
+}
+.capture-flip-btn:hover  { background: rgba(0,0,0,0.75); }
+.capture-flip-btn:active { transform: rotate(180deg); }
 
 .capture-controls {
   display: flex;

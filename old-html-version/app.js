@@ -1520,12 +1520,13 @@ document.addEventListener('DOMContentLoaded', () => {
 // ══════════════════════════════════════════════════════
 // Recordings go to Wasabi (same bucket as videos) via wasabi-upload-init.
 // Playback uses wasabi-playback-url with the storageKey directly.
-let captureType     = 'audio';
-let captureStream   = null;
-let captureRecorder = null;
-let captureChunks   = [];
-let capturedBlob    = null;
-let captureDuration = 0;
+let captureType       = 'audio';
+let captureFacingMode = 'environment'; // 'environment'=back, 'user'=front
+let captureStream     = null;
+let captureRecorder   = null;
+let captureChunks     = [];
+let capturedBlob      = null;
+let captureDuration   = 0;
 let captureTimerInterval = null;
 let captureStartTime     = 0;
 let currentRecordingId   = null;  // for the viewer delete action
@@ -1537,8 +1538,20 @@ function openCaptureModal() {
   currentRecordingId = null;
   document.getElementById('capture-title').value = '';
   document.getElementById('capture-save-btn').disabled = true;
+  // Reset progress bar from any previous session
+  _resetCaptureProgress();
+  // Reset tabs to Audio
+  document.querySelectorAll('.capture-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('tab-audio').classList.add('active');
   document.getElementById('capture-modal').classList.add('open');
   _initCaptureUI('audio');
+}
+
+function _resetCaptureProgress() {
+  document.getElementById('capture-progress-wrap').classList.add('hidden');
+  document.getElementById('capture-progress-bar').style.width = '0%';
+  document.getElementById('capture-progress-pct').textContent = '0%';
+  document.getElementById('capture-progress-label').textContent = 'Uploading…';
 }
 
 function closeCaptureModal(e) {
@@ -1559,21 +1572,23 @@ async function setCaptureType(type, tabEl) {
   document.querySelectorAll('.capture-tab').forEach(t => t.classList.remove('active'));
   if (tabEl) tabEl.classList.add('active');
   document.getElementById('capture-save-btn').disabled = true;
+  _resetCaptureProgress();
   _initCaptureUI(type);
 }
 
 async function _initCaptureUI(type) {
-  const preview   = document.getElementById('capture-preview');
-  const photoImg  = document.getElementById('capture-photo-result');
-  const audioDisp = document.getElementById('capture-audio-display');
-  const startBtn  = document.getElementById('capture-start-btn');
-  const stopBtn   = document.getElementById('capture-stop-btn');
-  const retakeBtn = document.getElementById('capture-retake-btn');
+  const preview    = document.getElementById('capture-preview');
+  const photoImg   = document.getElementById('capture-photo-result');
+  const audioDisp  = document.getElementById('capture-audio-display');
+  const startBtn   = document.getElementById('capture-start-btn');
+  const stopBtn    = document.getElementById('capture-stop-btn');
+  const retakeBtn  = document.getElementById('capture-retake-btn');
   const startLabel = document.getElementById('capture-start-label');
+  const flipBtn    = document.getElementById('capture-flip-btn');
 
   // Reset
-  preview.style.display  = 'none';
-  photoImg.style.display = 'none';
+  preview.style.display   = 'none';
+  photoImg.style.display  = 'none';
   audioDisp.style.display = 'none';
   startBtn.classList.remove('hidden', 'recording');
   stopBtn.classList.add('hidden');
@@ -1582,24 +1597,58 @@ async function _initCaptureUI(type) {
 
   if (type === 'audio') {
     audioDisp.style.display = 'flex';
-    startLabel.textContent = 'Start Recording';
+    startLabel.textContent  = 'Start Recording';
+    flipBtn.classList.add('hidden');
   } else if (type === 'video') {
     startLabel.textContent = 'Start Recording';
+    flipBtn.classList.remove('hidden');
     await _startCameraPreview(true, true);
   } else {
     startLabel.textContent = 'Take Photo';
+    flipBtn.classList.remove('hidden');
     await _startCameraPreview(true, false);
   }
 }
 
 async function _startCameraPreview(video, audio) {
   try {
-    captureStream = await navigator.mediaDevices.getUserMedia({ video, audio });
+    const videoConstraints = video
+      ? { facingMode: { ideal: captureFacingMode } }
+      : false;
+    captureStream = await navigator.mediaDevices.getUserMedia({
+      video: videoConstraints,
+      audio,
+    });
     const preview = document.getElementById('capture-preview');
     preview.srcObject = captureStream;
     preview.style.display = 'block';
   } catch (err) {
     showToast('Camera/mic access denied: ' + err.message, 'error');
+  }
+}
+
+async function flipCamera() {
+  if (captureType === 'audio') return;
+  // Toggle facing mode
+  captureFacingMode = captureFacingMode === 'environment' ? 'user' : 'environment';
+  const wasRecording = captureRecorder && captureRecorder.state === 'recording';
+
+  _stopCaptureStream();
+  await _startCameraPreview(true, captureType === 'video');
+
+  // If we were recording, seamlessly restart the recorder on the new stream
+  if (wasRecording && captureStream) {
+    captureChunks = []; // discard pre-flip footage
+    const mimeType = 'video/webm;codecs=vp9,opus';
+    const options  = MediaRecorder.isTypeSupported(mimeType) ? { mimeType } : {};
+    captureRecorder = new MediaRecorder(captureStream, options);
+    captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
+    captureRecorder.onstop = () => {
+      capturedBlob = new Blob(captureChunks, { type: 'video/webm' });
+      captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
+      document.getElementById('capture-save-btn').disabled = false;
+    };
+    captureRecorder.start(200);
   }
 }
 
