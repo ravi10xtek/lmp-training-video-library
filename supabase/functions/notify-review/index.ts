@@ -13,7 +13,7 @@ const TWILIO_AUTH_TOKEN        = Deno.env.get("TWILIO_AUTH_TOKEN");
 const TWILIO_FROM_NUMBER       = Deno.env.get("TWILIO_FROM_NUMBER");
 
 type NotifyBody = {
-  type: "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
+  type: "video_uploaded" | "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
   videoId: string;
   videoTitle: string;
 };
@@ -75,7 +75,8 @@ Deno.serve(async (req) => {
 
     // ── Find recipients for notifications ──
     let recipientsQuery = supabase.from("profiles").select("id, phone_number");
-    if (type === "video_ready") {
+    if (type === "video_uploaded" || type === "video_ready") {
+      // Notify reviewers (Joe) when a new draft is uploaded or when Ravi marks done
       recipientsQuery = recipientsQuery.eq("is_reviewer", true);
     } else {
       // round1_reviewed, round2_reviewed, more_changes_requested all notify other admins
@@ -87,12 +88,15 @@ Deno.serve(async (req) => {
     // Build notification copy
     const callerName = callerProfile.full_name || "Reviewer";
     const notifTitle =
+      type === "video_uploaded"         ? `New video uploaded: ${videoTitle}` :
       type === "round1_reviewed"        ? `${callerName} reviewed: ${videoTitle}` :
       type === "round2_reviewed"        ? `${callerName} approved: ${videoTitle} — ready to publish` :
       type === "more_changes_requested" ? `${callerName} requested more changes: ${videoTitle}` :
                                           `Video ready for review: ${videoTitle}`;
     const notifMessage =
-      type === "round1_reviewed"
+      type === "video_uploaded"
+        ? `${callerName} uploaded a new video "${videoTitle}" — it's in drafts waiting for production.`
+        : type === "round1_reviewed"
         ? `${callerName} has reviewed "${videoTitle}" and left audio feedback. Please revise and mark as Done.`
         : type === "round2_reviewed"
         ? `${callerName} has given final approval for "${videoTitle}". You can now publish it.`

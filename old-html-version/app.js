@@ -1038,19 +1038,26 @@ async function saveVideo() {
 
   const prevStatus = editingVideoId ? allVideos.find(v => v.id === editingVideoId)?.status : null;
 
-  let error;
+  let error, insertedId;
   if (editingVideoId) {
     ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
   } else {
     payload.created_by = currentUser.id;
-    ({ error } = await sb.from('videos').insert(payload));
+    const { data: inserted, error: insertErr } = await sb.from('videos').insert(payload).select('id').single();
+    error = insertErr;
+    insertedId = inserted?.id;
   }
 
   if (error) {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast(editingVideoId ? 'Video updated' : 'Video slot created', 'success');
-    if (editingVideoId && payload.status === 'done' && prevStatus !== 'done') {
+    if (!editingVideoId && insertedId) {
+      // New draft uploaded — notify Joe (reviewer) so he knows it's in the queue
+      sb.functions.invoke(NOTIFY_FUNCTION, {
+        body: { type: 'video_uploaded', videoId: insertedId, videoTitle: payload.title },
+      }).catch(err => console.warn('[notify video_uploaded]', err));
+    } else if (editingVideoId && payload.status === 'done' && prevStatus !== 'done') {
       notifyOnStatusDone(editingVideoId, payload.title);
     }
     document.getElementById('admin-modal').classList.remove('open');
