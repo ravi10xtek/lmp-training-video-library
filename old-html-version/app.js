@@ -963,17 +963,8 @@ async function uploadToWasabiViaEdgeFunction(file, onProgress) {
   if (!currentUser?.id) throw new Error('You must be signed in to upload.');
   if (currentProfile?.role !== 'admin') throw new Error('Upload denied: admin account required.');
 
-  if (file.size > STAGING_MAX_BYTES) {
-    return uploadViaWasabiDirect(file, onProgress);
-  }
-
-  try {
-    return await uploadViaStaging(file, onProgress);
-  } catch (err) {
-    if (!isObjectSizeExceededError(err)) throw err;
-    onProgress?.(2, 'File too large for staging — using direct upload…');
-    return uploadViaWasabiDirect(file, onProgress);
-  }
+  // Always use direct presigned-URL upload — simpler, no staging bucket needed
+  return uploadViaWasabiDirect(file, onProgress);
 }
 
 async function saveVideo() {
