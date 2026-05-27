@@ -1583,6 +1583,118 @@ html, body {
   animation: rec-pulse 1.2s ease-in-out infinite;
 }
 
+/* ══════════════════════════════════════════════════════
+   CAPTURE MODAL — FULLSCREEN MODE (video + photo only)
+   Activated by adding .fullscreen-capture to #capture-modal
+══════════════════════════════════════════════════════ */
+
+#capture-modal.fullscreen-capture {
+  padding: 0;
+  align-items: stretch;
+}
+#capture-modal.fullscreen-capture .modal {
+  max-width: 100%;
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  background: #000;
+  overflow: hidden;
+  position: relative;
+}
+/* Close button — top-left pill */
+#capture-modal.fullscreen-capture .modal-close {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  z-index: 30;
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 17px;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#capture-modal.fullscreen-capture .modal-info {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  display: block;
+  overflow: visible;
+}
+/* Hide the "New Recording" heading — tabs are the nav */
+#capture-modal.fullscreen-capture .capture-modal-title {
+  display: none;
+}
+/* Tabs float centered at the top */
+#capture-modal.fullscreen-capture .capture-tabs {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-radius: 14px;
+  margin: 0;
+  padding: 4px;
+  white-space: nowrap;
+}
+#capture-modal.fullscreen-capture .capture-tab        { color: rgba(255,255,255,0.55); }
+#capture-modal.fullscreen-capture .capture-tab.active { color: #fff; background: rgba(255,255,255,0.18); }
+/* Preview fills the whole screen */
+#capture-modal.fullscreen-capture .capture-preview-wrap {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  aspect-ratio: unset;
+  border-radius: 0;
+  border: none;
+  margin: 0;
+}
+#capture-modal.fullscreen-capture #capture-preview   { object-fit: cover; }
+#capture-modal.fullscreen-capture #capture-photo-result { object-fit: contain; }
+/* Flip button moves higher so it clears the tabs */
+#capture-modal.fullscreen-capture .capture-flip-btn {
+  top: auto;
+  bottom: auto;
+  top: 72px;
+  right: 16px;
+  width: 46px;
+  height: 46px;
+}
+/* Bottom panel floats over the preview with gradient fade */
+#capture-modal.fullscreen-capture .capture-bottom-panel {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  padding: 60px 20px calc(20px + env(safe-area-inset-bottom));
+  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+  pointer-events: none; /* let taps pass through the gradient, not the panel itself */
+}
+/* Re-enable clicks on interactive children */
+#capture-modal.fullscreen-capture .capture-bottom-panel > * {
+  pointer-events: auto;
+}
+/* Style the title input for dark overlay */
+#capture-modal.fullscreen-capture .form-input {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.2);
+  color: #fff;
+}
+#capture-modal.fullscreen-capture .form-input::placeholder { color: rgba(255,255,255,0.38); }
+#capture-modal.fullscreen-capture .form-label              { color: rgba(255,255,255,0.65); }
+
 /* ══════════════════════════════════════
    JOE'S RECORDINGS PAGE
 ══════════════════════════════════════ */

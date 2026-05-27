@@ -1543,6 +1543,7 @@ function openCaptureModal() {
   // Reset tabs to Audio
   document.querySelectorAll('.capture-tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-audio').classList.add('active');
+  document.getElementById('capture-modal').classList.remove('fullscreen-capture');
   document.getElementById('capture-modal').classList.add('open');
   _initCaptureUI('audio');
 }
@@ -1559,7 +1560,7 @@ function closeCaptureModal(e) {
   _stopCaptureStream();
   if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
   clearInterval(captureTimerInterval);
-  document.getElementById('capture-modal').classList.remove('open');
+  document.getElementById('capture-modal').classList.remove('open', 'fullscreen-capture');
 }
 
 async function setCaptureType(type, tabEl) {
@@ -1573,6 +1574,8 @@ async function setCaptureType(type, tabEl) {
   if (tabEl) tabEl.classList.add('active');
   document.getElementById('capture-save-btn').disabled = true;
   _resetCaptureProgress();
+  // Fullscreen layout for camera modes; regular modal for audio
+  document.getElementById('capture-modal').classList.toggle('fullscreen-capture', type !== 'audio');
   _initCaptureUI(type);
 }
 

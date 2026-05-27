@@ -382,45 +382,48 @@
         </div>
       </div>
 
-      <!-- Record / capture controls -->
-      <div class="capture-controls">
-        <button class="capture-control-btn capture-control-start" id="capture-start-btn" onclick="startCapture()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
-          <span id="capture-start-label">Start Recording</span>
-        </button>
-        <button class="capture-control-btn capture-control-stop hidden" id="capture-stop-btn" onclick="stopCapture()">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
-          Stop
-        </button>
-        <button class="capture-control-btn capture-control-retake hidden" id="capture-retake-btn" onclick="retakeCapture()">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.41"/></svg>
-          Retake
-        </button>
-      </div>
-
-      <!-- Title -->
-      <div class="form-group" style="margin-top:16px">
-        <label class="form-label">Title <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
-        <input class="form-input" id="capture-title" placeholder="e.g. Greenbrier walkthrough note">
-      </div>
-
-      <!-- Upload progress -->
-      <div id="capture-progress-wrap" class="upload-progress-wrap hidden">
-        <div class="upload-progress-label-row">
-          <span id="capture-progress-label">Uploading…</span>
-          <span id="capture-progress-pct">0%</span>
+      <!-- Bottom panel: controls + title + progress + save (floats over preview in fullscreen mode) -->
+      <div class="capture-bottom-panel">
+        <!-- Record / capture controls -->
+        <div class="capture-controls">
+          <button class="capture-control-btn capture-control-start" id="capture-start-btn" onclick="startCapture()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+            <span id="capture-start-label">Start Recording</span>
+          </button>
+          <button class="capture-control-btn capture-control-stop hidden" id="capture-stop-btn" onclick="stopCapture()">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+            Stop
+          </button>
+          <button class="capture-control-btn capture-control-retake hidden" id="capture-retake-btn" onclick="retakeCapture()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.41"/></svg>
+            Retake
+          </button>
         </div>
-        <div class="upload-progress-track">
-          <div class="upload-progress-bar" id="capture-progress-bar"></div>
-        </div>
-      </div>
 
-      <div style="display:flex;gap:12px;margin-top:20px">
-        <button class="btn btn-ghost" onclick="closeCaptureModal()" style="flex:1">Cancel</button>
-        <button class="btn btn-primary" id="capture-save-btn" onclick="saveRecording()" disabled style="flex:2;margin-top:0">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13"/><polyline points="7 3 7 8 15 8"/></svg>
-          Save Recording
-        </button>
+        <!-- Title -->
+        <div class="form-group" style="margin-top:14px">
+          <label class="form-label">Title <span style="color:var(--muted);font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></label>
+          <input class="form-input" id="capture-title" placeholder="e.g. Greenbrier walkthrough note">
+        </div>
+
+        <!-- Upload progress -->
+        <div id="capture-progress-wrap" class="upload-progress-wrap hidden">
+          <div class="upload-progress-label-row">
+            <span id="capture-progress-label">Uploading…</span>
+            <span id="capture-progress-pct">0%</span>
+          </div>
+          <div class="upload-progress-track">
+            <div class="upload-progress-bar" id="capture-progress-bar"></div>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:12px;margin-top:14px">
+          <button class="btn btn-ghost" onclick="closeCaptureModal()" style="flex:1">Cancel</button>
+          <button class="btn btn-primary" id="capture-save-btn" onclick="saveRecording()" disabled style="flex:2;margin-top:0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13"/><polyline points="7 3 7 8 15 8"/></svg>
+            Save Recording
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -449,6 +452,6 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=20260527c"></script>
+<script src="app.js?v=20260527d"></script>
 </body>
 </html>
