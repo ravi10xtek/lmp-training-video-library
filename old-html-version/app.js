@@ -1518,7 +1518,8 @@ document.addEventListener('DOMContentLoaded', () => {
 // ══════════════════════════════════════════════════════
 // JOE'S RECORDINGS — CAPTURE
 // ══════════════════════════════════════════════════════
-const RECORDINGS_BUCKET = 'joe-recordings';
+// Recordings go to Wasabi (same bucket as videos) via wasabi-upload-init.
+// Playback uses wasabi-playback-url with the storageKey directly.
 let captureType     = 'audio';
 let captureStream   = null;
 let captureRecorder = null;
@@ -1693,36 +1694,35 @@ async function saveRecording() {
   const saveBtn = document.getElementById('capture-save-btn');
   saveBtn.disabled = true;
 
-  const ext     = captureType === 'photo' ? 'jpg' : 'webm';
-  const mime    = captureType === 'photo' ? 'image/jpeg' : capturedBlob.type || 'audio/webm';
-  const fileId  = crypto.randomUUID();
-  const path    = `recordings/${currentUser.id}/${fileId}.${ext}`;
-  const title   = document.getElementById('capture-title').value.trim() || null;
+  const ext   = captureType === 'photo' ? 'jpg' : 'webm';
+  const mime  = captureType === 'photo' ? 'image/jpeg'
+              : capturedBlob.type || (captureType === 'video' ? 'video/webm' : 'audio/webm');
+  const fname = `recording-${captureType}-${Date.now()}.${ext}`;
+  const title = document.getElementById('capture-title').value.trim() || null;
 
-  // Show progress
-  const progWrap = document.getElementById('capture-progress-wrap');
-  const progBar  = document.getElementById('capture-progress-bar');
-  const progPct  = document.getElementById('capture-progress-pct');
+  // Wrap Blob in a File so the existing Wasabi upload helpers can use it
+  const file = new File([capturedBlob], fname, { type: mime });
+
+  // Show progress bar
+  const progWrap  = document.getElementById('capture-progress-wrap');
+  const progBar   = document.getElementById('capture-progress-bar');
+  const progLabel = document.getElementById('capture-progress-label');
+  const progPct   = document.getElementById('capture-progress-pct');
   progWrap.classList.remove('hidden');
   progBar.style.width = '0%';
 
-  // Simulate early progress while uploading
-  let fakePct = 0;
-  const fakeTimer = setInterval(() => {
-    fakePct = Math.min(fakePct + 4, 85);
-    progBar.style.width = fakePct + '%';
-    progPct.textContent = fakePct + '%';
-  }, 120);
-
-  const { error: uploadError } = await sb.storage
-    .from(RECORDINGS_BUCKET)
-    .upload(path, capturedBlob, { contentType: mime, upsert: false });
-
-  clearInterval(fakeTimer);
-
-  if (uploadError) {
+  let storageKey;
+  try {
+    // Use the same direct-Wasabi path as large video uploads
+    const result = await uploadViaWasabiDirect(file, (pct, label) => {
+      progBar.style.width = pct + '%';
+      progPct.textContent = Math.round(pct) + '%';
+      if (label) progLabel.textContent = label;
+    });
+    storageKey = result.storageKey;
+  } catch (err) {
     progWrap.classList.add('hidden');
-    showToast('Upload failed: ' + uploadError.message, 'error');
+    showToast('Upload failed: ' + err.message, 'error');
     saveBtn.disabled = false;
     return;
   }
@@ -1733,24 +1733,23 @@ async function saveRecording() {
   const { error: dbError } = await sb.from('joe_recordings').insert({
     created_by:   currentUser.id,
     type:         captureType,
-    storage_key:  path,
+    storage_key:  storageKey,
     title,
     duration_sec: captureDuration || null,
   });
 
   if (dbError) {
     progWrap.classList.add('hidden');
-    showToast('Could not save: ' + dbError.message, 'error');
+    showToast('Could not save record: ' + dbError.message, 'error');
     saveBtn.disabled = false;
     return;
   }
 
-  showToast('Recording saved!', 'success');
+  showToast('Recording saved to Wasabi!', 'success');
   closeCaptureModal();
 
-  // Refresh count badge
+  // Refresh count badge + recordings page if open
   loadRecordingsCount();
-  // If already on recordings page, refresh
   if (document.getElementById('sidebar-recordings-item')?.classList.contains('active')) {
     showRecordingsPage(document.getElementById('sidebar-recordings-item'));
   }
@@ -1849,13 +1848,17 @@ async function openRecordingViewer(id) {
   const { data: r } = await sb.from('joe_recordings').select('*').eq('id', id).single();
   if (!r) return;
 
-  const { data: urlData } = await sb.storage
-    .from(RECORDINGS_BUCKET)
-    .createSignedUrl(r.storage_key, 3600);
+  // Get a Wasabi signed URL (same edge function used for video playback)
+  const { data: urlData, error: urlErr } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+    body: { storageKey: r.storage_key },
+  });
 
-  if (!urlData?.signedUrl) { showToast('Could not load recording', 'error'); return; }
+  if (urlErr || !urlData?.playbackUrl) {
+    showToast('Could not load recording', 'error');
+    return;
+  }
 
-  const url   = urlData.signedUrl;
+  const url = urlData.playbackUrl;
   const label = r.title || `Untitled ${r.type}`;
   const date  = new Date(r.created_at).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
 
@@ -1901,9 +1904,8 @@ async function deleteRecording() {
   if (!currentRecordingId) return;
   if (!confirm('Delete this recording? This cannot be undone.')) return;
 
-  const { data: r } = await sb.from('joe_recordings').select('storage_key').eq('id', currentRecordingId).single();
-
-  await sb.storage.from(RECORDINGS_BUCKET).remove([r.storage_key]);
+  // Delete the DB record. The file on Wasabi is orphaned until
+  // a periodic cleanup job removes keys not in joe_recordings.
   await sb.from('joe_recordings').delete().eq('id', currentRecordingId);
 
   showToast('Recording deleted', 'success');
