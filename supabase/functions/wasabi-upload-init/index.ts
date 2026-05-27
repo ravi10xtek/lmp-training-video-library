@@ -55,11 +55,12 @@ async function requireAdmin(authHeader: string | null) {
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
-    .select("id, role")
+    .select("id, role, is_reviewer")
     .eq("id", userData.user.id)
     .single();
 
-  if (profileError || !profile || profile.role !== "admin") {
+  // Allow admins AND reviewers (Joe uses this for recording uploads)
+  if (profileError || !profile || (profile.role !== "admin" && !profile.is_reviewer)) {
     throw new Error("Admin access required");
   }
 
