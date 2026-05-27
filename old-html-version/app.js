@@ -110,11 +110,12 @@ async function initApp(user) {
   }
   if (profile?.role === 'admin' || profile?.is_reviewer) {
     document.getElementById('notif-wrap').classList.remove('hidden');
+    document.getElementById('capture-topbar-btn').classList.remove('hidden');
   }
 
   // Load data
   await Promise.all([loadCategories(), loadVideos()]);
-  await loadNotifications();
+  await Promise.all([loadNotifications(), loadRecordingsCount()]);
   subscribeToNotifications();
 }
 
@@ -1515,6 +1516,407 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ══════════════════════════════════════════════════════
+// JOE'S RECORDINGS — CAPTURE
+// ══════════════════════════════════════════════════════
+const RECORDINGS_BUCKET = 'joe-recordings';
+let captureType     = 'audio';
+let captureStream   = null;
+let captureRecorder = null;
+let captureChunks   = [];
+let capturedBlob    = null;
+let captureDuration = 0;
+let captureTimerInterval = null;
+let captureStartTime     = 0;
+let currentRecordingId   = null;  // for the viewer delete action
+
+function openCaptureModal() {
+  capturedBlob    = null;
+  captureChunks   = [];
+  captureType     = 'audio';
+  currentRecordingId = null;
+  document.getElementById('capture-title').value = '';
+  document.getElementById('capture-save-btn').disabled = true;
+  document.getElementById('capture-modal').classList.add('open');
+  _initCaptureUI('audio');
+}
+
+function closeCaptureModal(e) {
+  if (e && e.target !== document.getElementById('capture-modal')) return;
+  _stopCaptureStream();
+  if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
+  clearInterval(captureTimerInterval);
+  document.getElementById('capture-modal').classList.remove('open');
+}
+
+async function setCaptureType(type, tabEl) {
+  _stopCaptureStream();
+  if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
+  clearInterval(captureTimerInterval);
+  captureType  = type;
+  capturedBlob = null;
+  captureChunks = [];
+  document.querySelectorAll('.capture-tab').forEach(t => t.classList.remove('active'));
+  if (tabEl) tabEl.classList.add('active');
+  document.getElementById('capture-save-btn').disabled = true;
+  _initCaptureUI(type);
+}
+
+async function _initCaptureUI(type) {
+  const preview   = document.getElementById('capture-preview');
+  const photoImg  = document.getElementById('capture-photo-result');
+  const audioDisp = document.getElementById('capture-audio-display');
+  const startBtn  = document.getElementById('capture-start-btn');
+  const stopBtn   = document.getElementById('capture-stop-btn');
+  const retakeBtn = document.getElementById('capture-retake-btn');
+  const startLabel = document.getElementById('capture-start-label');
+
+  // Reset
+  preview.style.display  = 'none';
+  photoImg.style.display = 'none';
+  audioDisp.style.display = 'none';
+  startBtn.classList.remove('hidden', 'recording');
+  stopBtn.classList.add('hidden');
+  retakeBtn.classList.add('hidden');
+  document.getElementById('capture-timer-display').textContent = '0:00';
+
+  if (type === 'audio') {
+    audioDisp.style.display = 'flex';
+    startLabel.textContent = 'Start Recording';
+  } else if (type === 'video') {
+    startLabel.textContent = 'Start Recording';
+    await _startCameraPreview(true, true);
+  } else {
+    startLabel.textContent = 'Take Photo';
+    await _startCameraPreview(true, false);
+  }
+}
+
+async function _startCameraPreview(video, audio) {
+  try {
+    captureStream = await navigator.mediaDevices.getUserMedia({ video, audio });
+    const preview = document.getElementById('capture-preview');
+    preview.srcObject = captureStream;
+    preview.style.display = 'block';
+  } catch (err) {
+    showToast('Camera/mic access denied: ' + err.message, 'error');
+  }
+}
+
+function _stopCaptureStream() {
+  if (captureStream) {
+    captureStream.getTracks().forEach(t => t.stop());
+    captureStream = null;
+  }
+}
+
+async function startCapture() {
+  if (captureType === 'photo') { _takePhoto(); return; }
+
+  // Start mic/camera stream if not already running
+  if (!captureStream) {
+    await _startCameraPreview(captureType === 'video', true);
+    if (!captureStream) return;
+  }
+
+  captureChunks = [];
+  const mimeType = captureType === 'video' ? 'video/webm;codecs=vp9,opus' : 'audio/webm;codecs=opus';
+  const options  = MediaRecorder.isTypeSupported(mimeType) ? { mimeType } : {};
+  captureRecorder = new MediaRecorder(captureStream, options);
+  captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
+  captureRecorder.onstop = () => {
+    const type = captureType === 'video' ? 'video/webm' : 'audio/webm';
+    capturedBlob = new Blob(captureChunks, { type });
+    captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
+    document.getElementById('capture-save-btn').disabled = false;
+  };
+  captureRecorder.start(200);
+  captureStartTime = Date.now();
+
+  // Timer
+  captureTimerInterval = setInterval(() => {
+    const secs = Math.floor((Date.now() - captureStartTime) / 1000);
+    const m = Math.floor(secs / 60), s = secs % 60;
+    document.getElementById('capture-timer-display').textContent =
+      `${m}:${String(s).padStart(2, '0')}`;
+    if (captureType === 'audio') {
+      document.getElementById('capture-audio-display').style.display = 'flex';
+    }
+  }, 500);
+
+  const startBtn = document.getElementById('capture-start-btn');
+  startBtn.classList.add('recording');
+  startBtn.classList.add('hidden');
+  document.getElementById('capture-stop-btn').classList.remove('hidden');
+}
+
+function stopCapture() {
+  if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
+  clearInterval(captureTimerInterval);
+  _stopCaptureStream();
+  document.getElementById('capture-stop-btn').classList.add('hidden');
+  document.getElementById('capture-retake-btn').classList.remove('hidden');
+}
+
+function _takePhoto() {
+  const preview = document.getElementById('capture-preview');
+  const canvas  = document.createElement('canvas');
+  canvas.width  = preview.videoWidth  || 1280;
+  canvas.height = preview.videoHeight || 720;
+  canvas.getContext('2d').drawImage(preview, 0, 0);
+  canvas.toBlob(blob => {
+    capturedBlob = blob;
+    captureDuration = 0;
+    const photoImg = document.getElementById('capture-photo-result');
+    photoImg.src = URL.createObjectURL(blob);
+    photoImg.style.display = 'block';
+    preview.style.display  = 'none';
+    document.getElementById('capture-start-btn').classList.add('hidden');
+    document.getElementById('capture-retake-btn').classList.remove('hidden');
+    document.getElementById('capture-save-btn').disabled = false;
+    _stopCaptureStream();
+  }, 'image/jpeg', 0.92);
+}
+
+async function retakeCapture() {
+  capturedBlob  = null;
+  captureChunks = [];
+  document.getElementById('capture-save-btn').disabled = true;
+  document.getElementById('capture-retake-btn').classList.add('hidden');
+  document.getElementById('capture-start-btn').classList.remove('hidden', 'recording');
+  document.getElementById('capture-photo-result').style.display = 'none';
+  document.getElementById('capture-timer-display').textContent = '0:00';
+  await _initCaptureUI(captureType);
+}
+
+async function saveRecording() {
+  if (!capturedBlob) return;
+  const saveBtn = document.getElementById('capture-save-btn');
+  saveBtn.disabled = true;
+
+  const ext     = captureType === 'photo' ? 'jpg' : 'webm';
+  const mime    = captureType === 'photo' ? 'image/jpeg' : capturedBlob.type || 'audio/webm';
+  const fileId  = crypto.randomUUID();
+  const path    = `recordings/${currentUser.id}/${fileId}.${ext}`;
+  const title   = document.getElementById('capture-title').value.trim() || null;
+
+  // Show progress
+  const progWrap = document.getElementById('capture-progress-wrap');
+  const progBar  = document.getElementById('capture-progress-bar');
+  const progPct  = document.getElementById('capture-progress-pct');
+  progWrap.classList.remove('hidden');
+  progBar.style.width = '0%';
+
+  // Simulate early progress while uploading
+  let fakePct = 0;
+  const fakeTimer = setInterval(() => {
+    fakePct = Math.min(fakePct + 4, 85);
+    progBar.style.width = fakePct + '%';
+    progPct.textContent = fakePct + '%';
+  }, 120);
+
+  const { error: uploadError } = await sb.storage
+    .from(RECORDINGS_BUCKET)
+    .upload(path, capturedBlob, { contentType: mime, upsert: false });
+
+  clearInterval(fakeTimer);
+
+  if (uploadError) {
+    progWrap.classList.add('hidden');
+    showToast('Upload failed: ' + uploadError.message, 'error');
+    saveBtn.disabled = false;
+    return;
+  }
+
+  progBar.style.width = '100%';
+  progPct.textContent = '100%';
+
+  const { error: dbError } = await sb.from('joe_recordings').insert({
+    created_by:   currentUser.id,
+    type:         captureType,
+    storage_key:  path,
+    title,
+    duration_sec: captureDuration || null,
+  });
+
+  if (dbError) {
+    progWrap.classList.add('hidden');
+    showToast('Could not save: ' + dbError.message, 'error');
+    saveBtn.disabled = false;
+    return;
+  }
+
+  showToast('Recording saved!', 'success');
+  closeCaptureModal();
+
+  // Refresh count badge
+  loadRecordingsCount();
+  // If already on recordings page, refresh
+  if (document.getElementById('sidebar-recordings-item')?.classList.contains('active')) {
+    showRecordingsPage(document.getElementById('sidebar-recordings-item'));
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// JOE'S RECORDINGS — PAGE
+// ══════════════════════════════════════════════════════
+async function loadRecordingsCount() {
+  const { count } = await sb.from('joe_recordings')
+    .select('id', { count: 'exact', head: true });
+  const el = document.getElementById('count-recordings');
+  if (el) el.textContent = count ?? '—';
+}
+
+function _fmtDuration(secs) {
+  if (!secs) return '';
+  const m = Math.floor(secs / 60), s = secs % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function showRecordingsPage(sidebarEl) {
+  // Update sidebar active state
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  if (sidebarEl) sidebarEl.classList.add('active');
+
+  const main = document.getElementById('main-content');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading recordings…</div>';
+
+  const { data: recs, error } = await sb.from('joe_recordings')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    main.innerHTML = '<div style="padding:40px;color:var(--muted)">Could not load recordings.</div>';
+    return;
+  }
+
+  const isAdmin    = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
+
+  let html = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <div class="page-title">Joe's Recordings</div>
+        <div class="page-sub">${recs.length} recording${recs.length !== 1 ? 's' : ''}</div>
+      </div>
+      ${isAdmin || isReviewer ? `<button class="btn btn-primary btn-sm" style="width:auto" onclick="openCaptureModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Recording
+      </button>` : ''}
+    </div>`;
+
+  if (!recs.length) {
+    html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+      <div style="font-size:15px">No recordings yet.</div>
+      <div style="font-size:13px;margin-top:6px">Click <strong>New Recording</strong> to get started.</div>
+    </div>`;
+    main.innerHTML = html;
+    return;
+  }
+
+  html += '<div class="recordings-grid">';
+  for (const r of recs) {
+    const date  = new Date(r.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' });
+    const dur   = _fmtDuration(r.duration_sec);
+    const label = r.title || `Untitled ${r.type}`;
+    const typeIcon = r.type === 'photo'
+      ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>`
+      : r.type === 'video'
+      ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`
+      : `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
+
+    html += `
+      <div class="recording-card" onclick="openRecordingViewer('${r.id}')">
+        <div class="recording-thumb-icon" style="position:relative">
+          ${typeIcon}
+          ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
+        </div>
+        <div class="recording-body">
+          <div class="recording-name">${label}</div>
+          <div class="recording-meta">
+            <span class="recording-type-badge ${r.type}">${r.type}</span>
+            ${date}
+          </div>
+        </div>
+      </div>`;
+  }
+  html += '</div>';
+  main.innerHTML = html;
+}
+
+async function openRecordingViewer(id) {
+  currentRecordingId = id;
+  const { data: r } = await sb.from('joe_recordings').select('*').eq('id', id).single();
+  if (!r) return;
+
+  const { data: urlData } = await sb.storage
+    .from(RECORDINGS_BUCKET)
+    .createSignedUrl(r.storage_key, 3600);
+
+  if (!urlData?.signedUrl) { showToast('Could not load recording', 'error'); return; }
+
+  const url   = urlData.signedUrl;
+  const label = r.title || `Untitled ${r.type}`;
+  const date  = new Date(r.created_at).toLocaleDateString('en-US', { month:'long', day:'numeric', year:'numeric' });
+
+  let playerHtml = '';
+  if (r.type === 'photo') {
+    playerHtml = `<img src="${url}" alt="${label}" style="width:100%;display:block;border-radius:var(--radius-lg) var(--radius-lg) 0 0;object-fit:contain;max-height:60vh;background:#000">`;
+  } else if (r.type === 'video') {
+    playerHtml = `<div class="video-wrapper" style="border-radius:var(--radius-lg) var(--radius-lg) 0 0">
+      <video controls autoplay playsinline style="width:100%;height:100%;background:#000">
+        <source src="${url}">
+      </video>
+    </div>`;
+  } else {
+    playerHtml = `<div style="padding:32px;background:rgba(0,0,0,0.3);border-radius:var(--radius-lg) var(--radius-lg) 0 0;display:flex;align-items:center;justify-content:center">
+      <audio controls autoplay style="width:100%;outline:none">
+        <source src="${url}">
+      </audio>
+    </div>`;
+  }
+
+  document.getElementById('recording-player-wrap').innerHTML = playerHtml;
+  document.getElementById('recording-viewer-meta').innerHTML = `
+    <div class="recording-viewer-title">${label}</div>
+    <div class="recording-viewer-sub">${r.type.charAt(0).toUpperCase() + r.type.slice(1)} · ${date}${r.duration_sec ? ' · ' + _fmtDuration(r.duration_sec) : ''}</div>`;
+
+  // Only show delete button for own recordings or admins
+  const isOwn  = r.created_by === currentUser.id;
+  const isAdmin = currentProfile?.role === 'admin';
+  document.getElementById('recording-delete-btn').style.display = (isOwn || isAdmin) ? '' : 'none';
+
+  document.getElementById('recording-modal').classList.add('open');
+}
+
+function closeRecordingModal(e) {
+  if (e && e.target !== document.getElementById('recording-modal')) return;
+  const wrap = document.getElementById('recording-player-wrap');
+  wrap.innerHTML = ''; // stop playback
+  document.getElementById('recording-modal').classList.remove('open');
+  currentRecordingId = null;
+}
+
+async function deleteRecording() {
+  if (!currentRecordingId) return;
+  if (!confirm('Delete this recording? This cannot be undone.')) return;
+
+  const { data: r } = await sb.from('joe_recordings').select('storage_key').eq('id', currentRecordingId).single();
+
+  await sb.storage.from(RECORDINGS_BUCKET).remove([r.storage_key]);
+  await sb.from('joe_recordings').delete().eq('id', currentRecordingId);
+
+  showToast('Recording deleted', 'success');
+  closeRecordingModal();
+  loadRecordingsCount();
+
+  // Refresh page if we're on recordings
+  if (document.getElementById('sidebar-recordings-item')?.classList.contains('active')) {
+    showRecordingsPage(document.getElementById('sidebar-recordings-item'));
+  }
+}
+
+// ══════════════════════════════════════════════════════
 // BOOT — check existing session
 // ══════════════════════════════════════════════════════
 (async () => {
@@ -1535,6 +1937,8 @@ document.addEventListener('DOMContentLoaded', () => {
   document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
       closeVideoModal();
+      closeRecordingModal();
+      closeCaptureModal();
       document.getElementById('admin-modal').classList.remove('open');
       document.getElementById('notif-panel')?.classList.add('hidden');
       notifPanelOpen = false;

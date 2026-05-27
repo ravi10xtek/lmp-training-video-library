@@ -1398,6 +1398,270 @@ html, body {
 }
 
 /* ══════════════════════════════════════
+   CAPTURE BUTTON (topbar)
+══════════════════════════════════════ */
+.capture-btn {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.14), rgba(253, 160, 133, 0.14));
+  border: 1px solid rgba(246, 211, 101, 0.35);
+  border-radius: 10px;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+  flex-shrink: 0;
+}
+.capture-btn:hover {
+  background: linear-gradient(135deg, rgba(246, 211, 101, 0.24), rgba(253, 160, 133, 0.24));
+  border-color: rgba(246, 211, 101, 0.6);
+  box-shadow: 0 0 18px rgba(246, 211, 101, 0.2);
+}
+
+/* ══════════════════════════════════════
+   CAPTURE MODAL
+══════════════════════════════════════ */
+.capture-modal-title {
+  font-family: var(--font-head);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--white);
+  margin-bottom: 20px;
+}
+
+.capture-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 12px;
+  padding: 4px;
+}
+.capture-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 9px 12px;
+  background: none;
+  border: none;
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.capture-tab:hover { color: var(--white); background: rgba(255,255,255,0.06); }
+.capture-tab.active {
+  background: rgba(255,255,255,0.1);
+  color: var(--white);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+
+.capture-preview-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: rgba(0,0,0,0.5);
+  border-radius: 12px;
+  overflow: hidden;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+#capture-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: none;
+}
+#capture-photo-result {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+}
+.capture-audio-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.capture-audio-display svg { opacity: 0.5; }
+#capture-timer-display {
+  font-size: 28px;
+  font-weight: 700;
+  font-family: var(--font-head);
+  color: var(--white);
+  letter-spacing: 2px;
+}
+
+.capture-controls {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.capture-control-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 24px;
+  border-radius: 30px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: var(--font-body);
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+.capture-control-start {
+  background: linear-gradient(135deg, #ff4d4d, #c0392b);
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(255,77,77,0.35);
+}
+.capture-control-start:hover { box-shadow: 0 4px 24px rgba(255,77,77,0.55); transform: scale(1.03); }
+.capture-control-stop {
+  background: rgba(255,255,255,0.12);
+  color: var(--white);
+  border: 1px solid rgba(255,255,255,0.15);
+}
+.capture-control-stop:hover { background: rgba(255,255,255,0.18); }
+.capture-control-retake {
+  background: rgba(255,255,255,0.07);
+  color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.1);
+}
+.capture-control-retake:hover { color: var(--white); background: rgba(255,255,255,0.12); }
+
+/* Recording pulse animation when active */
+@keyframes rec-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+.capture-control-start.recording {
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+
+/* ══════════════════════════════════════
+   JOE'S RECORDINGS PAGE
+══════════════════════════════════════ */
+.recordings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+.recording-card {
+  background: var(--glass-bg);
+  border: var(--glass-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  flex-direction: column;
+}
+.recording-card:hover {
+  border-color: rgba(255,255,255,0.2);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.recording-thumb {
+  width: 100%;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 36px;
+  color: var(--muted);
+  position: relative;
+}
+.recording-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.recording-thumb-icon {
+  width: 100%;
+  aspect-ratio: 16/9;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,0.35);
+}
+.recording-thumb-icon svg { opacity: 0.4; }
+.recording-duration {
+  position: absolute;
+  bottom: 6px;
+  right: 8px;
+  background: rgba(0,0,0,0.7);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.recording-body {
+  padding: 12px 14px;
+  flex: 1;
+}
+.recording-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--white);
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.recording-meta {
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.recording-type-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.recording-type-badge.audio { background: rgba(79,172,254,0.15); color: var(--teal-l); }
+.recording-type-badge.video { background: rgba(255,77,77,0.15);  color: #ff6b6b; }
+.recording-type-badge.photo { background: rgba(246,211,101,0.15); color: var(--amber); }
+
+/* Viewer modal */
+.recording-viewer-meta {
+  padding-top: 4px;
+}
+.recording-viewer-title {
+  font-size: 20px;
+  font-weight: 700;
+  font-family: var(--font-head);
+  color: var(--white);
+  margin-bottom: 6px;
+}
+.recording-viewer-sub {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* ══════════════════════════════════════
    HAMBURGER BUTTON (hidden on desktop)
 ══════════════════════════════════════ */
 .hamburger {
@@ -1532,6 +1796,9 @@ html, body {
   .topbar-username { display: none; }
   .topbar-badge    { display: none; }
   .topbar-signout  { display: none; }
+  .capture-btn-label { display: none; }
+  .capture-btn { padding: 8px 10px; }
+  .recordings-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
 
   /* — SIDEBAR — */
   .sidebar {
