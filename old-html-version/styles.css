@@ -364,7 +364,12 @@ html, body {
   font-size: 14px;
   font-weight: 500;
   color: var(--white);
+  border-radius: 10px;
+  padding: 4px 8px;
+  margin: 0 -8px;
+  transition: background 0.18s;
 }
+.topbar-user:hover { background: rgba(255,255,255,0.06); }
 
 .topbar-avatar {
   width: 36px;

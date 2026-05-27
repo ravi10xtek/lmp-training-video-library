@@ -1516,6 +1516,72 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ══════════════════════════════════════════════════════
+// PROFILE & SMS NOTIFICATIONS
+// ══════════════════════════════════════════════════════
+
+function openProfileModal() {
+  // Pre-fill with current profile data
+  document.getElementById('profile-name').value  = currentProfile?.full_name  || '';
+  document.getElementById('profile-phone').value = currentProfile?.phone_number || '';
+  document.getElementById('profile-save-status').style.display = 'none';
+  document.getElementById('profile-modal').classList.add('open');
+}
+
+function closeProfileModal(e) {
+  if (e && e.target !== document.getElementById('profile-modal')) return;
+  document.getElementById('profile-modal').classList.remove('open');
+}
+
+async function saveProfile() {
+  const btn      = document.getElementById('profile-save-btn');
+  const status   = document.getElementById('profile-save-status');
+  const fullName = document.getElementById('profile-name').value.trim();
+  let   phone    = document.getElementById('profile-phone').value.trim();
+
+  // Normalise phone: strip spaces/dashes, ensure + prefix
+  if (phone) {
+    phone = phone.replace(/[\s\-().]/g, '');
+    if (!phone.startsWith('+')) phone = '+1' + phone; // default to US if no country code
+  }
+
+  // Basic E.164 check
+  if (phone && !/^\+\d{7,15}$/.test(phone)) {
+    showToast('Phone number format looks wrong — use +1 555 000 0000', 'error');
+    return;
+  }
+
+  btn.disabled = true;
+  const { error } = await sb.from('profiles').update({
+    full_name:    fullName || null,
+    phone_number: phone    || null,
+  }).eq('id', currentUser.id);
+
+  btn.disabled = false;
+
+  if (error) {
+    showToast('Save failed: ' + error.message, 'error');
+    return;
+  }
+
+  // Update local cache
+  if (currentProfile) {
+    currentProfile.full_name    = fullName || null;
+    currentProfile.phone_number = phone    || null;
+  }
+
+  // Refresh the topbar name
+  if (fullName) document.getElementById('user-name').textContent = fullName.split(' ')[0];
+
+  status.textContent = phone
+    ? `✓ Saved! You'll receive SMS at ${phone}`
+    : '✓ Saved — SMS notifications disabled';
+  status.style.display = 'block';
+
+  // Auto-close after a moment
+  setTimeout(() => closeProfileModal(), 2000);
+}
+
+// ══════════════════════════════════════════════════════
 // JOE'S RECORDINGS — CAPTURE
 // ══════════════════════════════════════════════════════
 // Recordings go to Wasabi (same bucket as videos) via wasabi-upload-init.
