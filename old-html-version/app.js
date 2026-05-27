@@ -1613,11 +1613,19 @@ async function _initCaptureUI(type) {
 async function _startCameraPreview(video, audio) {
   try {
     const videoConstraints = video
-      ? { facingMode: { ideal: captureFacingMode } }
+      ? {
+          facingMode: { ideal: captureFacingMode },
+          width:      { ideal: 1920 },
+          height:     { ideal: 1080 },
+          frameRate:  { ideal: 30 },
+        }
+      : false;
+    const audioConstraints = audio
+      ? { sampleRate: { ideal: 48000 }, channelCount: { ideal: 2 }, echoCancellation: true, noiseSuppression: true }
       : false;
     captureStream = await navigator.mediaDevices.getUserMedia({
       video: videoConstraints,
-      audio,
+      audio: audioConstraints,
     });
     const preview = document.getElementById('capture-preview');
     preview.srcObject = captureStream;
@@ -1640,7 +1648,11 @@ async function flipCamera() {
   if (wasRecording && captureStream) {
     captureChunks = []; // discard pre-flip footage
     const mimeType = _bestVideoMime();
-    const options  = mimeType ? { mimeType } : {};
+    const options  = {
+      ...(mimeType ? { mimeType } : {}),
+      videoBitsPerSecond: 8_000_000,
+      audioBitsPerSecond: 192_000,
+    };
     captureRecorder = new MediaRecorder(captureStream, options);
     captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
     captureRecorder.onstop = () => {
@@ -1689,7 +1701,12 @@ async function startCapture() {
 
   captureChunks = [];
   const mimeType = captureType === 'video' ? _bestVideoMime() : _bestAudioMime();
-  const options  = mimeType ? { mimeType } : {};
+  const options  = {
+    ...(mimeType ? { mimeType } : {}),
+    ...(captureType === 'video'
+      ? { videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 192_000 }
+      : { audioBitsPerSecond: 192_000 }),
+  };
   captureRecorder = new MediaRecorder(captureStream, options);
   captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
   captureRecorder.onstop = () => {
@@ -1744,7 +1761,7 @@ function _takePhoto() {
     document.getElementById('capture-retake-btn').classList.remove('hidden');
     document.getElementById('capture-save-btn').disabled = false;
     _stopCaptureStream();
-  }, 'image/jpeg', 0.92);
+  }, 'image/jpeg', 0.96);
 }
 
 async function retakeCapture() {
@@ -1984,6 +2001,43 @@ async function deleteRecording() {
   // Refresh page if we're on recordings
   if (document.getElementById('sidebar-recordings-item')?.classList.contains('active')) {
     showRecordingsPage(document.getElementById('sidebar-recordings-item'));
+  }
+}
+
+async function downloadRecording() {
+  // Grab the URL already loaded in the player (no second network round-trip)
+  const wrap = document.getElementById('recording-player-wrap');
+  const srcEl = wrap.querySelector('source, img');
+  const url   = srcEl?.src || srcEl?.getAttribute('src');
+  if (!url) return;
+
+  const btn = document.getElementById('recording-download-btn');
+  const origLabel = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Preparing…';
+
+  try {
+    // Must fetch-as-blob: cross-origin signed URLs ignore the `download` attribute
+    const res  = await fetch(url);
+    const blob = await res.blob();
+    const ext  = _mimeToExt(blob.type);
+    const name = (document.querySelector('#recording-viewer-meta .recording-viewer-title')?.textContent?.trim() || 'recording')
+                   .replace(/[^a-z0-9\-_ ]/gi, '') + '.' + ext;
+
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href     = objUrl;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objUrl), 30_000);
+    showToast('Download started', 'success');
+  } catch (err) {
+    showToast('Download failed: ' + err.message, 'error');
+  } finally {
+    btn.disabled  = false;
+    btn.innerHTML = origLabel;
   }
 }
 
