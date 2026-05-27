@@ -1538,10 +1538,10 @@ async function saveProfile() {
   const fullName = document.getElementById('profile-name').value.trim();
   let   phone    = document.getElementById('profile-phone').value.trim();
 
-  // Normalise phone: strip spaces/dashes, ensure + prefix
+  // Normalise phone: strip spaces/dashes, auto-prefix +1 for US numbers
   if (phone) {
     phone = phone.replace(/[\s\-().]/g, '');
-    if (!phone.startsWith('+')) phone = '+1' + phone; // default to US if no country code
+    if (!phone.startsWith('+')) phone = '+1' + phone;
   }
 
   // Basic E.164 check
