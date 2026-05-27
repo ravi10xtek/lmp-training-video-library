@@ -1046,6 +1046,7 @@ async function saveVideo() {
     const { data: inserted, error: insertErr } = await sb.from('videos').insert(payload).select('id').single();
     error = insertErr;
     insertedId = inserted?.id;
+    console.log('[saveVideo] insert result:', { insertedId, insertErr });
   }
 
   if (error) {
@@ -1054,9 +1055,11 @@ async function saveVideo() {
     showToast(editingVideoId ? 'Video updated' : 'Video slot created', 'success');
     if (!editingVideoId && insertedId) {
       // New draft uploaded — notify Joe (reviewer) so he knows it's in the queue
+      console.log('[saveVideo] firing video_uploaded notify for', insertedId);
       sb.functions.invoke(NOTIFY_FUNCTION, {
         body: { type: 'video_uploaded', videoId: insertedId, videoTitle: payload.title },
-      }).catch(err => console.warn('[notify video_uploaded]', err));
+      }).then(r => console.log('[notify video_uploaded] response:', r))
+        .catch(err => console.warn('[notify video_uploaded] error:', err));
     } else if (editingVideoId && payload.status === 'done' && prevStatus !== 'done') {
       notifyOnStatusDone(editingVideoId, payload.title);
     }
