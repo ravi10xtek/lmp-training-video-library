@@ -1639,12 +1639,13 @@ async function flipCamera() {
   // If we were recording, seamlessly restart the recorder on the new stream
   if (wasRecording && captureStream) {
     captureChunks = []; // discard pre-flip footage
-    const mimeType = 'video/webm;codecs=vp9,opus';
-    const options  = MediaRecorder.isTypeSupported(mimeType) ? { mimeType } : {};
+    const mimeType = _bestVideoMime();
+    const options  = mimeType ? { mimeType } : {};
     captureRecorder = new MediaRecorder(captureStream, options);
     captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
     captureRecorder.onstop = () => {
-      capturedBlob = new Blob(captureChunks, { type: 'video/webm' });
+      const actualMime = captureRecorder.mimeType || mimeType || 'video/webm';
+      capturedBlob = new Blob(captureChunks, { type: actualMime });
       captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
       document.getElementById('capture-save-btn').disabled = false;
     };
@@ -1659,6 +1660,24 @@ function _stopCaptureStream() {
   }
 }
 
+// Pick the best MIME type the browser actually supports
+function _bestAudioMime() {
+  return ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus',
+          'audio/ogg', 'audio/mp4'].find(t => MediaRecorder.isTypeSupported(t)) || '';
+}
+function _bestVideoMime() {
+  return ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus',
+          'video/webm', 'video/mp4'].find(t => MediaRecorder.isTypeSupported(t)) || '';
+}
+// Map a MIME type string → file extension
+function _mimeToExt(mime) {
+  if (!mime) return 'webm';
+  if (mime.includes('mp4'))  return 'mp4';
+  if (mime.includes('ogg'))  return 'ogg';
+  if (mime.includes('webm')) return 'webm';
+  return 'webm';
+}
+
 async function startCapture() {
   if (captureType === 'photo') { _takePhoto(); return; }
 
@@ -1669,13 +1688,14 @@ async function startCapture() {
   }
 
   captureChunks = [];
-  const mimeType = captureType === 'video' ? 'video/webm;codecs=vp9,opus' : 'audio/webm;codecs=opus';
-  const options  = MediaRecorder.isTypeSupported(mimeType) ? { mimeType } : {};
+  const mimeType = captureType === 'video' ? _bestVideoMime() : _bestAudioMime();
+  const options  = mimeType ? { mimeType } : {};
   captureRecorder = new MediaRecorder(captureStream, options);
   captureRecorder.ondataavailable = e => { if (e.data?.size > 0) captureChunks.push(e.data); };
   captureRecorder.onstop = () => {
-    const type = captureType === 'video' ? 'video/webm' : 'audio/webm';
-    capturedBlob = new Blob(captureChunks, { type });
+    // Use the actual MIME type the recorder chose — never hardcode it
+    const actualMime = captureRecorder.mimeType || mimeType || 'audio/webm';
+    capturedBlob = new Blob(captureChunks, { type: actualMime });
     captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
     document.getElementById('capture-save-btn').disabled = false;
   };
@@ -1743,7 +1763,7 @@ async function saveRecording() {
   const saveBtn = document.getElementById('capture-save-btn');
   saveBtn.disabled = true;
 
-  const ext   = captureType === 'photo' ? 'jpg' : 'webm';
+  const ext   = captureType === 'photo' ? 'jpg' : _mimeToExt(capturedBlob.type);
   const mime  = captureType === 'photo' ? 'image/jpeg'
               : capturedBlob.type || (captureType === 'video' ? 'video/webm' : 'audio/webm');
   const fname = `recording-${captureType}-${Date.now()}.${ext}`;
