@@ -19,6 +19,7 @@ const WASABI_ENDPOINT = Deno.env.get("WASABI_ENDPOINT") || `https://s3.${WASABI_
 type PlaybackBody = {
   storageKey?: string;
   videoId?: string;
+  download?: boolean; // if true, presign with Content-Disposition: attachment
 };
 
 function jsonResponse(status: number, body: Record<string, unknown>) {
@@ -94,9 +95,13 @@ Deno.serve(async (req) => {
       forcePathStyle: true,
     });
 
+    const filename = storageKey.split("/").pop() || "download";
     const command = new GetObjectCommand({
       Bucket: WASABI_BUCKET,
       Key: storageKey,
+      ...(body.download
+        ? { ResponseContentDisposition: `attachment; filename="${filename}"` }
+        : {}),
     });
 
     const playbackUrl = await getSignedUrl(s3, command, { expiresIn: 900 });

@@ -1596,7 +1596,8 @@ let captureThumbnail  = null;  // base64 JPEG data URL for the recordings grid
 let captureDuration   = 0;
 let captureTimerInterval = null;
 let captureStartTime     = 0;
-let currentRecordingId   = null;  // for the viewer delete action
+let currentRecordingId   = null;  // for the viewer delete/download action
+let currentStorageKey    = null;  // storage_key of the open recording
 
 function openCaptureModal() {
   capturedBlob     = null;
@@ -2039,8 +2040,10 @@ async function showRecordingsPage(sidebarEl) {
 
 async function openRecordingViewer(id) {
   currentRecordingId = id;
+  currentStorageKey  = null;
   const { data: r } = await sb.from('joe_recordings').select('*').eq('id', id).single();
   if (!r) return;
+  currentStorageKey = r.storage_key;
 
   // Get a Wasabi signed URL (same edge function used for video playback)
   const { data: urlData, error: urlErr } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
@@ -2092,6 +2095,7 @@ function closeRecordingModal(e) {
   wrap.innerHTML = ''; // stop playback
   document.getElementById('recording-modal').classList.remove('open');
   currentRecordingId = null;
+  currentStorageKey  = null;
 }
 
 async function deleteRecording() {
@@ -2113,11 +2117,7 @@ async function deleteRecording() {
 }
 
 async function downloadRecording() {
-  // Grab the URL already loaded in the player (no second network round-trip)
-  const wrap = document.getElementById('recording-player-wrap');
-  const srcEl = wrap.querySelector('source, img');
-  const url   = srcEl?.src || srcEl?.getAttribute('src');
-  if (!url) return;
+  if (!currentStorageKey) return;
 
   const btn = document.getElementById('recording-download-btn');
   const origLabel = btn.innerHTML;
@@ -2125,21 +2125,21 @@ async function downloadRecording() {
   btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Preparing…';
 
   try {
-    // Must fetch-as-blob: cross-origin signed URLs ignore the `download` attribute
-    const res  = await fetch(url);
-    const blob = await res.blob();
-    const ext  = _mimeToExt(blob.type);
-    const name = (document.querySelector('#recording-viewer-meta .recording-viewer-title')?.textContent?.trim() || 'recording')
-                   .replace(/[^a-z0-9\-_ ]/gi, '') + '.' + ext;
+    // Get a fresh signed URL with Content-Disposition: attachment baked in.
+    // This tells Wasabi to serve the file as a download — no fetch/CORS needed.
+    const { data, error } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+      body: { storageKey: currentStorageKey, download: true },
+    });
+    if (error || !data?.playbackUrl) throw new Error(error?.message || 'Could not get download URL');
 
-    const objUrl = URL.createObjectURL(blob);
+    // Navigate to the presigned URL — browser saves it automatically
     const a = document.createElement('a');
-    a.href     = objUrl;
-    a.download = name;
+    a.href   = data.playbackUrl;
+    a.target = '_blank';
+    a.rel    = 'noopener noreferrer';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(objUrl), 30_000);
     showToast('Download started', 'success');
   } catch (err) {
     showToast('Download failed: ' + err.message, 'error');
