@@ -1592,15 +1592,17 @@ let captureStream     = null;
 let captureRecorder   = null;
 let captureChunks     = [];
 let capturedBlob      = null;
+let captureThumbnail  = null;  // base64 JPEG data URL for the recordings grid
 let captureDuration   = 0;
 let captureTimerInterval = null;
 let captureStartTime     = 0;
 let currentRecordingId   = null;  // for the viewer delete action
 
 function openCaptureModal() {
-  capturedBlob    = null;
-  captureChunks   = [];
-  captureType     = 'audio';
+  capturedBlob     = null;
+  captureChunks    = [];
+  captureThumbnail = null;
+  captureType      = 'audio';
   currentRecordingId = null;
   document.getElementById('capture-title').value = '';
   document.getElementById('capture-save-btn').disabled = true;
@@ -1633,9 +1635,10 @@ async function setCaptureType(type, tabEl) {
   _stopCaptureStream();
   if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
   clearInterval(captureTimerInterval);
-  captureType  = type;
-  capturedBlob = null;
-  captureChunks = [];
+  captureType      = type;
+  capturedBlob     = null;
+  captureChunks    = [];
+  captureThumbnail = null;
   document.querySelectorAll('.capture-tab').forEach(t => t.classList.remove('active'));
   if (tabEl) tabEl.classList.add('active');
   document.getElementById('capture-save-btn').disabled = true;
@@ -1805,7 +1808,23 @@ async function startCapture() {
   document.getElementById('capture-stop-btn').classList.remove('hidden');
 }
 
+// Snapshot the live preview into a small 320px-wide JPEG for the grid card
+function _generateThumb() {
+  const preview = document.getElementById('capture-preview');
+  if (!preview || !preview.videoWidth) return null;
+  try {
+    const W = 320;
+    const H = Math.round(preview.videoHeight * (W / preview.videoWidth)) || 180;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    c.getContext('2d').drawImage(preview, 0, 0, W, H);
+    return c.toDataURL('image/jpeg', 0.65);
+  } catch { return null; }
+}
+
 function stopCapture() {
+  // Grab a thumbnail BEFORE the stream is stopped (preview is still live)
+  captureThumbnail = _generateThumb();
   if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
   clearInterval(captureTimerInterval);
   _stopCaptureStream();
@@ -1819,6 +1838,17 @@ function _takePhoto() {
   canvas.width  = preview.videoWidth  || 1280;
   canvas.height = preview.videoHeight || 720;
   canvas.getContext('2d').drawImage(preview, 0, 0);
+
+  // Generate a small thumbnail from the same frame
+  try {
+    const W = 320;
+    const H = Math.round(canvas.height * (W / canvas.width)) || 180;
+    const tc = document.createElement('canvas');
+    tc.width = W; tc.height = H;
+    tc.getContext('2d').drawImage(canvas, 0, 0, W, H);
+    captureThumbnail = tc.toDataURL('image/jpeg', 0.65);
+  } catch { captureThumbnail = null; }
+
   canvas.toBlob(blob => {
     capturedBlob = blob;
     captureDuration = 0;
@@ -1834,8 +1864,9 @@ function _takePhoto() {
 }
 
 async function retakeCapture() {
-  capturedBlob  = null;
-  captureChunks = [];
+  capturedBlob     = null;
+  captureChunks    = [];
+  captureThumbnail = null;
   document.getElementById('capture-save-btn').disabled = true;
   document.getElementById('capture-retake-btn').classList.add('hidden');
   document.getElementById('capture-start-btn').classList.remove('hidden', 'recording');
@@ -1886,11 +1917,12 @@ async function saveRecording() {
   progPct.textContent = '100%';
 
   const { error: dbError } = await sb.from('joe_recordings').insert({
-    created_by:   currentUser.id,
-    type:         captureType,
-    storage_key:  storageKey,
+    created_by:     currentUser.id,
+    type:           captureType,
+    storage_key:    storageKey,
     title,
-    duration_sec: captureDuration || null,
+    duration_sec:   captureDuration || null,
+    thumbnail_data: captureThumbnail || null,
   });
 
   if (dbError) {
@@ -1979,12 +2011,19 @@ async function showRecordingsPage(sidebarEl) {
       ? `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>`
       : `<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>`;
 
+    const thumbArea = r.thumbnail_data
+      ? `<div class="recording-thumb" style="position:relative">
+           <img src="${r.thumbnail_data}" alt="${label}" style="width:100%;height:100%;object-fit:cover;display:block">
+           ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
+         </div>`
+      : `<div class="recording-thumb-icon" style="position:relative">
+           ${typeIcon}
+           ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
+         </div>`;
+
     html += `
       <div class="recording-card" onclick="openRecordingViewer('${r.id}')">
-        <div class="recording-thumb-icon" style="position:relative">
-          ${typeIcon}
-          ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
-        </div>
+        ${thumbArea}
         <div class="recording-body">
           <div class="recording-name">${label}</div>
           <div class="recording-meta">
