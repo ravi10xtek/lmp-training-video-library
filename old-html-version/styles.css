@@ -35,8 +35,11 @@
 
 html, body {
   height: 100%;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;   /* never allow sideways scroll on phones */
   background-color: var(--navy);
-  background-image: 
+  background-image:
     radial-gradient(circle at 15% 50%, rgba(79, 172, 254, 0.15), transparent 25%),
     radial-gradient(circle at 85% 30%, rgba(0, 242, 254, 0.15), transparent 25%);
   background-attachment: fixed;
@@ -46,6 +49,9 @@ html, body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Media never forces the layout wider than the screen */
+img, video, canvas, svg { max-width: 100%; }
 
 /* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 8px; }
@@ -265,8 +271,16 @@ html, body {
 #app {
   display: none;
   height: 100vh;
+  height: 100dvh;            /* avoids iOS Safari toolbar jump */
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
   flex-direction: column;
   animation: fadeIn 0.6s ease forwards;
+  /* Respect the notch / Dynamic Island when installed to the home screen */
+  padding-top: env(safe-area-inset-top);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
 }
 
 @keyframes fadeIn {
