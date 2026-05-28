@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import webpush from "npm:web-push@3";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -8,9 +9,17 @@ const corsHeaders = {
 
 const SUPABASE_URL             = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const TWILIO_ACCOUNT_SID       = Deno.env.get("TWILIO_ACCOUNT_SID");
-const TWILIO_AUTH_TOKEN        = Deno.env.get("TWILIO_AUTH_TOKEN");
-const TWILIO_FROM_NUMBER       = Deno.env.get("TWILIO_FROM_NUMBER");
+const VAPID_PUBLIC_KEY          = Deno.env.get("VAPID_PUBLIC_KEY");
+const VAPID_PRIVATE_KEY         = Deno.env.get("VAPID_PRIVATE_KEY");
+
+// Configure web-push VAPID if keys are available
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  webpush.setVapidDetails(
+    "mailto:admin@lochmonsterplumbing.com",
+    VAPID_PUBLIC_KEY,
+    VAPID_PRIVATE_KEY
+  );
+}
 
 type NotifyBody = {
   type: "video_uploaded" | "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
@@ -74,7 +83,7 @@ Deno.serve(async (req) => {
     }
 
     // ── Find recipients for notifications ──
-    let recipientsQuery = supabase.from("profiles").select("id, phone_number");
+    let recipientsQuery = supabase.from("profiles").select("id");
     if (type === "video_uploaded" || type === "video_ready") {
       // Notify reviewers (Joe) when a new draft is uploaded or when Ravi marks done
       recipientsQuery = recipientsQuery.eq("is_reviewer", true);
@@ -84,6 +93,8 @@ Deno.serve(async (req) => {
     }
     const { data: recipients } = await recipientsQuery;
     if (!recipients?.length) return json(200, { ok: true, skipped: "no recipients" });
+
+    const recipientIds = recipients.map((r) => r.id);
 
     // Build notification copy
     const callerName = callerProfile.full_name || "Reviewer";
@@ -104,10 +115,10 @@ Deno.serve(async (req) => {
         ? `${callerName} reviewed "${videoTitle}" and needs more changes. Please revise and mark as Done again.`
         : `"${videoTitle}" has been revised and is ready for your final review.`;
 
-    // Insert in-app notifications
+    // ── Insert in-app notifications ──
     await supabase.from("notifications").insert(
-      recipients.map((r) => ({
-        user_id:  r.id,
+      recipientIds.map((id) => ({
+        user_id:  id,
         video_id: videoId,
         type,
         title:    notifTitle,
@@ -115,30 +126,55 @@ Deno.serve(async (req) => {
       }))
     );
 
-    // Send SMS via Twilio — skipped gracefully if secrets not configured
-    if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
-      const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
-      const credentials = btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`);
-      const smsBody = `LMP Training Library: ${notifTitle}`;
+    // ── Send Web Push notifications ──
+    if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY && recipientIds.length) {
+      // Get all push subscriptions for the recipients
+      const { data: pushSubs } = await supabase
+        .from("push_subscriptions")
+        .select("endpoint, p256dh, auth")
+        .in("user_id", recipientIds);
 
-      await Promise.allSettled(
-        recipients
-          .filter((r) => r.phone_number)
-          .map((r) =>
-            fetch(twilioUrl, {
-              method: "POST",
-              headers: {
-                "Authorization": `Basic ${credentials}`,
-                "Content-Type": "application/x-www-form-urlencoded",
+      if (pushSubs?.length) {
+        const pushPayload = JSON.stringify({
+          title: notifTitle,
+          body:  notifMessage,
+          tag:   `lmp-${type}-${videoId}`,
+          url:   "/",
+        });
+
+        const pushResults = await Promise.allSettled(
+          pushSubs.map((sub) =>
+            webpush.sendNotification(
+              {
+                endpoint: sub.endpoint,
+                keys: { p256dh: sub.p256dh, auth: sub.auth },
               },
-              body: new URLSearchParams({
-                From: TWILIO_FROM_NUMBER,
-                To:   r.phone_number!,
-                Body: smsBody,
-              }).toString(),
-            })
+              pushPayload
+            )
           )
-      );
+        );
+
+        // Clean up expired/invalid subscriptions (410 Gone)
+        const expiredEndpoints: string[] = [];
+        pushResults.forEach((result, i) => {
+          if (result.status === "rejected") {
+            const err = result.reason as { statusCode?: number };
+            if (err?.statusCode === 410 || err?.statusCode === 404) {
+              expiredEndpoints.push(pushSubs[i].endpoint);
+            } else {
+              console.warn("[notify-review] push error:", result.reason);
+            }
+          }
+        });
+
+        if (expiredEndpoints.length) {
+          await supabase
+            .from("push_subscriptions")
+            .delete()
+            .in("endpoint", expiredEndpoints);
+          console.log("[notify-review] removed", expiredEndpoints.length, "expired push subscriptions");
+        }
+      }
     }
 
     return json(200, { ok: true });

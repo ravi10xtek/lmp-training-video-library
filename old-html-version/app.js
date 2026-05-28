@@ -42,6 +42,9 @@ const VIDEO_STAGING_BUCKET = 'video-uploads';
 /** Supabase global storage limit is often 50MB — use direct Wasabi above this. */
 const STAGING_MAX_BYTES = 45 * 1024 * 1024;
 
+// Web Push VAPID public key
+const VAPID_PUBLIC_KEY = 'BF5qtmbogW7IDuuY6TtBNg5wD1Xf_ZhLQfCb-vlbDGgH4rOPMLxPJG05Hn35FOdGwk_pSwAlGPrUsPNm5jBC9VE';
+
 // ══════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════
@@ -1520,12 +1523,112 @@ document.addEventListener('DOMContentLoaded', () => {
 // PROFILE & SMS NOTIFICATIONS
 // ══════════════════════════════════════════════════════
 
-function openProfileModal() {
+// Convert VAPID base64 key to Uint8Array for PushManager.subscribe()
+function _vapidKey() {
+  const b64 = VAPID_PUBLIC_KEY.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(b64.padEnd(b64.length + (4 - b64.length % 4) % 4, '='));
+  return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+}
+
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    showToast('Push notifications not supported on this browser', 'error');
+    return false;
+  }
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    showToast('Permission denied — enable notifications in your browser settings', 'error');
+    return false;
+  }
+  const reg = await navigator.serviceWorker.ready;
+  const existing = await reg.pushManager.getSubscription();
+  const sub = existing || await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: _vapidKey(),
+  });
+  const json = sub.toJSON();
+  const { error } = await sb.from('push_subscriptions').upsert({
+    user_id:  currentUser.id,
+    endpoint: json.endpoint,
+    p256dh:   json.keys.p256dh,
+    auth:     json.keys.auth,
+  }, { onConflict: 'endpoint' });
+  if (error) { showToast('Could not save push subscription', 'error'); return false; }
+  return true;
+}
+
+async function unsubscribeFromPush() {
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  if (sub) {
+    await sb.from('push_subscriptions').delete().eq('endpoint', sub.endpoint);
+    await sub.unsubscribe();
+  }
+}
+
+async function getPushState() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return 'unsupported';
+  const permission = Notification.permission;
+  if (permission === 'denied') return 'denied';
+  const reg = await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.getSubscription();
+  return sub ? 'subscribed' : 'unsubscribed';
+}
+
+async function openProfileModal() {
   // Pre-fill with current profile data
-  document.getElementById('profile-name').value  = currentProfile?.full_name  || '';
-  document.getElementById('profile-phone').value = currentProfile?.phone_number || '';
+  document.getElementById('profile-name').value = currentProfile?.full_name || '';
   document.getElementById('profile-save-status').style.display = 'none';
+
+  // Reflect current push state on the toggle button
+  const state = await getPushState();
+  _renderPushBtn(state);
+
   document.getElementById('profile-modal').classList.add('open');
+}
+
+function _renderPushBtn(state) {
+  const btn = document.getElementById('push-toggle-btn');
+  const status = document.getElementById('push-status-text');
+  if (!btn) return;
+  if (state === 'unsupported') {
+    btn.style.display = 'none';
+    status.textContent = 'Not supported on this browser';
+  } else if (state === 'denied') {
+    btn.style.display = 'none';
+    status.textContent = 'Blocked — enable in browser/phone settings';
+    status.style.color = 'var(--error, #ff6b6b)';
+  } else if (state === 'subscribed') {
+    btn.textContent = 'Disable Push Notifications';
+    btn.classList.remove('btn-primary');
+    btn.classList.add('btn-ghost');
+    status.textContent = '✓ Push notifications are ON for this device';
+    status.style.color = 'var(--success, #4ade80)';
+  } else {
+    btn.textContent = 'Enable Push Notifications';
+    btn.classList.add('btn-primary');
+    btn.classList.remove('btn-ghost');
+    status.textContent = 'Tap to get notified when videos need your attention';
+    status.style.color = '';
+  }
+}
+
+async function togglePushNotifications() {
+  const btn = document.getElementById('push-toggle-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+  const state = await getPushState();
+  try {
+    if (state === 'subscribed') {
+      await unsubscribeFromPush();
+    } else {
+      await subscribeToPush();
+    }
+  } catch (err) {
+    console.warn('[Push] toggle error:', err);
+  }
+  const newState = await getPushState();
+  _renderPushBtn(newState);
+  if (btn) btn.disabled = false;
 }
 
 function closeProfileModal(e) {
@@ -1537,24 +1640,10 @@ async function saveProfile() {
   const btn      = document.getElementById('profile-save-btn');
   const status   = document.getElementById('profile-save-status');
   const fullName = document.getElementById('profile-name').value.trim();
-  let   phone    = document.getElementById('profile-phone').value.trim();
-
-  // Normalise phone: strip spaces/dashes, auto-prefix +1 for US numbers
-  if (phone) {
-    phone = phone.replace(/[\s\-().]/g, '');
-    if (!phone.startsWith('+')) phone = '+1' + phone;
-  }
-
-  // Basic E.164 check
-  if (phone && !/^\+\d{7,15}$/.test(phone)) {
-    showToast('Phone number format looks wrong — use +1 555 000 0000', 'error');
-    return;
-  }
 
   btn.disabled = true;
   const { error } = await sb.from('profiles').update({
-    full_name:    fullName || null,
-    phone_number: phone    || null,
+    full_name: fullName || null,
   }).eq('id', currentUser.id);
 
   btn.disabled = false;
@@ -1566,16 +1655,13 @@ async function saveProfile() {
 
   // Update local cache
   if (currentProfile) {
-    currentProfile.full_name    = fullName || null;
-    currentProfile.phone_number = phone    || null;
+    currentProfile.full_name = fullName || null;
   }
 
   // Refresh the topbar name
   if (fullName) document.getElementById('user-name').textContent = fullName.split(' ')[0];
 
-  status.textContent = phone
-    ? `✓ Saved! You'll receive SMS at ${phone}`
-    : '✓ Saved — SMS notifications disabled';
+  status.textContent = '✓ Name saved';
   status.style.display = 'block';
 
   // Auto-close after a moment

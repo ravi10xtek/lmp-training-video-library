@@ -1,7 +1,8 @@
 // LMP Training Videos — Service Worker
 // Caches the app shell so it loads instantly and passes PWA installability checks.
+// Also handles Web Push notifications.
 
-const CACHE_NAME = 'lmp-training-v1';
+const CACHE_NAME = 'lmp-training-v2';
 
 // App shell files to cache on install
 const SHELL = [
@@ -33,16 +34,46 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Always go to network for Supabase, Wasabi, Twilio, external resources
+  // Always go to network for Supabase, Wasabi, external resources
   if (
     url.hostname.includes('supabase') ||
     url.hostname.includes('wasabi') ||
-    url.hostname.includes('twilio') ||
     url.hostname.includes('googleapis') ||
     url.protocol !== 'https:'
   ) {
     return; // let browser handle normally
   }
+
+// ── Push: show notification when server sends a push message ─────────────────
+self.addEventListener('push', (event) => {
+  let payload = { title: 'LMP Training', body: '' };
+  try { payload = event.data?.json() || payload; } catch (_) {}
+
+  event.waitUntil(
+    self.registration.showNotification(payload.title, {
+      body:      payload.body,
+      icon:      '/icon-192.png',
+      badge:     '/icon-192.png',
+      tag:       payload.tag || 'lmp',
+      renotify:  true,
+      vibrate:   [200, 100, 200],
+      data:      { url: payload.url || '/' },
+    })
+  );
+});
+
+// ── Notification click: focus or open the app ─────────────────────────────────
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const target = event.notification.data?.url || '/';
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      const existing = list.find((c) => c.url.includes(self.location.origin));
+      if (existing) return existing.focus();
+      return clients.openWindow(target);
+    })
+  );
+});
 
   // Cache-first for static app shell assets
   event.respondWith(
