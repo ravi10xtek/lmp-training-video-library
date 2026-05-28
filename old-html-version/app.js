@@ -1553,7 +1553,7 @@ async function subscribeToPush() {
     p256dh:   json.keys.p256dh,
     auth:     json.keys.auth,
   }, { onConflict: 'endpoint' });
-  if (error) { showToast('Could not save push subscription', 'error'); return false; }
+  if (error) { showToast('Push save failed: ' + error.message, 'error'); return false; }
   return true;
 }
 
