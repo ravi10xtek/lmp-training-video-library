@@ -2,7 +2,7 @@
 // Caches the app shell so it loads instantly and passes PWA installability checks.
 // Also handles Web Push notifications.
 
-const CACHE_NAME = 'lmp-training-v2';
+const CACHE_NAME = 'lmp-training-v3';
 
 // App shell files to cache on install
 const SHELL = [
@@ -44,20 +44,36 @@ self.addEventListener('fetch', (event) => {
     return; // let browser handle normally
   }
 
-// ── Push: show notification when server sends a push message ─────────────────
+  // Cache-first for static app shell assets
+  event.respondWith(
+    caches.match(event.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(event.request).then((response) => {
+        // Cache successful GET responses for app shell files
+        if (response.ok && event.request.method === 'GET') {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      });
+    })
+  );
+});
+
+// ── Push: show notification when server sends a push message ──────────────────
 self.addEventListener('push', (event) => {
   let payload = { title: 'LMP Training', body: '' };
   try { payload = event.data?.json() || payload; } catch (_) {}
 
   event.waitUntil(
     self.registration.showNotification(payload.title, {
-      body:      payload.body,
-      icon:      '/icon-192.png',
-      badge:     '/icon-192.png',
-      tag:       payload.tag || 'lmp',
-      renotify:  true,
-      vibrate:   [200, 100, 200],
-      data:      { url: payload.url || '/' },
+      body:     payload.body,
+      icon:     '/icon-192.png',
+      badge:    '/icon-192.png',
+      tag:      payload.tag || 'lmp',
+      renotify: true,
+      vibrate:  [200, 100, 200],
+      data:     { url: payload.url || '/' },
     })
   );
 });
@@ -71,22 +87,6 @@ self.addEventListener('notificationclick', (event) => {
       const existing = list.find((c) => c.url.includes(self.location.origin));
       if (existing) return existing.focus();
       return clients.openWindow(target);
-    })
-  );
-});
-
-  // Cache-first for static app shell assets
-  event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache successful GET responses for app shell files
-        if (response.ok && event.request.method === 'GET') {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
     })
   );
 });
