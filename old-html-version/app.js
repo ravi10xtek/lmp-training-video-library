@@ -8,7 +8,50 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // INIT
 // ══════════════════════════════════════════════════════
 const { createClient } = supabase;
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+});
+
+// ── Session freshness ─────────────────────────────────────────────
+// PWAs get backgrounded for long stretches; the access token can expire
+// before the next call, producing 401s from edge functions. Refresh the
+// token proactively (and retry once on an auth failure).
+const _rawInvoke = sb.functions.invoke.bind(sb.functions);
+
+function _isAuthError(err) {
+  const msg = (err?.message || '').toLowerCase();
+  const status = err?.context?.status || err?.status;
+  return status === 401 || msg.includes('unauthorized') || msg.includes('jwt') || msg.includes('token');
+}
+
+async function ensureFreshSession() {
+  try {
+    const { data } = await sb.auth.getSession();
+    const s = data?.session;
+    if (!s) return;
+    const expMs = (s.expires_at || 0) * 1000;
+    // Refresh if already expired or expiring within 2 minutes
+    if (expMs && expMs - Date.now() < 120000) await sb.auth.refreshSession();
+  } catch (_) { /* a stale call below will trigger the retry path */ }
+}
+
+// Drop-in replacement for sb.functions.invoke that keeps the token fresh
+async function invokeEdge(name, options) {
+  await ensureFreshSession();
+  let res = await _rawInvoke(name, options);
+  if (res.error && _isAuthError(res.error)) {
+    try { await sb.auth.refreshSession(); } catch (_) {}
+    res = await _rawInvoke(name, options);
+  }
+  return res;
+}
+
+// Refresh the session the moment the app/PWA returns to the foreground
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') ensureFreshSession();
+  });
+}
 
 let currentUser = null;
 let currentProfile = null;
@@ -395,7 +438,7 @@ async function resolveWasabiPlaybackUrl(v) {
   if (v.video_url) return v.video_url;
   if (!v.storage_key) return null;
 
-  const { data, error } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+  const { data, error } = await invokeEdge(WASABI_PLAYBACK_FUNCTION, {
     body: { storageKey: v.storage_key, videoId: v.id }
   });
 
@@ -1055,7 +1098,7 @@ async function uploadViaWasabiDirect(file, onProgress) {
   const contentType = (file.type && file.type.trim()) || 'application/octet-stream';
   onProgress?.(3, 'Preparing upload…');
 
-  const { data, error } = await sb.functions.invoke(WASABI_UPLOAD_INIT_FUNCTION, {
+  const { data, error } = await invokeEdge(WASABI_UPLOAD_INIT_FUNCTION, {
     body: {
       fileName: file.name,
       fileType: contentType,
@@ -1097,7 +1140,7 @@ async function uploadViaStaging(file, onProgress) {
   });
 
   onProgress?.(70, 'Copying to Wasabi…');
-  const { data, error } = await sb.functions.invoke(WASABI_TRANSFER_FUNCTION, {
+  const { data, error } = await invokeEdge(WASABI_TRANSFER_FUNCTION, {
     body: { storagePath, contentType },
   });
 
@@ -1206,7 +1249,7 @@ async function saveVideo() {
     if (!editingVideoId && insertedId) {
       // New draft uploaded — notify Joe (reviewer) so he knows it's in the queue
       console.log('[saveVideo] firing video_uploaded notify for', insertedId);
-      sb.functions.invoke(NOTIFY_FUNCTION, {
+      invokeEdge(NOTIFY_FUNCTION, {
         body: { type: 'video_uploaded', videoId: insertedId, videoTitle: payload.title },
       }).then(r => console.log('[notify video_uploaded] response:', r))
         .catch(err => console.warn('[notify video_uploaded] error:', err));
@@ -1431,7 +1474,7 @@ async function markReviewed() {
   updateReviewedBtnState(v);
 
   // 3. Fire edge function in background for bell notifications + SMS only
-  sb.functions.invoke(NOTIFY_FUNCTION, {
+  invokeEdge(NOTIFY_FUNCTION, {
     body: { type, videoId: currentVideoId, videoTitle: v.title },
   }).catch(err => console.warn('[markReviewed notify]', err));
 }
@@ -1503,7 +1546,7 @@ async function requestMoreChanges() {
   updateReviewedBtnState(v);
 
   // 3. Fire edge function in background for bell notifications + SMS only
-  sb.functions.invoke(NOTIFY_FUNCTION, {
+  invokeEdge(NOTIFY_FUNCTION, {
     body: { type: 'more_changes_requested', videoId: currentVideoId, videoTitle: v.title },
   }).catch(err => console.warn('[requestMoreChanges notify]', err));
 }
@@ -1555,7 +1598,7 @@ async function submitForReview() {
   btn.disabled = false;
   updateEditorBtnState(v);
 
-  sb.functions.invoke(NOTIFY_FUNCTION, {
+  invokeEdge(NOTIFY_FUNCTION, {
     body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
   }).catch(err => console.warn('[submitForReview notify]', err));
 }
@@ -1578,7 +1621,7 @@ async function markAsDone() {
   }
 
   // Notify reviewer
-  sb.functions.invoke(NOTIFY_FUNCTION, {
+  invokeEdge(NOTIFY_FUNCTION, {
     body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
   }).catch(err => console.warn('[markAsDone notify]', err));
 
@@ -1615,7 +1658,7 @@ async function publishVideo() {
 }
 
 function notifyOnStatusDone(videoId, videoTitle) {
-  sb.functions.invoke(NOTIFY_FUNCTION, {
+  invokeEdge(NOTIFY_FUNCTION, {
     body: { type: 'video_ready', videoId, videoTitle },
   }).catch(err => console.warn('[notify video_ready]', err));
 }
@@ -2297,7 +2340,7 @@ async function openRecordingViewer(id) {
   currentStorageKey = r.storage_key;
 
   // Get a Wasabi signed URL (same edge function used for video playback)
-  const { data: urlData, error: urlErr } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+  const { data: urlData, error: urlErr } = await invokeEdge(WASABI_PLAYBACK_FUNCTION, {
     body: { storageKey: r.storage_key },
   });
 
@@ -2378,7 +2421,7 @@ async function downloadRecording() {
   try {
     // Get a fresh signed URL with Content-Disposition: attachment baked in.
     // This tells Wasabi to serve the file as a download — no fetch/CORS needed.
-    const { data, error } = await sb.functions.invoke(WASABI_PLAYBACK_FUNCTION, {
+    const { data, error } = await invokeEdge(WASABI_PLAYBACK_FUNCTION, {
       body: { storageKey: currentStorageKey, download: true },
     });
     if (error || !data?.playbackUrl) throw new Error(error?.message || 'Could not get download URL');
