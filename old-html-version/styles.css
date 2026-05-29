@@ -2154,6 +2154,24 @@ img, video, canvas, svg { max-width: 100%; }
   /* — MODAL INFO padding — */
   .modal-info { padding: 16px; }
   .modal { padding: 0; }
+
+  /* — CAPTURE: audio recorder timer (keep centered & on-screen) — */
+  .capture-preview-wrap { max-width: 100%; }
+  .capture-audio-display {
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0 12px;
+    margin: 0 auto;
+  }
+  #capture-timer-display {
+    width: 100%;
+    max-width: 100%;
+    font-size: 24px;
+    letter-spacing: 1px;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
 }
 
 /* ══════════════════════════════════════

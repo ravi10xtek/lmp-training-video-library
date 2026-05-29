@@ -1975,6 +1975,7 @@ async function flipCamera() {
       const actualMime = captureRecorder.mimeType || mimeType || 'video/webm';
       capturedBlob = new Blob(captureChunks, { type: actualMime });
       captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
+      _stopCaptureStream();
       document.getElementById('capture-save-btn').disabled = false;
     };
     captureRecorder.start(200);
@@ -2030,6 +2031,7 @@ async function startCapture() {
     const actualMime = captureRecorder.mimeType || mimeType || 'audio/webm';
     capturedBlob = new Blob(captureChunks, { type: actualMime });
     captureDuration = Math.round((Date.now() - captureStartTime) / 1000);
+    _stopCaptureStream();
     document.getElementById('capture-save-btn').disabled = false;
   };
   captureRecorder.start(200);
@@ -2069,9 +2071,15 @@ function _generateThumb() {
 function stopCapture() {
   // Grab a thumbnail BEFORE the stream is stopped (preview is still live)
   captureThumbnail = _generateThumb();
-  if (captureRecorder && captureRecorder.state !== 'inactive') captureRecorder.stop();
   clearInterval(captureTimerInterval);
-  _stopCaptureStream();
+  // Stop the recorder first; its onstop handler tears down the mic stream
+  // AFTER the final chunk is flushed (stopping the stream too early can
+  // truncate the last audio segment, especially on iOS Safari).
+  if (captureRecorder && captureRecorder.state !== 'inactive') {
+    captureRecorder.stop();
+  } else {
+    _stopCaptureStream();
+  }
   document.getElementById('capture-stop-btn').classList.add('hidden');
   document.getElementById('capture-retake-btn').classList.remove('hidden');
 }
