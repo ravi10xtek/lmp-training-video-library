@@ -28,6 +28,10 @@ let recordedChunks = [];
 let recordingStream = null;
 let recordingStartTime = 0;
 let recordingTimerInterval = null;
+// Comment composer attachments (staged before Send)
+let composerAudioBlob = null;
+let composerAudioDuration = 0;
+let composerImageFile = null;
 let allNotifications = [];
 let notifPanelOpen = false;
 let notifSubscription = null;
@@ -485,9 +489,7 @@ async function openVideo(id) {
 function closeVideoModal() {
   document.getElementById('video-modal').classList.remove('open');
   document.getElementById('video-player').innerHTML = '';
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    stopRecording();
-  }
+  resetComposer();
   currentVideoId = null;
 }
 
@@ -500,7 +502,7 @@ async function loadFeedback(videoId) {
 
   const { data, error } = await sb
     .from('video_feedback')
-    .select('id, user_id, audio_path, duration_seconds, created_at, profiles:user_id(full_name)')
+    .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .order('created_at', { ascending: false });
 
@@ -510,40 +512,67 @@ async function loadFeedback(videoId) {
   }
 
   if (!data || data.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">No feedback yet. Record one above.</div>';
+    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one above.</div>';
     return;
   }
 
   const items = await Promise.all(data.map(async (fb) => {
-    const { data: signed } = await sb.storage
-      .from(FEEDBACK_BUCKET)
-      .createSignedUrl(fb.audio_path, 60 * 60);
-    const url = signed?.signedUrl || '';
     const name = fb.profiles?.full_name || 'Admin';
     const when = new Date(fb.created_at).toLocaleString();
     const canDelete = fb.user_id === currentUser?.id;
+
+    let audioHtml = '';
+    if (fb.audio_path) {
+      const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+    }
+
+    let imageHtml = '';
+    if (fb.image_path) {
+      const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.image_path, 60 * 60);
+      if (signed?.signedUrl) {
+        imageHtml = `<a href="${signed.signedUrl}" target="_blank" rel="noopener" class="feedback-image-link"><img class="feedback-image" src="${signed.signedUrl}" alt="attachment"></a>`;
+      }
+    }
+
+    const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
+
     return `
       <div class="feedback-item">
         <div class="feedback-item-header">
           <span><span class="feedback-item-author">${name}</span> · ${when}</span>
-          ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}', '${fb.audio_path}')">Delete</button>` : ''}
+          ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}')">Delete</button>` : ''}
         </div>
-        <audio controls src="${url}"></audio>
+        ${bodyHtml}
+        ${audioHtml}
+        ${imageHtml}
       </div>`;
   }));
 
   list.innerHTML = items.join('');
 }
 
-async function deleteFeedback(id, path) {
-  if (!confirm('Delete this feedback?')) return;
-  await sb.storage.from(FEEDBACK_BUCKET).remove([path]).catch(() => {});
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;')
+    .replace(/\n/g, '<br>');
+}
+
+async function deleteFeedback(id) {
+  if (!confirm('Delete this comment?')) return;
+  // Look up attached file paths so we can clean up storage too
+  const { data: row } = await sb.from('video_feedback')
+    .select('audio_path, image_path').eq('id', id).single();
+  const paths = [row?.audio_path, row?.image_path].filter(Boolean);
+  if (paths.length) await sb.storage.from(FEEDBACK_BUCKET).remove(paths).catch(() => {});
+
   const { error } = await sb.from('video_feedback').delete().eq('id', id);
   if (error) {
     showToast('Could not delete: ' + error.message, 'error');
     return;
   }
-  showToast('Feedback deleted', 'success');
+  showToast('Comment deleted', 'success');
   if (currentVideoId) loadFeedback(currentVideoId);
 }
 
@@ -557,6 +586,12 @@ async function toggleRecording() {
 
 async function startRecording() {
   if (currentProfile?.role !== 'admin' || !currentVideoId) return;
+
+  // Only one staged voice note at a time
+  if (composerAudioBlob) {
+    showToast('Remove the current voice note first', 'error');
+    return;
+  }
 
   try {
     recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -588,9 +623,9 @@ async function startRecording() {
   mediaRecorder.start();
   recordingStartTime = Date.now();
 
-  const btn = document.getElementById('record-btn');
-  btn.classList.add('record-btn-recording');
-  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Stop';
+  const btn = document.getElementById('comment-mic-btn');
+  btn.classList.add('mic-recording');
+  btn.title = 'Stop recording';
 
   const timer = document.getElementById('record-timer');
   timer.classList.remove('hidden');
@@ -623,49 +658,170 @@ function updateRecordingTimer() {
   document.getElementById('record-timer').textContent = `${m}:${String(s).padStart(2, '0')}`;
 }
 
-async function handleRecordingStop() {
+function handleRecordingStop() {
   clearInterval(recordingTimerInterval);
   recordingTimerInterval = null;
   const durationMs = Date.now() - recordingStartTime;
-  const durationSec = Math.max(1, Math.round(durationMs / 1000));
+  composerAudioDuration = Math.max(1, Math.round(durationMs / 1000));
 
-  const btn = document.getElementById('record-btn');
-  btn.classList.remove('record-btn-recording');
-  btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg> Uploading…';
-  btn.disabled = true;
+  const btn = document.getElementById('comment-mic-btn');
+  btn.classList.remove('mic-recording');
+  btn.title = 'Record voice note';
   document.getElementById('record-timer').classList.add('hidden');
 
   stopMicStream();
 
-  const blob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'audio/webm' });
+  // Stage the recording for preview; it uploads only when Send is pressed
+  composerAudioBlob = new Blob(recordedChunks, { type: recordedChunks[0]?.type || 'audio/webm' });
   recordedChunks = [];
 
-  const ext = (blob.type.includes('webm') ? 'webm' : 'ogg');
-  const path = `${currentVideoId}/${currentUser.id}-${Date.now()}.${ext}`;
+  const player = document.getElementById('comment-audio-player');
+  player.src = URL.createObjectURL(composerAudioBlob);
+  document.getElementById('comment-audio-preview').classList.remove('hidden');
+  document.getElementById('comment-attachments').classList.remove('hidden');
+}
+
+// ── Image attachment ──────────────────────────────────────────────
+async function handleComposerImage(event) {
+  const file = event.target.files?.[0];
+  event.target.value = ''; // allow re-selecting the same file later
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    showToast('Please choose an image file', 'error');
+    return;
+  }
+  try {
+    composerImageFile = await downscaleImage(file, 1920, 0.85);
+  } catch (_) {
+    composerImageFile = file; // fall back to original if downscale fails
+  }
+  const thumb = document.getElementById('comment-image-thumb');
+  thumb.src = URL.createObjectURL(composerImageFile);
+  document.getElementById('comment-image-preview').classList.remove('hidden');
+  document.getElementById('comment-attachments').classList.remove('hidden');
+}
+
+// Downscale/compress an image to a JPEG blob (keeps uploads small)
+function downscaleImage(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => blob ? resolve(blob) : reject(new Error('toBlob failed')),
+        'image/jpeg', quality
+      );
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function clearComposerAudio() {
+  composerAudioBlob = null;
+  composerAudioDuration = 0;
+  const player = document.getElementById('comment-audio-player');
+  if (player.src) { URL.revokeObjectURL(player.src); player.removeAttribute('src'); }
+  document.getElementById('comment-audio-preview').classList.add('hidden');
+  syncAttachmentsVisibility();
+}
+
+function clearComposerImage() {
+  composerImageFile = null;
+  const thumb = document.getElementById('comment-image-thumb');
+  if (thumb.src) { URL.revokeObjectURL(thumb.src); thumb.removeAttribute('src'); }
+  document.getElementById('comment-image-preview').classList.add('hidden');
+  syncAttachmentsVisibility();
+}
+
+function syncAttachmentsVisibility() {
+  const any = composerAudioBlob || composerImageFile;
+  document.getElementById('comment-attachments').classList.toggle('hidden', !any);
+}
+
+function resetComposer() {
+  // Stop any in-progress recording
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    try { mediaRecorder.stop(); } catch (_) {}
+  }
+  clearInterval(recordingTimerInterval);
+  recordingTimerInterval = null;
+  stopMicStream();
+  recordedChunks = [];
+  const text = document.getElementById('comment-text');
+  if (text) text.value = '';
+  clearComposerAudio();
+  clearComposerImage();
+}
+
+// ── Submit a comment (text + optional audio + optional image) ──────
+async function submitComment() {
+  if (currentProfile?.role !== 'admin' || !currentVideoId) return;
+
+  // Block submit while still recording
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    showToast('Stop the recording before sending', 'error');
+    return;
+  }
+
+  const body = document.getElementById('comment-text').value.trim();
+  if (!body && !composerAudioBlob && !composerImageFile) {
+    showToast('Add a comment, voice note, or image first', 'error');
+    return;
+  }
+
+  const sendBtn = document.getElementById('comment-send-btn');
+  sendBtn.disabled = true;
+  const sendHtml = sendBtn.innerHTML;
+  sendBtn.textContent = 'Sending…';
 
   try {
-    const { error: upErr } = await sb.storage
-      .from(FEEDBACK_BUCKET)
-      .upload(path, blob, { contentType: blob.type, upsert: false });
-    if (upErr) throw upErr;
+    let audioPath = null;
+    let imagePath = null;
+
+    if (composerAudioBlob) {
+      const ext = composerAudioBlob.type.includes('webm') ? 'webm' : 'ogg';
+      audioPath = `${currentVideoId}/${currentUser.id}-${Date.now()}.${ext}`;
+      const { error } = await sb.storage.from(FEEDBACK_BUCKET)
+        .upload(audioPath, composerAudioBlob, { contentType: composerAudioBlob.type, upsert: false });
+      if (error) throw error;
+    }
+
+    if (composerImageFile) {
+      imagePath = `${currentVideoId}/img-${currentUser.id}-${Date.now()}.jpg`;
+      const { error } = await sb.storage.from(FEEDBACK_BUCKET)
+        .upload(imagePath, composerImageFile, { contentType: 'image/jpeg', upsert: false });
+      if (error) throw error;
+    }
 
     const { error: insErr } = await sb.from('video_feedback').insert({
-      video_id: currentVideoId,
-      user_id: currentUser.id,
-      audio_path: path,
-      duration_seconds: durationSec,
+      video_id:         currentVideoId,
+      user_id:          currentUser.id,
+      body:             body || null,
+      audio_path:       audioPath,
+      image_path:       imagePath,
+      duration_seconds: composerAudioBlob ? composerAudioDuration : null,
     });
     if (insErr) throw insErr;
 
-    showToast('Feedback saved', 'success');
+    resetComposer();
+    showToast('Comment posted', 'success');
     loadFeedback(currentVideoId);
   } catch (err) {
-    console.error('[feedback] save failed:', err);
-    const detail = err?.message || err?.error || err?.statusText || JSON.stringify(err) || 'Unknown error';
-    showToast('Could not save feedback: ' + detail, 'error');
+    console.error('[feedback] submit failed:', err);
+    const detail = err?.message || err?.error || err?.statusText || 'Unknown error';
+    showToast('Could not post comment: ' + detail, 'error');
   } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg> Record feedback';
+    sendBtn.disabled = false;
+    sendBtn.innerHTML = sendHtml;
   }
 }
 
