@@ -131,16 +131,20 @@ Deno.serve(async (req) => {
       // Get all push subscriptions for the recipients
       const { data: pushSubs } = await supabase
         .from("push_subscriptions")
-        .select("endpoint, p256dh, auth")
+        .select("endpoint, p256dh, auth, user_id")
         .in("user_id", recipientIds);
 
       if (pushSubs?.length) {
-        const pushPayload = JSON.stringify({
-          title: notifTitle,
-          body:  notifMessage,
-          tag:   `lmp-${type}-${videoId}`,
-          url:   "/",
-        });
+        // Unread notification count per recipient → home-screen icon badge
+        const unreadByUser: Record<string, number> = {};
+        await Promise.all(recipientIds.map(async (uid) => {
+          const { count } = await supabase
+            .from("notifications")
+            .select("id", { count: "exact", head: true })
+            .eq("user_id", uid)
+            .eq("read", false);
+          unreadByUser[uid] = count || 0;
+        }));
 
         const pushResults = await Promise.allSettled(
           pushSubs.map((sub) =>
@@ -149,7 +153,13 @@ Deno.serve(async (req) => {
                 endpoint: sub.endpoint,
                 keys: { p256dh: sub.p256dh, auth: sub.auth },
               },
-              pushPayload
+              JSON.stringify({
+                title:      notifTitle,
+                body:       notifMessage,
+                tag:        `lmp-${type}-${videoId}`,
+                url:        "/",
+                badgeCount: unreadByUser[sub.user_id] ?? 1,
+              })
             )
           )
         );

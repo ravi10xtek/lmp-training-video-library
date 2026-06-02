@@ -2,7 +2,7 @@
 // Caches the app shell so it loads instantly and passes PWA installability checks.
 // Also handles Web Push notifications.
 
-const CACHE_NAME = 'lmp-training-v8';
+const CACHE_NAME = 'lmp-training-v9';
 
 // App shell files to cache on install
 const SHELL = [
@@ -65,7 +65,7 @@ self.addEventListener('push', (event) => {
   let payload = { title: 'LMP Training', body: '' };
   try { payload = event.data?.json() || payload; } catch (_) {}
 
-  event.waitUntil(
+  const tasks = [
     self.registration.showNotification(payload.title, {
       body:     payload.body,
       icon:     '/icon-192.png',
@@ -74,8 +74,19 @@ self.addEventListener('push', (event) => {
       renotify: true,
       vibrate:  [200, 100, 200],
       data:     { url: payload.url || '/' },
-    })
-  );
+    }),
+  ];
+
+  // Update the home-screen app icon badge number (iOS 16.4+ / desktop)
+  if (typeof payload.badgeCount === 'number' && 'setAppBadge' in navigator) {
+    tasks.push(
+      payload.badgeCount > 0
+        ? navigator.setAppBadge(payload.badgeCount)
+        : navigator.clearAppBadge()
+    );
+  }
+
+  event.waitUntil(Promise.all(tasks));
 });
 
 // ── Notification click: focus or open the app ─────────────────────────────────

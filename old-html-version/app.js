@@ -1385,9 +1385,21 @@ async function refreshCurrentVideo() {
 function renderNotificationBell() {
   const unread = allNotifications.filter(n => !n.read).length;
   const badge = document.getElementById('notif-badge');
-  if (!badge) return;
-  badge.textContent = unread;
-  badge.classList.toggle('hidden', unread === 0);
+  if (badge) {
+    badge.textContent = unread;
+    badge.classList.toggle('hidden', unread === 0);
+  }
+  // Mirror the unread count onto the home-screen app icon (iOS 16.4+, desktop)
+  setAppBadgeCount(unread);
+}
+
+// Set/clear the home-screen app icon badge number (Badging API)
+function setAppBadgeCount(n) {
+  try {
+    if (!('setAppBadge' in navigator)) return;
+    if (n > 0) navigator.setAppBadge(n);
+    else navigator.clearAppBadge();
+  } catch (_) { /* unsupported / not installed — ignore */ }
 }
 
 function toggleNotifPanel(e) {
