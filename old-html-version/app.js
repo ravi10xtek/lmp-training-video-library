@@ -2396,9 +2396,27 @@ async function deleteRecording() {
   if (!currentRecordingId) return;
   if (!confirm('Delete this recording? This cannot be undone.')) return;
 
-  // Delete the DB record. The file on Wasabi is orphaned until
-  // a periodic cleanup job removes keys not in joe_recordings.
-  await sb.from('joe_recordings').delete().eq('id', currentRecordingId);
+  const btn = document.getElementById('recording-delete-btn');
+  if (btn) btn.disabled = true;
+
+  // Delete the DB record and confirm a row actually came back — RLS can
+  // silently delete 0 rows if the user isn't allowed. The file on Wasabi
+  // is orphaned until a periodic cleanup job removes unreferenced keys.
+  const { data, error } = await sb.from('joe_recordings')
+    .delete()
+    .eq('id', currentRecordingId)
+    .select('id');
+
+  if (btn) btn.disabled = false;
+
+  if (error) {
+    showToast('Could not delete: ' + error.message, 'error');
+    return;
+  }
+  if (!data || data.length === 0) {
+    showToast("Delete blocked — you don't have permission to remove this recording.", 'error');
+    return;
+  }
 
   showToast('Recording deleted', 'success');
   closeRecordingModal();
