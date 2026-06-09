@@ -1100,6 +1100,65 @@ img, video, canvas, svg { max-width: 100%; }
   padding: 12px 0;
 }
 
+/* ── TRANSCRIPTION ── */
+.transcribe-section {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.fb-transcribe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.fb-transcribe-btn:hover { background: rgba(255, 255, 255, 0.1); color: var(--white); }
+.fb-transcribe-btn:disabled { opacity: 0.6; cursor: default; }
+
+.transcript-box {
+  margin-top: 10px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.transcript-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.transcript-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.transcript-toolbar .btn-sm { padding: 4px 12px; font-size: 12px; }
+.transcript-text {
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--white);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow-y: auto;
+  user-select: text;
+}
+
 /* ── COMMENT COMPOSER ── */
 .comment-composer {
   background: rgba(255, 255, 255, 0.04);

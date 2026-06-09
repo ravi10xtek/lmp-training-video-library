@@ -85,6 +85,7 @@ const MAX_RECORDING_MS = 3 * 60 * 1000;
 const WASABI_UPLOAD_INIT_FUNCTION = 'wasabi-upload-init';
 const WASABI_TRANSFER_FUNCTION = 'wasabi-transfer';
 const WASABI_PLAYBACK_FUNCTION = 'wasabi-playback-url';
+const TRANSCRIBE_FUNCTION = 'transcribe';
 const VIDEO_STAGING_BUCKET = 'video-uploads';
 /** Supabase global storage limit is often 50MB — use direct Wasabi above this. */
 const STAGING_MAX_BYTES = 45 * 1024 * 1024;
@@ -501,6 +502,18 @@ async function openVideo(id) {
   } else {
     feedbackSection.classList.add('hidden');
   }
+
+  // Transcription — admin only, and only for Wasabi-backed videos
+  const transcribeSection = document.getElementById('video-transcribe-section');
+  if (isAdmin && v.storage_key) {
+    transcribeSection.classList.remove('hidden');
+    document.getElementById('video-transcript-box').classList.add('hidden');
+    document.getElementById('video-transcript-text').textContent = '';
+    const tb = document.getElementById('video-transcribe-btn');
+    tb.disabled = false;
+  } else {
+    transcribeSection.classList.add('hidden');
+  }
   // Reviewer section — Joe only
   const reviewerSection = document.getElementById('reviewer-section');
   if (isReviewer) {
@@ -559,15 +572,32 @@ async function loadFeedback(videoId) {
     return;
   }
 
+  const isAdmin = currentProfile?.role === 'admin';
+
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles?.full_name || 'Admin';
     const when = new Date(fb.created_at).toLocaleString();
     const canDelete = fb.user_id === currentUser?.id;
 
     let audioHtml = '';
+    let transcribeHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
       if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (isAdmin) {
+        transcribeHtml = `
+          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', '${fb.audio_path}', this)">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
+            Transcribe
+          </button>
+          <div class="transcript-box hidden" id="fb-transcript-${fb.id}">
+            <div class="transcript-toolbar">
+              <span class="transcript-label">Transcript</span>
+              <button class="btn btn-ghost btn-sm" onclick="copyTranscript('fb-transcript-text-${fb.id}', this)">Copy</button>
+            </div>
+            <div class="transcript-text" id="fb-transcript-text-${fb.id}"></div>
+          </div>`;
+      }
     }
 
     let imageHtml = '';
@@ -588,6 +618,7 @@ async function loadFeedback(videoId) {
         </div>
         ${bodyHtml}
         ${audioHtml}
+        ${transcribeHtml}
         ${imageHtml}
       </div>`;
   }));
@@ -865,6 +896,71 @@ async function submitComment() {
   } finally {
     sendBtn.disabled = false;
     sendBtn.innerHTML = sendHtml;
+  }
+}
+
+// ══════════════════════════════════════════════════════
+// TRANSCRIPTION (admin only) — OpenAI Whisper via edge function
+// ══════════════════════════════════════════════════════
+async function transcribeVideo() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v?.storage_key) { showToast('No video file to transcribe', 'error'); return; }
+
+  const btn = document.getElementById('video-transcribe-btn');
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Transcribing…';
+
+  try {
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, {
+      body: { storageKey: v.storage_key },
+    });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) throw new Error(detail);
+
+    document.getElementById('video-transcript-text').textContent = data.text || '(empty transcript)';
+    document.getElementById('video-transcript-box').classList.remove('hidden');
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+  }
+}
+
+async function transcribeFeedback(id, audioPath, btn) {
+  const box = document.getElementById('fb-transcript-' + id);
+  if (!box) return;
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = 'Transcribing…';
+
+  try {
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, {
+      body: { audioPath },
+    });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) throw new Error(detail);
+
+    box.querySelector('.transcript-text').textContent = data.text || '(empty transcript)';
+    box.classList.remove('hidden');
+    btn.style.display = 'none';
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
+  }
+}
+
+async function copyTranscript(textId, btn) {
+  const text = document.getElementById(textId)?.textContent || '';
+  try {
+    await navigator.clipboard.writeText(text);
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (_) {
+    showToast('Could not copy to clipboard', 'error');
   }
 }
 
