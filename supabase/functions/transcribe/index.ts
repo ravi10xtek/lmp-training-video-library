@@ -67,6 +67,35 @@ Deno.serve(async (req) => {
     return json(401, { error: e instanceof Error ? e.message : "Unauthorized" });
   }
 
+  // ── Direct audio upload (browser-extracted audio, bypasses 25MB video) ──
+  const contentType = req.headers.get("content-type") || "";
+  if (contentType.includes("multipart/form-data")) {
+    try {
+      const fd = await req.formData();
+      const file = fd.get("file");
+      if (!(file instanceof File)) return json(400, { error: "No audio file uploaded" });
+      if (file.size > MAX_BYTES) {
+        return json(413, { error: "Extracted audio is still over OpenAI's 25MB limit (video too long)." });
+      }
+      const form = new FormData();
+      form.append("file", file, file.name || "audio.wav");
+      form.append("model", "whisper-1");
+      form.append("response_format", "text");
+      const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: form,
+      });
+      if (!r.ok) {
+        const detail = await r.text();
+        return json(502, { error: `Transcription failed (${r.status}). ${detail.slice(0, 200)}` });
+      }
+      return json(200, { text: (await r.text()).trim() });
+    } catch (err) {
+      return json(500, { error: err instanceof Error ? err.message : "Transcription failed" });
+    }
+  }
+
   try {
     const { storageKey, audioPath } = (await req.json()) as Body;
     if (!storageKey && !audioPath) {

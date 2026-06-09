@@ -916,16 +916,112 @@ async function transcribeVideo() {
       body: { storageKey: v.storage_key },
     });
     const detail = error ? await parseFunctionError(error) : (data?.error || null);
-    if (detail) throw new Error(detail);
+    if (detail) {
+      // Video too large for direct transcription → offer audio extraction
+      if (/25\s*MB|too large|over OpenAI/i.test(detail)) {
+        btn.disabled = false;
+        btn.innerHTML = origHtml;
+        showToast('Video is over 25MB — select the file to transcribe just its audio.', 'error');
+        document.getElementById('transcribe-file-input').click();
+        return;
+      }
+      throw new Error(detail);
+    }
 
-    document.getElementById('video-transcript-text').textContent = data.text || '(empty transcript)';
-    document.getElementById('video-transcript-box').classList.remove('hidden');
+    _showVideoTranscript(data.text);
   } catch (err) {
     showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
   } finally {
     btn.disabled = false;
     btn.innerHTML = origHtml;
   }
+}
+
+function _showVideoTranscript(text) {
+  document.getElementById('video-transcript-text').textContent = text || '(empty transcript)';
+  document.getElementById('video-transcript-box').classList.remove('hidden');
+}
+
+// Fallback for large videos: extract compressed audio in-browser, send that
+async function handleTranscribeFile(event) {
+  const file = event.target.files?.[0];
+  event.target.value = '';
+  if (!file) return;
+
+  const btn = document.getElementById('video-transcribe-btn');
+  btn.disabled = true;
+  btn.textContent = 'Extracting audio…';
+
+  try {
+    const wav = await extractAudioToWav(file);
+    if (wav.size > 25 * 1024 * 1024) {
+      throw new Error('Audio is still over 25MB — video is too long (max ~13 min).');
+    }
+    btn.textContent = 'Transcribing…';
+    const form = new FormData();
+    form.append('file', wav, 'audio.wav');
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: form });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) throw new Error(detail);
+    _showVideoTranscript(data.text);
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg> Transcribe video';
+  }
+}
+
+// Decode any audio/video file → 16kHz mono 16-bit WAV (Whisper-friendly, small)
+async function extractAudioToWav(file) {
+  const arrayBuf = await file.arrayBuffer();
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const decodeCtx = new AC();
+  const decoded = await decodeCtx.decodeAudioData(arrayBuf);
+  decodeCtx.close();
+
+  const targetRate = 16000;
+  const length = Math.ceil(decoded.duration * targetRate);
+  const offline = new OfflineAudioContext(1, length, targetRate);
+  const src = offline.createBufferSource();
+  src.buffer = decoded;
+  src.connect(offline.destination);
+  src.start();
+  const rendered = await offline.startRendering();
+
+  return _audioBufferToWav(rendered);
+}
+
+function _audioBufferToWav(buffer) {
+  const samples = buffer.getChannelData(0);
+  const sampleRate = buffer.sampleRate;
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const ab = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(ab);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);          // PCM chunk size
+  view.setUint16(20, 1, true);           // PCM format
+  view.setUint16(22, 1, true);           // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * bytesPerSample, true);
+  view.setUint16(32, bytesPerSample, true);
+  view.setUint16(34, 16, true);          // bits per sample
+  writeStr(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let off = 44;
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    off += 2;
+  }
+  return new Blob([ab], { type: 'audio/wav' });
 }
 
 async function transcribeFeedback(id, audioPath, btn) {
