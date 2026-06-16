@@ -1768,12 +1768,25 @@ function setStatusText(el, text) {
   setTimeout(() => { el.textContent = text; el.style.opacity = '1'; }, 150);
 }
 
+// Canonical labels for the workflow buttons. Click handlers overwrite these
+// with transient text ("Saving…" etc.); updateEditorBtnState restores them so
+// a failed/interrupted action never leaves a button stuck.
+const SUBMIT_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Submit for Review';
+const MARK_DONE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Done';
+const PUBLISH_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg> Publish Video';
+
 function updateEditorBtnState(v) {
   const submitBtn   = document.getElementById('submit-review-btn');
   const markDoneBtn = document.getElementById('mark-done-btn');
   const publishBtn  = document.getElementById('publish-btn');
   const statusEl    = document.getElementById('editor-status');
   if (!markDoneBtn || !v) return;
+
+  // Restore canonical label + enabled state — recovers from any prior
+  // transient "Saving…"/"Sending…"/"Publishing…" left by a failed action.
+  if (submitBtn)  { submitBtn.disabled  = false; submitBtn.innerHTML  = SUBMIT_BTN_HTML; }
+  markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML;
+  if (publishBtn) { publishBtn.disabled = false; publishBtn.innerHTML = PUBLISH_BTN_HTML; }
 
   const showSubmit   = v.status === 'draft' && v.review_round === 0;
   const showMarkDone = v.status === 'draft' && v.review_round >= 1;
