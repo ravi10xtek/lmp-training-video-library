@@ -503,9 +503,10 @@ async function openVideo(id) {
     feedbackSection.classList.add('hidden');
   }
 
-  // Transcription — admin only, and only for Wasabi-backed videos
+  // Transcription — admin only. Shown for every video: Wasabi-backed videos
+  // transcribe server-side; embedded/linked videos fall back to a local file pick.
   const transcribeSection = document.getElementById('video-transcribe-section');
-  if (isAdmin && v.storage_key) {
+  if (isAdmin) {
     transcribeSection.classList.remove('hidden');
     document.getElementById('video-transcript-box').classList.add('hidden');
     document.getElementById('video-transcript-text').textContent = '';
@@ -904,7 +905,12 @@ async function submitComment() {
 // ══════════════════════════════════════════════════════
 async function transcribeVideo() {
   const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v?.storage_key) { showToast('No video file to transcribe', 'error'); return; }
+  // Embedded/linked video with no stored file → transcribe from a locally-picked file.
+  if (!v?.storage_key) {
+    showToast('No stored file for this video — select the file to transcribe its audio.', 'info');
+    document.getElementById('transcribe-file-input').click();
+    return;
+  }
 
   const btn = document.getElementById('video-transcribe-btn');
   const origHtml = btn.innerHTML;
