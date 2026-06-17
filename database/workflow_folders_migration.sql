@@ -64,18 +64,21 @@ drop policy if exists "videos_editor_read"   on videos;
 drop policy if exists "videos_admin_insert"  on videos;
 drop policy if exists "videos_admin_update"  on videos;
 drop policy if exists "videos_admin_delete"  on videos;
+drop policy if exists "videos_staff_insert"  on videos;
+drop policy if exists "videos_staff_update"  on videos;
+drop policy if exists "videos_staff_delete"  on videos;
 
 -- Everyone (incl. workers) reads published
 create policy "videos_worker_read" on videos for select using (
   status = 'published'
 );
 
--- Reviewer (Joe) reads only the TO REVIEW queue
+-- Reviewer (Joe) reads only the TO REVIEW queue. Keyed on is_reviewer so it
+-- works regardless of the reviewer's exact `role` value.
 create policy "videos_reviewer_read" on videos for select using (
   status = 'to_review'
   and exists (
-    select 1 from profiles
-    where id = auth.uid() and role = 'admin' and is_reviewer = true
+    select 1 from profiles where id = auth.uid() and is_reviewer = true
   )
 );
 
@@ -88,15 +91,26 @@ create policy "videos_editor_read" on videos for select using (
   )
 );
 
--- Any admin may write (insert/update/delete) — gated by the UI
-create policy "videos_admin_insert" on videos for insert with check (
-  exists (select 1 from profiles where id = auth.uid() and role = 'admin')
-);
-create policy "videos_admin_update" on videos for update using (
-  exists (select 1 from profiles where id = auth.uid() and role = 'admin')
-);
-create policy "videos_admin_delete" on videos for delete using (
-  exists (select 1 from profiles where id = auth.uid() and role = 'admin')
-);
+-- Writes: any internal staff (admin OR reviewer) — gated by the UI. Explicit
+-- WITH CHECK so cross-folder transitions (e.g. to_review → to_edit) are allowed.
+create policy "videos_staff_insert" on videos for insert
+  with check (exists (
+    select 1 from profiles where id = auth.uid()
+    and (role = 'admin' or is_reviewer = true)
+  ));
+create policy "videos_staff_update" on videos for update
+  using (exists (
+    select 1 from profiles where id = auth.uid()
+    and (role = 'admin' or is_reviewer = true)
+  ))
+  with check (exists (
+    select 1 from profiles where id = auth.uid()
+    and (role = 'admin' or is_reviewer = true)
+  ));
+create policy "videos_staff_delete" on videos for delete
+  using (exists (
+    select 1 from profiles where id = auth.uid()
+    and (role = 'admin' or is_reviewer = true)
+  ));
 
 commit;
