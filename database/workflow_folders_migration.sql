@@ -10,13 +10,15 @@
 -- Roles: reviewer = admin AND is_reviewer = true   (Joe)
 --        editor   = admin AND is_reviewer = false  (Ravi)
 --
--- Apply once in the Supabase SQL editor. Safe to re-run.
+-- Apply once in the Supabase SQL editor. Idempotent / safe to re-run.
 -- ══════════════════════════════════════════════════════════
 
--- ── 1. Status constraint ──────────────────────────────────────
+begin;
+
+-- ── 1. Drop the old constraint so statuses can be re-mapped freely ──
+-- (Must happen BEFORE the data migration — adding the new constraint
+--  while draft/done rows still exist would violate it.)
 alter table videos drop constraint if exists videos_status_check;
-alter table videos add constraint videos_status_check
-  check (status in ('empty','raw','to_review','to_edit','completed','published'));
 
 -- ── 2. Migrate existing rows onto the new lifecycle ───────────
 update videos set status = case
@@ -28,23 +30,40 @@ update videos set status = case
 end
 where status in ('draft','done');
 
--- review_round is now a 1-based cycle counter
-alter table videos alter column review_round set default 1;
-update videos set review_round = 1 where coalesce(review_round,0) = 0;
+-- Coerce any other legacy/unknown status so the new constraint will hold:
+-- content-bearing → to_review, otherwise → empty
+update videos set status = case
+  when storage_key is not null or video_url is not null then 'to_review'
+  else 'empty'
+end
+where status not in ('empty','raw','to_review','to_edit','completed','published');
 
--- ── 3. Round-scoped feedback ──────────────────────────────────
+-- review_round is now a 1-based cycle counter
+update videos set review_round = 1 where coalesce(review_round,0) = 0;
+alter table videos alter column review_round set default 1;
+
+-- ── 3. Add the new constraint (every row already conforms) ────
+alter table videos add constraint videos_status_check
+  check (status in ('empty','raw','to_review','to_edit','completed','published'));
+
+-- ── 4. Round-scoped feedback ──────────────────────────────────
 alter table video_feedback
   add column if not exists review_round integer not null default 1;
 
--- ── 4. RLS: strict role-scoped reads, shared admin writes ─────
+-- ── 5. RLS: strict role-scoped reads, shared admin writes ─────
 -- Reads decide which folder each role sees. Writes stay admin-wide
 -- (UI-gated) so a cross-folder transition can write a row the writer
 -- will no longer be able to read. Client transitions use
 -- .update().eq(id) without .select() (return=minimal), so no SELECT
 -- on the post-update row is ever required.
 
-drop policy if exists "videos_worker_read" on videos;
-drop policy if exists "videos_admin_write"  on videos;
+drop policy if exists "videos_worker_read"   on videos;
+drop policy if exists "videos_admin_write"   on videos;
+drop policy if exists "videos_reviewer_read" on videos;
+drop policy if exists "videos_editor_read"   on videos;
+drop policy if exists "videos_admin_insert"  on videos;
+drop policy if exists "videos_admin_update"  on videos;
+drop policy if exists "videos_admin_delete"  on videos;
 
 -- Everyone (incl. workers) reads published
 create policy "videos_worker_read" on videos for select using (
@@ -79,3 +98,5 @@ create policy "videos_admin_update" on videos for update using (
 create policy "videos_admin_delete" on videos for delete using (
   exists (select 1 from profiles where id = auth.uid() and role = 'admin')
 );
+
+commit;
