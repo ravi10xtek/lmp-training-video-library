@@ -224,8 +224,8 @@ const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
 const isWorkflowStatus = (s) => WORKFLOW_STATUSES.includes(s);
 
 function updateCounts() {
-  const isAdmin = currentProfile?.role === 'admin';
-  const visibleVideos = allVideos.filter(v => !isWorkflowStatus(v.status) && (isAdmin || v.status === 'published'));
+  // All Videos / category counts reflect the published catalog only
+  const visibleVideos = allVideos.filter(v => v.status === 'published');
   const total = visibleVideos.length;
   const ops  = visibleVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
   const prop = visibleVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
@@ -298,10 +298,13 @@ function getFilteredVideos() {
     if (isWorkflowStatus(currentStatus)) {
       // A workflow folder is open (TO REVIEW / TO EDIT / COMPLETED)
       if (v.status !== currentStatus) return false;
+    } else if (currentStatus === 'empty') {
+      // "Empty slots" filter — unpublished slots the editor can fill
+      if (v.status !== 'empty' && v.status !== 'raw') return false;
     } else {
-      // Main browse / published / category views hide in-pipeline videos
-      if (isWorkflowStatus(v.status)) return false;
-      if (currentStatus && v.status !== currentStatus) return false;
+      // All Videos / category / Published views show only published videos —
+      // nothing in-pipeline or unpublished leaks into the public catalog.
+      if (v.status !== 'published') return false;
     }
     if (currentFilter !== 'all' && v.categories?.slug !== currentFilter) return false;
     if (currentSubcatFilter !== 'all' && v.subcategories?.slug !== currentSubcatFilter) return false;
