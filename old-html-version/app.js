@@ -1472,9 +1472,8 @@ async function saveVideo() {
   } else {
     if (!editingVideoId && insertedId) {
       // Promote the freshly-uploaded video into Joe's TO REVIEW queue.
-      // (minimal update — editor can't SELECT a to_review row under RLS)
-      const { error: promoteErr } = await sb.from('videos')
-        .update({ status: 'to_review', review_round: 1 }).eq('id', insertedId);
+      // Via RPC — editor can't SELECT a to_review row, so a plain update 403s.
+      const { error: promoteErr } = await sb.rpc('set_video_status', { p_video_id: insertedId, p_status: 'to_review' });
       if (promoteErr) {
         showToast('Uploaded, but could not submit for review: ' + promoteErr.message, 'error');
       } else {
@@ -1719,13 +1718,11 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
   const otherBtn = document.getElementById(btnId === 'send-back-btn' ? 'mark-complete-btn' : 'send-back-btn');
   if (otherBtn) otherBtn.disabled = true;
 
-  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
+  await ensureFreshSession();
   const reviewedAt = new Date().toISOString();
-  const { error } = await sb.from('videos').update({
-    status,
-    reviewed_at: reviewedAt,
-    reviewed_by: currentUser.id,
-  }).eq('id', videoId);
+  // Transition via SECURITY DEFINER RPC — a plain update would 403 because the
+  // row leaves Joe's read-visibility once it's no longer 'to_review'.
+  const { error } = await sb.rpc('set_video_status', { p_video_id: videoId, p_status: status });
 
   if (error) {
     showToast(`${errorMsg}: ${error.message}`, 'error');
@@ -1815,8 +1812,8 @@ async function submitForReview() {
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
-  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
-  const { error } = await sb.from('videos').update({ status: 'to_review', review_round: 1 }).eq('id', currentVideoId);
+  await ensureFreshSession();
+  const { error } = await sb.rpc('set_video_status', { p_video_id: currentVideoId, p_status: 'to_review' });
   if (error) {
     showToast('Could not submit: ' + error.message, 'error');
     updateEditorBtnState(v);   // restores label + re-enables
@@ -1846,9 +1843,11 @@ async function markAsDone() {
   btn.disabled = true;
   btn.textContent = 'Saving…';
 
-  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
+  await ensureFreshSession();
   const nextRound = (v.review_round || 1) + 1;
-  const { error } = await sb.from('videos').update({ status: 'to_review', review_round: nextRound }).eq('id', currentVideoId);
+  // RPC bumps review_round server-side (to_edit → to_review) and avoids the
+  // read-visibility 403 that a plain update hits.
+  const { error } = await sb.rpc('set_video_status', { p_video_id: currentVideoId, p_status: 'to_review' });
   if (error) {
     showToast('Could not update status: ' + error.message, 'error');
     updateEditorBtnState(v);   // restores label + re-enables
@@ -1878,8 +1877,8 @@ async function publishVideo() {
   btn.disabled = true;
   btn.textContent = 'Publishing…';
 
-  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
-  const { error } = await sb.from('videos').update({ status: 'published' }).eq('id', currentVideoId);
+  await ensureFreshSession();
+  const { error } = await sb.rpc('set_video_status', { p_video_id: currentVideoId, p_status: 'published' });
   if (error) {
     showToast('Could not publish: ' + error.message, 'error');
     btn.disabled = false;

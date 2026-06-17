@@ -114,3 +114,51 @@ create policy "videos_staff_delete" on videos for delete
   ));
 
 commit;
+
+-- ══════════════════════════════════════════════════════════
+-- 6. Status transitions via SECURITY DEFINER function
+--
+-- Strict per-role SELECT means a transition (e.g. to_review → to_edit) moves
+-- the row out of the actor's own read scope, which makes a plain client UPDATE
+-- fail RLS ("new row violates row-level security policy"). This function runs
+-- with elevated rights (bypassing the read re-check) but verifies the caller
+-- is staff and applies the review_round logic server-side.
+-- ══════════════════════════════════════════════════════════
+create or replace function set_video_status(p_video_id uuid, p_status text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  cur text;
+  rnd int;
+begin
+  if not exists (
+    select 1 from profiles
+    where id = auth.uid() and (role = 'admin' or is_reviewer = true)
+  ) then
+    raise exception 'Not authorized';
+  end if;
+
+  select status, coalesce(review_round, 1) into cur, rnd
+  from videos where id = p_video_id;
+  if cur is null then
+    raise exception 'Video not found';
+  end if;
+
+  update videos set
+    status = p_status,
+    review_round = case
+      when p_status = 'to_review' and cur = 'to_edit'        then rnd + 1
+      when p_status = 'to_review' and cur in ('empty','raw') then 1
+      else review_round
+    end,
+    reviewed_at = case when p_status in ('to_edit','completed') then now() else reviewed_at end,
+    reviewed_by = case when p_status in ('to_edit','completed') then auth.uid() else reviewed_by end
+  where id = p_video_id;
+end;
+$$;
+
+revoke all on function set_video_status(uuid, text) from public, anon;
+grant execute on function set_video_status(uuid, text) to authenticated;
