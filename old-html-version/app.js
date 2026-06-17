@@ -2743,9 +2743,22 @@ async function downloadRecording() {
 // PWA — Register Service Worker
 // ══════════════════════════════════════════════════════
 if ('serviceWorker' in navigator) {
+  // Auto-reload once when a newly-activated SW takes control, so a fresh deploy
+  // applies itself without the user hard-refreshing.
+  let _swReloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (_swReloaded) return;
+    _swReloaded = true;
+    window.location.reload();
+  });
+
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js')
-      .then(reg => console.log('[SW] Registered, scope:', reg.scope))
+      .then(reg => {
+        console.log('[SW] Registered, scope:', reg.scope);
+        // Check for a new version on every load
+        reg.update();
+      })
       .catch(err => console.warn('[SW] Registration failed:', err));
   });
 }
