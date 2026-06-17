@@ -2,7 +2,7 @@
 // Caches the app shell so it loads instantly and passes PWA installability checks.
 // Also handles Web Push notifications.
 
-const CACHE_NAME = 'lmp-training-v17';
+const CACHE_NAME = 'lmp-training-v18';
 
 // App shell files to cache on install
 const SHELL = [
@@ -44,19 +44,32 @@ self.addEventListener('fetch', (event) => {
     return; // let browser handle normally
   }
 
-  // Cache-first for static app shell assets
+  const cacheGet = (req) => fetch(req).then((response) => {
+    if (response.ok && req.method === 'GET') {
+      const clone = response.clone();
+      caches.open(CACHE_NAME).then((cache) => cache.put(req, clone));
+    }
+    return response;
+  });
+
+  // The HTML shell and app code change on every deploy — serve them
+  // NETWORK-FIRST so a new version loads immediately, with the cache only as
+  // an offline fallback. (Cache-first here is what made old code linger.)
+  const isShell =
+    event.request.mode === 'navigate' ||
+    url.pathname === '/' ||
+    url.pathname.endsWith('/app.js') ||
+    url.pathname.endsWith('/styles.css') ||
+    url.pathname.endsWith('/sw.js');
+
+  if (isShell) {
+    event.respondWith(cacheGet(event.request).catch(() => caches.match(event.request)));
+    return;
+  }
+
+  // Cache-first for immutable static assets (icons, manifest)
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((response) => {
-        // Cache successful GET responses for app shell files
-        if (response.ok && event.request.method === 'GET') {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    })
+    caches.match(event.request).then((cached) => cached || cacheGet(event.request))
   );
 });
 
