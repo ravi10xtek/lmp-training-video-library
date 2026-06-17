@@ -167,10 +167,22 @@
         <div class="sidebar-divider"></div>
         <div class="sidebar-section">
           <div class="sidebar-section-label">Admin</div>
-          <div class="sidebar-item all" onclick="filterDrafts(this)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            Drafts
-            <span class="sidebar-count" id="count-drafts">0</span>
+          <!-- Joe (reviewer) only -->
+          <div class="sidebar-item all hidden" id="folder-to-review" onclick="filterStatus('to_review', this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+            To Review
+            <span class="sidebar-count" id="count-to-review">0</span>
+          </div>
+          <!-- Ravi (editor) only -->
+          <div class="sidebar-item all hidden" id="folder-to-edit" onclick="filterStatus('to_edit', this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            To Edit
+            <span class="sidebar-count" id="count-to-edit">0</span>
+          </div>
+          <div class="sidebar-item all hidden" id="folder-completed" onclick="filterStatus('completed', this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            Completed Videos
+            <span class="sidebar-count" id="count-completed">0</span>
           </div>
           <div class="sidebar-item all" onclick="showAdmin()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
@@ -270,13 +282,13 @@
       <div class="workflow-section hidden" id="reviewer-section">
         <div class="workflow-section-label">Review decision</div>
         <div class="reviewer-buttons">
-          <button class="btn-reviewer" id="mark-reviewed-btn" onclick="markReviewed()">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            Mark as Reviewed
-          </button>
-          <button class="btn-more-changes hidden" id="more-changes-btn" onclick="requestMoreChanges()">
+          <button class="btn-more-changes" id="send-back-btn" onclick="sendBackForEdits()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            More Changes
+            Send back for edits
+          </button>
+          <button class="btn-reviewer" id="mark-complete-btn" onclick="markComplete()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            Mark as Complete
           </button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
@@ -350,10 +362,13 @@
           <label class="form-label">Status</label>
           <select class="form-select" id="v-status">
             <option value="empty">Empty slot</option>
-            <option value="draft">Draft (awaiting review)</option>
-            <option value="done">Done (revised, awaiting re-check)</option>
+            <option value="raw">Raw / slot (not yet submitted)</option>
+            <option value="to_review">To Review (with Joe)</option>
+            <option value="to_edit">To Edit (with Ravi)</option>
+            <option value="completed">Completed (ready to publish)</option>
             <option value="published">Published</option>
           </select>
+          <div class="form-hint" style="font-size:11px;color:var(--muted);margin-top:4px">New uploads are sent to Joe's <strong>To Review</strong> automatically.</div>
         </div>
       </div>
 
@@ -542,6 +557,6 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=20260616b"></script>
+<script src="app.js?v=20260617a"></script>
 </body>
 </html>

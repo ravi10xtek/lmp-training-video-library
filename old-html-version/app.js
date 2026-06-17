@@ -164,6 +164,14 @@ async function initApp(user) {
     document.getElementById('capture-topbar-btn').classList.remove('hidden');
   }
 
+  // Role-specific workflow folders: Joe (reviewer) sees TO REVIEW;
+  // Ravi (editor = admin, not reviewer) sees TO EDIT + COMPLETED VIDEOS.
+  const isEditor = profile?.role === 'admin' && !profile?.is_reviewer;
+  const toggle = (id, show) => document.getElementById(id)?.classList.toggle('hidden', !show);
+  toggle('folder-to-review', !!profile?.is_reviewer);
+  toggle('folder-to-edit',   isEditor);
+  toggle('folder-completed', isEditor);
+
   // Load data
   await Promise.all([loadCategories(), loadVideos()]);
   await Promise.all([loadNotifications(), loadRecordingsCount()]);
@@ -211,20 +219,27 @@ async function loadVideos() {
   renderVideos();
 }
 
+// In-pipeline statuses — hidden from the main browse, shown only in their folders
+const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
+const isWorkflowStatus = (s) => WORKFLOW_STATUSES.includes(s);
+
 function updateCounts() {
   const isAdmin = currentProfile?.role === 'admin';
-  const visibleVideos = allVideos.filter(v => v.status !== 'draft' && v.status !== 'done' && (isAdmin || v.status === 'published'));
+  const visibleVideos = allVideos.filter(v => !isWorkflowStatus(v.status) && (isAdmin || v.status === 'published'));
   const total = visibleVideos.length;
   const ops  = visibleVideos.filter(v => v.categories?.slug === 'lmp-operations').length;
   const prop = visibleVideos.filter(v => v.categories?.slug === 'properties-contacts').length;
   const plmb = visibleVideos.filter(v => v.categories?.slug === 'plumbing-training').length;
-  const drafts = allVideos.filter(v => v.status === 'draft' || v.status === 'done').length;
   document.getElementById('count-all').textContent = total;
   document.getElementById('count-ops').textContent = ops;
   document.getElementById('count-prop').textContent = prop;
   document.getElementById('count-plmb').textContent = plmb;
-  const draftEl = document.getElementById('count-drafts');
-  if (draftEl) draftEl.textContent = drafts;
+
+  // Role-specific workflow folders
+  const setCount = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
+  setCount('count-to-review', allVideos.filter(v => v.status === 'to_review').length);
+  setCount('count-to-edit',   allVideos.filter(v => v.status === 'to_edit').length);
+  setCount('count-completed', allVideos.filter(v => v.status === 'completed').length);
 }
 
 // ══════════════════════════════════════════════════════
@@ -268,14 +283,8 @@ function filterStatus(status, el) {
   renderVideos();
 }
 
-function filterDrafts(el) {
-  currentStatus = 'drafts';
-  currentFilter = 'all';
-  currentSubcatFilter = 'all';
-  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
-  renderVideos();
-}
+// Workflow folders (TO REVIEW / TO EDIT / COMPLETED) call filterStatus() directly
+// from the sidebar with the matching status key.
 
 function handleSearch(val) {
   currentSearch = val.toLowerCase();
@@ -286,11 +295,12 @@ function getFilteredVideos() {
   const isAdmin = currentProfile?.role === 'admin';
   return allVideos.filter(v => {
     if (!isAdmin && v.status !== 'published') return false;
-    const isDraftVideo = v.status === 'draft' || v.status === 'done';
-    if (currentStatus === 'drafts') {
-      if (!isAdmin || !isDraftVideo) return false;
+    if (isWorkflowStatus(currentStatus)) {
+      // A workflow folder is open (TO REVIEW / TO EDIT / COMPLETED)
+      if (v.status !== currentStatus) return false;
     } else {
-      if (isDraftVideo) return false;
+      // Main browse / published / category views hide in-pipeline videos
+      if (isWorkflowStatus(v.status)) return false;
       if (currentStatus && v.status !== currentStatus) return false;
     }
     if (currentFilter !== 'all' && v.categories?.slug !== currentFilter) return false;
@@ -377,8 +387,9 @@ function renderVideoCard(v, isAdmin) {
   const typeClass = v.video_type ? `type-${v.video_type.toLowerCase()}` : 'status-empty';
   const STATUS_META = {
     published: { color: 'var(--teal)', label: 'Published' },
-    draft:     { color: '#f5a524',     label: 'Draft' },
-    done:      { color: '#3b82f6',     label: 'Done' },
+    to_review: { color: '#f5a524',     label: 'To Review' },
+    to_edit:   { color: '#3b82f6',     label: 'To Edit' },
+    completed: { color: '#a855f7',     label: 'Completed' },
     raw:       { color: 'var(--muted)', label: 'Raw' },
     empty:     { color: 'var(--muted)', label: 'Empty slot' },
   };
@@ -397,7 +408,7 @@ function renderVideoCard(v, isAdmin) {
 
   const duration = v.duration_seconds ? formatDuration(v.duration_seconds) : '';
 
-  const playableStatus = v.status === 'published' || v.status === 'draft' || v.status === 'done';
+  const playableStatus = v.status === 'published' || isWorkflowStatus(v.status);
   const clickAction = playableStatus && hasPlayableVideo
     ? `onclick="openVideo('${v.id}')"`
     : isAdmin ? `onclick="openEditVideo('${v.id}')"` : '';
@@ -515,18 +526,20 @@ async function openVideo(id) {
   } else {
     transcribeSection.classList.add('hidden');
   }
-  // Reviewer section — Joe only
+  // Reviewer decision (Joe) — only actionable while in the TO REVIEW folder
   const reviewerSection = document.getElementById('reviewer-section');
-  if (isReviewer) {
+  if (isReviewer && v.status === 'to_review') {
     reviewerSection.classList.remove('hidden');
     updateReviewedBtnState(v);
   } else {
     reviewerSection.classList.add('hidden');
   }
 
-  // Editor section — other admins (not the reviewer)
+  // Editor actions (Ravi) — Mark as Done (to_edit), Publish (completed), or
+  // Submit a freshly-uploaded slot (empty/raw)
   const editorSection = document.getElementById('editor-section');
-  if (isAdmin && !isReviewer) {
+  const editorActionable = ['empty', 'raw', 'to_edit', 'completed'].includes(v.status);
+  if (isAdmin && !isReviewer && editorActionable) {
     editorSection.classList.remove('hidden');
     updateEditorBtnState(v);
   } else {
@@ -557,10 +570,15 @@ async function loadFeedback(videoId) {
   const list = document.getElementById('feedback-list');
   list.innerHTML = '<div class="feedback-empty">Loading…</div>';
 
+  // Only show the current review cycle's feedback. When Ravi resubmits, the
+  // video's review_round increments, so prior-round notes are hidden (but kept).
+  const round = allVideos.find(x => x.id === videoId)?.review_round || 1;
+
   const { data, error } = await sb
     .from('video_feedback')
     .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
+    .eq('review_round', round)
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -884,6 +902,7 @@ async function submitComment() {
       audio_path:       audioPath,
       image_path:       imagePath,
       duration_seconds: composerAudioBlob ? composerAudioDuration : null,
+      review_round:     allVideos.find(x => x.id === currentVideoId)?.review_round || 1,
     });
     if (insErr) throw insErr;
 
@@ -1427,13 +1446,15 @@ async function saveVideo() {
     return;
   }
 
-  const prevStatus = editingVideoId ? allVideos.find(v => v.id === editingVideoId)?.status : null;
-
   let error, insertedId;
   if (editingVideoId) {
     ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
   } else {
     payload.created_by = currentUser.id;
+    payload.review_round = 1;
+    // Insert in an editor-visible state ('raw') so we can read the new id back
+    // under RLS, then promote into Joe's TO REVIEW with a minimal update below.
+    payload.status = 'raw';
     const { data: inserted, error: insertErr } = await sb.from('videos').insert(payload).select('id').single();
     error = insertErr;
     insertedId = inserted?.id;
@@ -1443,16 +1464,21 @@ async function saveVideo() {
   if (error) {
     showToast('Error: ' + error.message, 'error');
   } else {
-    showToast(editingVideoId ? 'Video updated' : 'Video slot created', 'success');
     if (!editingVideoId && insertedId) {
-      // New draft uploaded — notify Joe (reviewer) so he knows it's in the queue
-      console.log('[saveVideo] firing video_uploaded notify for', insertedId);
-      invokeEdge(NOTIFY_FUNCTION, {
-        body: { type: 'video_uploaded', videoId: insertedId, videoTitle: payload.title },
-      }).then(r => console.log('[notify video_uploaded] response:', r))
-        .catch(err => console.warn('[notify video_uploaded] error:', err));
-    } else if (editingVideoId && payload.status === 'done' && prevStatus !== 'done') {
-      notifyOnStatusDone(editingVideoId, payload.title);
+      // Promote the freshly-uploaded video into Joe's TO REVIEW queue.
+      // (minimal update — editor can't SELECT a to_review row under RLS)
+      const { error: promoteErr } = await sb.from('videos')
+        .update({ status: 'to_review', review_round: 1 }).eq('id', insertedId);
+      if (promoteErr) {
+        showToast('Uploaded, but could not submit for review: ' + promoteErr.message, 'error');
+      } else {
+        showToast('Uploaded — sent to Joe for review', 'success');
+        invokeEdge(NOTIFY_FUNCTION, {
+          body: { type: 'video_uploaded', videoId: insertedId, videoTitle: payload.title },
+        }).catch(err => console.warn('[notify video_uploaded] error:', err));
+      }
+    } else {
+      showToast('Video updated', 'success');
     }
     document.getElementById('admin-modal').classList.remove('open');
     await loadVideos();
@@ -1645,120 +1671,87 @@ function notifClick(videoId) {
 // ══════════════════════════════════════════════════════
 // REVIEWER — mark as reviewed & notify
 // ══════════════════════════════════════════════════════
-async function markReviewed() {
+// Canonical reviewer-button labels (restored by updateReviewedBtnState).
+const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Send back for edits';
+const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Complete';
+
+// Joe sends the video back to Ravi's TO EDIT folder with his feedback.
+async function sendBackForEdits() {
+  await reviewerDecision({
+    status: 'to_edit',
+    guardStatus: 'to_review',
+    btnId: 'send-back-btn',
+    notifyType: 'more_changes_requested',
+    successMsg: 'Sent back for edits — Ravi notified',
+    errorMsg: 'Could not send back',
+  });
+}
+
+// Joe approves the video — it moves to Ravi's COMPLETED VIDEOS folder.
+async function markComplete() {
+  await reviewerDecision({
+    status: 'completed',
+    guardStatus: 'to_review',
+    btnId: 'mark-complete-btn',
+    notifyType: 'round2_reviewed',
+    successMsg: 'Marked complete — moved to Ravi\'s Completed Videos',
+    errorMsg: 'Could not mark complete',
+  });
+}
+
+// Shared handler for the reviewer's two decisions (send back / complete).
+async function reviewerDecision({ status, guardStatus, btnId, notifyType, successMsg, errorMsg }) {
   const isReviewer = currentProfile?.is_reviewer === true;
   if (!currentVideoId || !isReviewer) return;
   const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v) return;
+  if (!v || v.status !== guardStatus) return;
 
-  const btn = document.getElementById('mark-reviewed-btn');
-  btn.disabled = true;
-  btn.textContent = 'Saving…';
+  const videoId = currentVideoId;
+  const title = v.title;
+  const btn = document.getElementById(btnId);
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  const otherBtn = document.getElementById(btnId === 'send-back-btn' ? 'mark-complete-btn' : 'send-back-btn');
+  if (otherBtn) otherBtn.disabled = true;
 
-  const type       = v.status === 'done' ? 'round2_reviewed' : 'round1_reviewed';
-  const newRound   = type === 'round2_reviewed' ? 2 : 1;
   const reviewedAt = new Date().toISOString();
-
-  // 1. Write to DB directly — triggers Ravi's realtime subscription instantly
   const { error } = await sb.from('videos').update({
-    review_round: newRound,
-    reviewed_at:  reviewedAt,
-    reviewed_by:  currentUser.id,
-  }).eq('id', currentVideoId);
+    status,
+    reviewed_at: reviewedAt,
+    reviewed_by: currentUser.id,
+  }).eq('id', videoId);
 
   if (error) {
-    showToast('Could not submit review: ' + error.message, 'error');
-    btn.disabled = false;
-    updateReviewedBtnState(v);
+    showToast(`${errorMsg}: ${error.message}`, 'error');
+    updateReviewedBtnState(v);   // restores labels + re-enables
     return;
   }
 
-  // 2. Update local state & UI immediately
-  v.review_round = newRound;
-  v.reviewed_at  = reviewedAt;
-  showToast(
-    type === 'round2_reviewed' ? 'Final approval sent!' : 'Review submitted — admins notified',
-    'success'
-  );
-  btn.disabled = false;
-  updateReviewedBtnState(v);
+  v.status = status;
+  v.reviewed_at = reviewedAt;
+  showToast(successMsg, 'success');
+  // The video has left Joe's TO REVIEW folder — close + refresh his list
+  closeVideoModal();
+  await loadVideos();
 
-  // 3. Fire edge function in background for bell notifications + SMS only
   invokeEdge(NOTIFY_FUNCTION, {
-    body: { type, videoId: currentVideoId, videoTitle: v.title },
-  }).catch(err => console.warn('[markReviewed notify]', err));
+    body: { type: notifyType, videoId, videoTitle: title },
+  }).catch(err => console.warn('[reviewerDecision notify]', err));
 }
 
 function updateReviewedBtnState(v) {
-  const btn = document.getElementById('mark-reviewed-btn');
-  const moreBtn = document.getElementById('more-changes-btn');
+  const sendBackBtn = document.getElementById('send-back-btn');
+  const completeBtn = document.getElementById('mark-complete-btn');
   const statusEl = document.getElementById('reviewer-status');
-  if (!btn || !v) return;
-  const reviewedDate = v.reviewed_at ? new Date(v.reviewed_at).toLocaleDateString() : '';
-  const checkSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
-  const editSvg  = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
+  if (!sendBackBtn || !v) return;
 
-  // Show "More Changes" button only when awaiting final approval (status=done, not yet approved)
-  const awaitingFinalApproval = v.status === 'done' && v.review_round < 2;
-  moreBtn?.classList.toggle('hidden', !awaitingFinalApproval);
+  // Restore canonical labels + enabled state (recovers from a stuck "Saving…").
+  sendBackBtn.disabled = false; sendBackBtn.innerHTML = SEND_BACK_BTN_HTML;
+  if (completeBtn) { completeBtn.disabled = false; completeBtn.innerHTML = MARK_COMPLETE_BTN_HTML; }
 
-  if (v.status === 'done' && v.review_round >= 2) {
-    btn.innerHTML = `${checkSvg} Final Approval Sent`;
-    btn.disabled = true;
-    moreBtn?.classList.add('hidden');
-    setStatusText(statusEl, `Final approval given${reviewedDate ? ' on ' + reviewedDate : ''}`);
-  } else if (v.status === 'done') {
-    btn.innerHTML = `${checkSvg} Give Final Approval`;
-    btn.disabled = false;
-    setStatusText(statusEl, 'Revised and ready — approve or request more changes');
-  } else if (v.status === 'draft' && v.review_round >= 1) {
-    btn.innerHTML = `⏳ Waiting for revisions`;
-    btn.disabled = true;
-    moreBtn?.classList.add('hidden');
-    setStatusText(statusEl, 'You requested more changes — editor has been notified');
-  } else {
-    btn.innerHTML = `${checkSvg} Mark as Reviewed`;
-    btn.disabled = false;
-    setStatusText(statusEl, '');
-  }
-}
-
-async function requestMoreChanges() {
-  const isReviewer = currentProfile?.is_reviewer === true;
-  if (!currentVideoId || !isReviewer) return;
-  const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v || v.status !== 'done') return;
-
-  const moreBtn    = document.getElementById('more-changes-btn');
-  const reviewedBtn = document.getElementById('mark-reviewed-btn');
-  moreBtn.disabled    = true;
-  reviewedBtn.disabled = true;
-  moreBtn.textContent = 'Saving…';
-
-  // 1. Write to DB directly — triggers Ravi's realtime subscription instantly
-  const { error } = await sb.from('videos').update({
-    status:       'draft',
-    review_round: 1,
-  }).eq('id', currentVideoId);
-
-  if (error) {
-    showToast('Could not request changes: ' + error.message, 'error');
-    moreBtn.disabled    = false;
-    reviewedBtn.disabled = false;
-    updateReviewedBtnState(v);
-    return;
-  }
-
-  // 2. Update local state & UI immediately
-  v.status       = 'draft';
-  v.review_round = 1;
-  showToast('More changes requested — editors notified', 'success');
-  updateReviewedBtnState(v);
-
-  // 3. Fire edge function in background for bell notifications + SMS only
-  invokeEdge(NOTIFY_FUNCTION, {
-    body: { type: 'more_changes_requested', videoId: currentVideoId, videoTitle: v.title },
-  }).catch(err => console.warn('[requestMoreChanges notify]', err));
+  const round = v.review_round || 1;
+  setStatusText(statusEl, round > 1
+    ? `Revision round ${round} — send back for more edits, or mark complete`
+    : 'Review this video — send back with feedback, or mark complete');
 }
 
 // ── EDITOR ACTIONS ───────────────────────────────────
@@ -1788,76 +1781,87 @@ function updateEditorBtnState(v) {
   markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML;
   if (publishBtn) { publishBtn.disabled = false; publishBtn.innerHTML = PUBLISH_BTN_HTML; }
 
-  const showSubmit   = v.status === 'draft' && v.review_round === 0;
-  const showMarkDone = v.status === 'draft' && v.review_round >= 1;
-  const showPublish  = v.status === 'done'  && v.review_round >= 2;
+  const showSubmit   = v.status === 'empty' || v.status === 'raw';
+  const showMarkDone = v.status === 'to_edit';
+  const showPublish  = v.status === 'completed';
 
   submitBtn?.classList.toggle('hidden', !showSubmit);
   markDoneBtn.classList.toggle('hidden', !showMarkDone);
   publishBtn.classList.toggle('hidden', !showPublish);
 
   const text =
-    showSubmit   ? 'Upload done — submit when ready for Joe to review' :
+    showSubmit   ? 'Upload done — submit for Joe to review' :
     showMarkDone ? 'Joe requested changes — click when revisions are ready' :
-    showPublish  ? 'Joe gave final approval — ready to publish' :
-    v.status === 'done' && v.review_round < 2 ? 'Waiting for Joe\'s final approval' :
+    showPublish  ? 'Approved by Joe — ready to publish' :
+    v.status === 'to_review' ? 'Waiting for Joe to review' :
     v.status === 'published' ? 'Published ✓' : '';
   setStatusText(statusEl, text);
 }
 
+// Ravi submits a freshly-uploaded slot → Joe's TO REVIEW (review cycle 1).
 async function submitForReview() {
   if (!currentVideoId) return;
   const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v || v.status !== 'draft' || v.review_round !== 0) return;
+  if (!v || !(v.status === 'empty' || v.status === 'raw')) return;
 
   const btn = document.getElementById('submit-review-btn');
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
-  // 1. Touch the video row so Joe's realtime subscription picks it up
-  //    (no status change needed here — draft+round=0 is correct state)
-  //    Fire edge function in background for the bell notification
+  const { error } = await sb.from('videos').update({ status: 'to_review', review_round: 1 }).eq('id', currentVideoId);
+  if (error) {
+    showToast('Could not submit: ' + error.message, 'error');
+    updateEditorBtnState(v);   // restores label + re-enables
+    return;
+  }
+
+  v.status = 'to_review';
+  v.review_round = 1;
+  const videoId = currentVideoId, title = v.title;
   showToast('Submitted for review — Joe has been notified', 'success');
-  btn.disabled = false;
-  updateEditorBtnState(v);
+  closeVideoModal();
+  await loadVideos();
 
   invokeEdge(NOTIFY_FUNCTION, {
-    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
+    body: { type: 'video_ready', videoId, videoTitle: title },
   }).catch(err => console.warn('[submitForReview notify]', err));
 }
 
+// Ravi finished a revision → back to Joe's TO REVIEW. Bumping review_round
+// hides the previous round's feedback once it's in Joe's hands again.
 async function markAsDone() {
   if (!currentVideoId) return;
   const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v || v.status !== 'draft') return;
+  if (!v || v.status !== 'to_edit') return;
 
   const btn = document.getElementById('mark-done-btn');
   btn.disabled = true;
   btn.textContent = 'Saving…';
 
-  const { error } = await sb.from('videos').update({ status: 'done' }).eq('id', currentVideoId);
+  const nextRound = (v.review_round || 1) + 1;
+  const { error } = await sb.from('videos').update({ status: 'to_review', review_round: nextRound }).eq('id', currentVideoId);
   if (error) {
     showToast('Could not update status: ' + error.message, 'error');
-    btn.disabled = false;
-    updateEditorBtnState(v);
+    updateEditorBtnState(v);   // restores label + re-enables
     return;
   }
 
-  // Notify reviewer
-  invokeEdge(NOTIFY_FUNCTION, {
-    body: { type: 'video_ready', videoId: currentVideoId, videoTitle: v.title },
-  }).catch(err => console.warn('[markAsDone notify]', err));
-
-  v.status = 'done';
+  v.status = 'to_review';
+  v.review_round = nextRound;
+  const videoId = currentVideoId, title = v.title;
   showToast('Marked as done — Joe has been notified', 'success');
-  btn.disabled = false;
-  updateEditorBtnState(v);
+  closeVideoModal();
+  await loadVideos();
+
+  invokeEdge(NOTIFY_FUNCTION, {
+    body: { type: 'video_ready', videoId, videoTitle: title },
+  }).catch(err => console.warn('[markAsDone notify]', err));
 }
 
 async function publishVideo() {
   if (!currentVideoId) return;
   const v = allVideos.find(x => x.id === currentVideoId);
-  if (!v) return;
+  if (!v || v.status !== 'completed') return;
 
   if (!confirm(`Publish "${v.title}"? It will become visible to all workers.`)) return;
 
@@ -1878,12 +1882,6 @@ async function publishVideo() {
   updateEditorBtnState(v);
   closeVideoModal();
   await loadVideos();
-}
-
-function notifyOnStatusDone(videoId, videoTitle) {
-  invokeEdge(NOTIFY_FUNCTION, {
-    body: { type: 'video_ready', videoId, videoTitle },
-  }).catch(err => console.warn('[notify video_ready]', err));
 }
 
 function timeAgo(isoString) {
