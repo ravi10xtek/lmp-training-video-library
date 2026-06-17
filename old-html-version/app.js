@@ -879,6 +879,8 @@ async function submitComment() {
   const sendHtml = sendBtn.innerHTML;
   sendBtn.textContent = 'Sending…';
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on upload/insert
+
   try {
     let audioPath = null;
     let imagePath = null;
@@ -1449,6 +1451,7 @@ async function saveVideo() {
     return;
   }
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
   let error, insertedId;
   if (editingVideoId) {
     ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
@@ -1716,6 +1719,7 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
   const otherBtn = document.getElementById(btnId === 'send-back-btn' ? 'mark-complete-btn' : 'send-back-btn');
   if (otherBtn) otherBtn.disabled = true;
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
   const reviewedAt = new Date().toISOString();
   const { error } = await sb.from('videos').update({
     status,
@@ -1811,6 +1815,7 @@ async function submitForReview() {
   btn.disabled = true;
   btn.textContent = 'Sending…';
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
   const { error } = await sb.from('videos').update({ status: 'to_review', review_round: 1 }).eq('id', currentVideoId);
   if (error) {
     showToast('Could not submit: ' + error.message, 'error');
@@ -1841,6 +1846,7 @@ async function markAsDone() {
   btn.disabled = true;
   btn.textContent = 'Saving…';
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
   const nextRound = (v.review_round || 1) + 1;
   const { error } = await sb.from('videos').update({ status: 'to_review', review_round: nextRound }).eq('id', currentVideoId);
   if (error) {
@@ -1872,6 +1878,7 @@ async function publishVideo() {
   btn.disabled = true;
   btn.textContent = 'Publishing…';
 
+  await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
   const { error } = await sb.from('videos').update({ status: 'published' }).eq('id', currentVideoId);
   if (error) {
     showToast('Could not publish: ' + error.message, 'error');
