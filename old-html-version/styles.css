@@ -702,6 +702,8 @@ img, video, canvas, svg { max-width: 100%; }
 .card-tag.type-deep-dive  { background: rgba(253, 160, 133, 0.15); color: #F0997B; border: 1px solid rgba(253, 160, 133, 0.3); }
 .card-tag.type-raw        { background: rgba(255,255,255,0.08); color: var(--muted); }
 .card-tag.status-empty    { background: rgba(255,255,255,0.05); color: var(--muted); border: 1px solid rgba(255,255,255,0.1); }
+.card-tag.round-badge     { background: rgba(148,163,184,0.15); color: #cbd5e1; border: 1px solid rgba(148,163,184,0.3); }
+.card-tag.round-badge.is-revision { background: rgba(245,165,36,0.18); color: #f5a524; border: 1px solid rgba(245,165,36,0.45); }
 
 .card-title {
   font-family: var(--font-head);

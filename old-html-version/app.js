@@ -411,6 +411,13 @@ function renderVideoCard(v, isAdmin) {
 
   const duration = v.duration_seconds ? formatDuration(v.duration_seconds) : '';
 
+  // Round badge for the review/edit folders so Joe can tell a first review from
+  // a re-review at a glance. Round 1 is subtle; revisions (round ≥ 2) stand out.
+  const round = v.review_round || 1;
+  const roundBadge = (v.status === 'to_review' || v.status === 'to_edit')
+    ? `<span class="card-tag round-badge${round > 1 ? ' is-revision' : ''}">${round > 1 ? `Revision ${round - 1}` : '1st review'}</span>`
+    : '';
+
   const playableStatus = v.status === 'published' || isWorkflowStatus(v.status);
   const clickAction = playableStatus && hasPlayableVideo
     ? `onclick="openVideo('${v.id}')"`
@@ -430,6 +437,7 @@ function renderVideoCard(v, isAdmin) {
       <div class="card-tags">
         ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
+        ${roundBadge}
       </div>
       <div class="card-title">${v.title}</div>
       <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>
