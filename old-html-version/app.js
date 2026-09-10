@@ -2997,14 +2997,15 @@ function scNewCategoryChanged(catId) {
 }
 
 // Slots in this sub-category that don't have a script yet. Empty slots first —
-// that's what scripts are for; slots that already have a video come last.
+// that's what scripts are for; slots already in production come last and
+// published videos are excluded (their script stage is long gone).
 function scNewSubcatChanged(subId) {
   const sel = document.getElementById('sc-new-video');
   if (!subId) { sel.innerHTML = '<option value="">Pick a sub-category first…</option>'; scNewVideoChanged(''); return; }
   const taken = new Set(allScripts.map(s => s.video_id).filter(Boolean));
   const rank = v => (v.status === 'empty' ? 0 : v.status === 'raw' ? 1 : 2);
   const slots = allVideos
-    .filter(v => v.subcategory_id === subId && !taken.has(v.id))
+    .filter(v => v.subcategory_id === subId && !taken.has(v.id) && v.status !== 'published')
     .sort((a, b) => rank(a) - rank(b) || (a.sort_order || 0) - (b.sort_order || 0) || a.title.localeCompare(b.title));
   sel.innerHTML = slots.length
     ? '<option value="">Select a slot…</option>' + slots.map(v =>
@@ -3329,7 +3330,7 @@ async function linkScriptVideo() {
   // Prefer slots in the script's own sub-category, then everything else
   const sub = currentScript?.subcategory_id;
   const choices = allVideos
-    .filter(v => !taken.has(v.id))
+    .filter(v => !taken.has(v.id) && v.status !== 'published')
     .sort((a, b) => ((b.subcategory_id === sub) - (a.subcategory_id === sub)) || a.title.localeCompare(b.title));
   if (!choices.length) { showToast('No unlinked video slots', 'error'); return; }
   const list = choices.map((v, i) => `${i + 1}. ${v.title}${v.status !== 'empty' ? ` (${v.status})` : ''}`).join('\n');
