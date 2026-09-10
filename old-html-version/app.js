@@ -172,10 +172,12 @@ async function initApp(user) {
   toggle('folder-to-edit',   isEditor);
   toggle('folder-completed', isEditor);
 
-  // Load data
-  await Promise.all([loadCategories(), loadVideos()]);
+  // Load data — scripts before videos so cards can show their script tag
+  await Promise.all([loadCategories(), loadScripts()]);
+  await loadVideos();
   await Promise.all([loadNotifications(), loadRecordingsCount()]);
   subscribeToNotifications();
+  subscribeToScriptChanges();
 }
 
 // ══════════════════════════════════════════════════════
@@ -438,6 +440,7 @@ function renderVideoCard(v, isAdmin) {
         ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
         ${roundBadge}
+        ${isAdmin ? scriptTagHtml(scriptForVideo(v.id)) : ''}
       </div>
       <div class="card-title">${v.title}</div>
       <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>
@@ -511,6 +514,7 @@ async function openVideo(id) {
   document.getElementById('modal-meta').innerHTML = `
     <div class="modal-meta-item"><strong>${v.video_type || '—'}</strong>Type</div>
     <div class="modal-meta-item"><strong>${v.subcategories?.name || '—'}</strong>Sub-category</div>`;
+  renderModalScriptLink(v.id);
 
   modal.classList.add('open');
 
@@ -1657,7 +1661,7 @@ function renderNotifPanel() {
     return;
   }
   list.innerHTML = allNotifications.slice(0, 25).map(n => `
-    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}')">
+    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
       <div class="notif-title">${n.title}</div>
       ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
@@ -1673,10 +1677,11 @@ async function markAllNotifsRead() {
   renderNotificationBell();
 }
 
-function notifClick(videoId) {
-  if (!videoId) return;
+function notifClick(videoId, scriptId) {
+  if (!videoId && !scriptId) return;
   document.getElementById('notif-panel').classList.add('hidden');
   notifPanelOpen = false;
+  if (scriptId) { openScript(scriptId); return; }
   const v = allVideos.find(x => x.id === videoId);
   if (v && (v.video_url || v.storage_key)) openVideo(videoId);
 }
@@ -2722,6 +2727,8 @@ async function downloadRecording() {
       closeVideoModal();
       closeRecordingModal();
       closeCaptureModal();
+      closeScriptModal();
+      closeScriptNewModal();
       document.getElementById('admin-modal').classList.remove('open');
       document.getElementById('notif-panel')?.classList.add('hidden');
       notifPanelOpen = false;
@@ -2769,4 +2776,961 @@ if ('serviceWorker' in navigator) {
       })
       .catch(err => console.warn('[SW] Registration failed:', err));
   });
+}
+
+// ══════════════════════════════════════════════════════
+// SCRIPT REVIEW — confirm the narration with Joe BEFORE producing video
+//
+// Ravi writes → "Send to Joe" renders a cheap OpenAI TTS preview (cached per
+// paragraph, only changed paragraphs re-render) → Joe listens on his phone,
+// leaves voice notes (auto-transcribed) → Approve / Needs changes.
+// The approved version is pinned to the video slot for the video review flow.
+// ══════════════════════════════════════════════════════
+const SCRIPT_TTS_FUNCTION = 'script-tts';
+const SCRIPT_AUDIO_BUCKET = 'script-audio';
+
+const SCRIPT_STATUS_META = {
+  draft:    { color: 'var(--muted)', label: 'Draft',             who: 'editor' },
+  sent:     { color: '#f5a524',      label: 'With Joe',          who: 'reviewer' },
+  changes:  { color: '#60a5fa',      label: 'Changes requested', who: 'editor' },
+  approved: { color: 'var(--teal)',  label: 'Approved',          who: null },
+};
+
+let allScripts = [];
+let currentScriptId = null;
+let currentScript = null;         // scripts row (+ videos(title))
+let scriptVersions = [];          // ascending by version
+let scriptViewVersionId = null;   // version shown in player + feedback
+let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
+let scriptSending = false;
+
+// Player state — one <audio>, a queue of paragraph indices, signed URLs by path
+const sp = { audio: null, paragraphs: [], queue: [], pos: -1, urls: {}, playing: false };
+
+// Script feedback composer (text + voice note) — separate from the video composer
+let scAudioBlob = null, scAudioDuration = 0, scRecorder = null, scStream = null, scChunks = [];
+let scTimerInterval = null, scRecStart = 0;
+
+const isStaffUser    = () => currentProfile?.role === 'admin' || currentProfile?.is_reviewer === true;
+const isReviewerUser = () => currentProfile?.is_reviewer === true;
+const isEditorUser   = () => currentProfile?.role === 'admin' && !currentProfile?.is_reviewer;
+
+// ── Data ─────────────────────────────────────────────────────
+async function loadScripts() {
+  if (!isStaffUser()) return;
+  const { data, error } = await sb.from('scripts')
+    .select('*, videos(title)')
+    .order('updated_at', { ascending: false });
+  if (error) { console.warn('[scripts] load failed:', error.message); return; }
+  allScripts = data || [];
+  updateScriptsCount();
+}
+
+// Scripts waiting on the current user: Joe → sent; Ravi → changes requested
+function scriptNeedsMe(s) {
+  if (isReviewerUser()) return s.status === 'sent';
+  if (isEditorUser())   return s.status === 'changes';
+  return false;
+}
+
+function updateScriptsCount() {
+  const el = document.getElementById('count-scripts');
+  if (!el) return;
+  const n = allScripts.filter(scriptNeedsMe).length;
+  el.textContent = n;
+  el.style.background = n > 0 ? 'rgba(245,165,36,0.25)' : '';
+}
+
+function scriptForVideo(videoId) {
+  return allScripts.find(s => s.video_id === videoId) || null;
+}
+
+// Tag shown on a video card / in the video modal for its linked script
+function scriptTagHtml(s) {
+  if (!s) return '';
+  if (s.status === 'approved') return `<span class="card-tag script-ok">Script ✓ v${s.current_version}</span>`;
+  return `<span class="card-tag script-wip">Script: ${SCRIPT_STATUS_META[s.status]?.label || s.status}</span>`;
+}
+
+function renderModalScriptLink(videoId) {
+  const box = document.getElementById('modal-script-link');
+  if (!box) return;
+  const s = scriptForVideo(videoId);
+  if (!s || !isStaffUser()) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  const approved = s.status === 'approved';
+  box.classList.toggle('is-wip', !approved);
+  box.innerHTML = `
+    <span>${approved
+      ? `<strong style="color:var(--teal)">Script approved</strong> — v${s.current_version} is the signed-off narration for this video.`
+      : `<strong style="color:#f5a524">Script not approved yet</strong> — ${SCRIPT_STATUS_META[s.status]?.label || s.status}.`}</span>
+    <button class="btn btn-ghost btn-sm" style="width:auto" onclick="closeVideoModal();openScript('${s.id}')">Open script</button>`;
+  box.classList.remove('hidden');
+}
+
+// ── Scripts page ─────────────────────────────────────────────
+async function showScriptsPage(sidebarEl) {
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  if (sidebarEl) sidebarEl.classList.add('active');
+
+  const main = document.getElementById('main-content');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading scripts…</div>';
+  await loadScripts();
+
+  const mine   = allScripts.filter(scriptNeedsMe);
+  const others = allScripts.filter(s => !scriptNeedsMe(s));
+
+  let html = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <div class="page-title">Scripts</div>
+        <div class="page-sub">${allScripts.length} script${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
+      </div>
+      ${isEditorUser() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New script
+      </button>` : ''}
+    </div>`;
+
+  if (!allScripts.length) {
+    html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+      <div style="font-size:15px">No scripts yet.</div>
+      <div style="font-size:13px;margin-top:6px">${isEditorUser() ? 'Click <strong>New script</strong> to write the first one.' : 'Ravi hasn\'t sent anything to review yet.'}</div>
+    </div>`;
+    main.innerHTML = html;
+    return;
+  }
+
+  const card = (s) => {
+    const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
+    const ver  = s.current_version ? `v${s.current_version}` : 'not sent';
+    return `
+      <div class="script-card ${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
+        <div class="card-tags" style="margin-bottom:0">
+          <span class="card-tag sc-status-${s.status}">${meta.label}</span>
+          <span class="card-tag sc-version">${ver}</span>
+        </div>
+        <div class="script-card-title">${escapeHtml(s.title)}</div>
+        <div class="script-card-meta">
+          ${s.videos?.title ? `<span>Video: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No video linked</span>'}
+          <span>· ${timeAgo(s.updated_at || s.created_at)}</span>
+        </div>
+      </div>`;
+  };
+
+  if (mine.length) {
+    html += `<div class="script-section-label">Waiting on you</div><div class="script-grid" style="margin-bottom:28px">${mine.map(card).join('')}</div>`;
+    html += `<div class="script-section-label">Everything else</div>`;
+  }
+  html += `<div class="script-grid">${others.map(card).join('')}</div>`;
+  main.innerHTML = html;
+}
+
+// ── New script ───────────────────────────────────────────────
+function openScriptNewModal() {
+  document.getElementById('sc-new-title').value = '';
+  const sel = document.getElementById('sc-new-video');
+  sel.innerHTML = '<option value="">Not linked yet</option>';
+  // Slots without a script yet, unpublished first — that's where scripts are needed
+  const taken = new Set(allScripts.map(s => s.video_id).filter(Boolean));
+  [...allVideos]
+    .filter(v => !taken.has(v.id))
+    .sort((a, b) => (a.status === 'published') - (b.status === 'published') || a.title.localeCompare(b.title))
+    .forEach(v => { sel.innerHTML += `<option value="${v.id}">${escapeHtml(v.title)}${v.status === 'published' ? ' (published)' : ''}</option>`; });
+  document.getElementById('script-new-modal').classList.add('open');
+  setTimeout(() => document.getElementById('sc-new-title').focus(), 50);
+}
+
+function closeScriptNewModal(e) {
+  if (e && e.target !== document.getElementById('script-new-modal')) return;
+  document.getElementById('script-new-modal').classList.remove('open');
+}
+
+async function createScript() {
+  const title = document.getElementById('sc-new-title').value.trim();
+  const videoId = document.getElementById('sc-new-video').value || null;
+  if (!title) { showToast('Give the script a title', 'error'); return; }
+
+  const btn = document.getElementById('sc-new-create-btn');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  await ensureFreshSession();
+  const { data, error } = await sb.from('scripts')
+    .insert({ title, video_id: videoId, created_by: currentUser.id, status: 'draft' })
+    .select('id').single();
+  btn.disabled = false; btn.textContent = 'Create script';
+
+  if (error) { showToast('Could not create: ' + error.message, 'error'); return; }
+  closeScriptNewModal();
+  await loadScripts();
+  if (document.getElementById('sidebar-scripts-item')?.classList.contains('active')) {
+    showScriptsPage(document.getElementById('sidebar-scripts-item'));
+  }
+  openScript(data.id);
+}
+
+// ── Script modal ─────────────────────────────────────────────
+async function openScript(id, versionId = null) {
+  stopScriptPlayer();
+  const [{ data: s, error }, { data: vers }] = await Promise.all([
+    sb.from('scripts').select('*, videos(title)').eq('id', id).single(),
+    sb.from('script_versions').select('*').eq('script_id', id).order('version'),
+  ]);
+  if (error || !s) { showToast('Could not open script', 'error'); return; }
+
+  currentScript = s;
+  currentScriptId = id;
+  scriptVersions = vers || [];
+  scriptViewVersionId = versionId || scriptVersions.at(-1)?.id || null;
+  scriptDraftPreview = null;
+  resetScriptComposer();
+
+  renderScriptModal();
+  document.getElementById('script-modal').classList.add('open');
+  document.getElementById('script-modal').scrollTop = 0;
+  loadScriptFeedback();
+}
+
+function closeScriptModal(e) {
+  if (e && e.target !== document.getElementById('script-modal')) return;
+  stopScriptPlayer();
+  resetScriptComposer();
+  document.getElementById('script-modal').classList.remove('open');
+  currentScriptId = null; currentScript = null;
+  scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
+}
+
+function viewedVersion() {
+  return scriptVersions.find(v => v.id === scriptViewVersionId) || null;
+}
+
+function selectScriptVersion(versionId) {
+  stopScriptPlayer();
+  scriptViewVersionId = versionId;
+  scriptDraftPreview = null;
+  renderScriptModal();
+  loadScriptFeedback();
+}
+
+function renderScriptModal() {
+  const s = currentScript;
+  const body = document.getElementById('script-modal-body');
+  if (!s || !body) return;
+
+  const meta   = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
+  const latest = scriptVersions.at(-1) || null;
+  const view   = viewedVersion();
+  const isLatest = view && latest && view.id === latest.id;
+  const editor = isEditorUser();
+  const reviewer = isReviewerUser();
+
+  // ── Header ──
+  let html = `
+    <div class="card-tags" style="margin-bottom:0">
+      <span class="card-tag sc-status-${s.status}">${meta.label}</span>
+      ${latest ? `<span class="card-tag sc-version">v${latest.version}${s.status === 'approved' ? ' · locked' : ''}</span>` : '<span class="card-tag sc-version">not sent yet</span>'}
+    </div>
+    <div class="sc-title">${escapeHtml(s.title)}</div>
+    <div class="sc-sub">
+      ${s.videos?.title
+        ? `Video: <strong style="color:var(--white);font-weight:500">${escapeHtml(s.videos.title)}</strong>`
+        : 'No video linked'}
+      ${editor ? ` · <a onclick="linkScriptVideo()">${s.video_id ? 'change' : 'link a video slot'}</a> · <a onclick="renameScript()">rename</a>` : ''}
+      ${latest ? ` · sent ${timeAgo(latest.created_at)}` : ''}
+    </div>`;
+
+  // ── Version tabs (only once there's more than one round) ──
+  if (scriptVersions.length > 1) {
+    const dotColor = (v) => v.decision === 'approved' ? 'var(--teal)' : v.decision === 'changes' ? '#60a5fa' : '#f5a524';
+    html += `<div class="sc-version-tabs">` + scriptVersions.map(v => `
+      <button class="sc-vtab ${v.id === scriptViewVersionId ? 'active' : ''}" onclick="selectScriptVersion('${v.id}')" title="${v.decision}">
+        v${v.version}<span class="dot" style="background:${dotColor(v)}"></span>
+      </button>`).join('') + `</div>`;
+  }
+
+  // ── Player: the viewed version, or Ravi's unsent draft preview ──
+  const showingDraft = !!scriptDraftPreview;
+  const paragraphs = showingDraft ? scriptDraftPreview : (view?.paragraphs || []);
+  if (paragraphs.length) {
+    const changed = showingDraft ? 0 : (view?.changed_count || 0);
+    const label = showingDraft ? 'Draft preview' : `Version ${view.version}`;
+    const note = showingDraft
+      ? 'Not sent yet — this is what Joe will hear.'
+      : (view.version > 1
+          ? (changed ? `${changed} of ${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''} changed since v${view.version - 1}` : `No text changes since v${view.version - 1}`)
+          : `${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''}`);
+    html += renderScriptPlayerHtml(paragraphs, { label, note, changed });
+  } else if (!latest && !editor) {
+    html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — Ravi hasn't sent a version.</div></div>`;
+  }
+
+  // ── Reviewer decision (Joe) — only on the latest version while it's with him ──
+  if (reviewer && s.status === 'sent' && isLatest) {
+    html += `
+      <div class="workflow-section" id="sc-reviewer-section">
+        <div class="workflow-section-label">Your decision on v${latest.version}</div>
+        <div class="reviewer-buttons">
+          <button class="btn-more-changes" id="sc-changes-btn" onclick="scriptDecision('changes')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            Needs changes
+          </button>
+          <button class="btn-reviewer" id="sc-approve-btn" onclick="scriptDecision('approved')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            Approve script
+          </button>
+        </div>
+        <div class="reviewer-status">Listen, leave voice notes below on anything to change, then decide. Approving locks the text.</div>
+      </div>`;
+  }
+
+  // ── Editor (Ravi) ──
+  if (editor) {
+    if (s.status === 'approved') {
+      html += `
+        <div class="sc-locked">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <div class="sc-locked-text"><strong>Approved by Joe</strong> ${s.approved_at ? timeAgo(s.approved_at) : ''} — v${latest?.version} is locked. Record the final narration from this text. Any further change is a new version that needs approval again.</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="copyApprovedScript(this)">Copy text</button>
+            <button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="startScriptRevision()">Start a revision</button>
+          </div>
+        </div>`;
+    } else {
+      const draftText = s.draft_body ?? latest?.body ?? '';
+      const ctx =
+        s.status === 'changes' ? `Joe asked for changes on v${latest?.version}. His notes are below — edit and send v${(latest?.version || 0) + 1}.` :
+        s.status === 'sent'    ? `v${latest?.version} is with Joe. You can keep editing; sending again replaces it with v${latest.version + 1}.` :
+        latest                 ? `Editing a new draft after v${latest.version}.` :
+                                 'Write the narration. Blank line between paragraphs; start a line with # for a section heading (it\'s read aloud as "Section: …").';
+      html += `
+        <div class="sc-editor">
+          <div class="workflow-section-label">Script text</div>
+          <textarea class="form-input" id="sc-body" placeholder="# Intro&#10;&#10;Hi, I'm Joe, master plumber at Loch Monster Plumbing…&#10;&#10;# Step one&#10;&#10;First thing you do on site is…" oninput="scriptDraftDirty()">${escapeHtmlAttr(draftText)}</textarea>
+          <div class="sc-editor-hint">${ctx}<br>Only paragraphs whose text changed get re-rendered — an edit to a few lines costs a few cents.</div>
+          <div class="sc-btn-row">
+            <button class="btn btn-ghost btn-sm" id="sc-save-btn" onclick="saveScriptDraft()">Save draft</button>
+            <button class="btn btn-ghost btn-sm" id="sc-preview-btn" onclick="previewScriptDraft()">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+              Preview audio
+            </button>
+            <button class="btn btn-primary btn-sm" id="sc-send-btn" onclick="sendScriptToJoe()">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              Send to Joe${latest ? ` as v${latest.version + 1}` : ''}
+            </button>
+          </div>
+          <div class="sc-editor-status" id="sc-editor-status"></div>
+        </div>`;
+    }
+  }
+
+  // ── Feedback ──
+  const canComment = isStaffUser();
+  html += `
+    <div class="feedback-section" style="display:block">
+      <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
+      ${canComment ? `
+      <div class="comment-composer">
+        <textarea id="sc-comment-text" class="comment-input" rows="2" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
+        <div class="comment-attachments hidden" id="sc-comment-attachments">
+          <div class="comment-attach comment-audio-preview" id="sc-comment-audio-preview">
+            <audio controls id="sc-comment-audio-player"></audio>
+            <button class="attach-remove" onclick="clearScriptComposerAudio()" title="Remove audio">✕</button>
+          </div>
+        </div>
+        <div class="comment-toolbar">
+          <div class="comment-tools">
+            <button class="comment-tool-btn" id="sc-mic-btn" onclick="toggleScriptRecording()" title="Record voice note">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            </button>
+            <span class="record-timer hidden" id="sc-record-timer">0:00</span>
+          </div>
+          <button class="btn btn-primary btn-sm" id="sc-comment-send-btn" onclick="submitScriptComment()" style="width:auto;margin-top:0">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            Send
+          </button>
+        </div>
+      </div>` : ''}
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
+    </div>`;
+
+  body.innerHTML = html;
+
+  // Wire the player to whatever is showing
+  if (paragraphs.length) scriptPlayerLoad(paragraphs);
+}
+
+// Textarea content must be escaped but keep newlines as-is (escapeHtml turns them into <br>)
+function escapeHtmlAttr(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function scriptDraftDirty() {
+  // A fresh draft preview no longer matches the text — hide it so nobody is misled
+  if (scriptDraftPreview) {
+    scriptDraftPreview = null;
+    setScriptEditorStatus('Text changed since the last preview.', '');
+  }
+}
+
+async function renameScript() {
+  const t = prompt('Script title', currentScript?.title || '');
+  if (t == null || !t.trim() || t.trim() === currentScript.title) return;
+  const { error } = await sb.from('scripts').update({ title: t.trim() }).eq('id', currentScriptId);
+  if (error) { showToast('Rename failed: ' + error.message, 'error'); return; }
+  currentScript.title = t.trim();
+  renderScriptModal(); loadScripts();
+}
+
+async function linkScriptVideo() {
+  const taken = new Set(allScripts.filter(s => s.id !== currentScriptId).map(s => s.video_id).filter(Boolean));
+  const choices = allVideos.filter(v => !taken.has(v.id));
+  if (!choices.length) { showToast('No unlinked video slots', 'error'); return; }
+  const list = choices.map((v, i) => `${i + 1}. ${v.title}`).join('\n');
+  const ans = prompt(`Link to which video slot? Enter a number (0 to unlink):\n\n${list}`);
+  if (ans == null) return;
+  const n = parseInt(ans, 10);
+  if (Number.isNaN(n) || n < 0 || n > choices.length) return;
+  const videoId = n === 0 ? null : choices[n - 1].id;
+  const { error } = await sb.from('scripts').update({ video_id: videoId }).eq('id', currentScriptId);
+  if (error) { showToast('Could not link: ' + error.message, 'error'); return; }
+  currentScript.video_id = videoId;
+  currentScript.videos = videoId ? { title: choices[n - 1].title } : null;
+  renderScriptModal(); loadScripts().then(renderVideos);
+}
+
+// ── Player ───────────────────────────────────────────────────
+function renderScriptPlayerHtml(paragraphs, { label, note, changed }) {
+  const changedIdx = paragraphs.map((p, i) => p.changed ? i : -1).filter(i => i >= 0);
+  const rows = paragraphs.map((p, i) => `
+    <div class="sp-para ${p.heading ? 'heading' : ''} ${p.changed ? 'changed' : ''} ${p.audio_path ? '' : 'no-audio'}" id="sp-para-${i}" onclick="spPlayFrom(${i})">
+      <span class="sp-para-num">${p.heading ? '§' : i + 1}</span>
+      <span>${escapeHtml(p.text)}</span>
+      ${p.changed ? '<span class="sp-chip changed">Changed</span>' : '<span></span>'}
+    </div>`).join('');
+
+  return `
+    <div class="sp-wrap">
+      <div class="sp-head">
+        <span class="sp-head-label">${label} · preview voice</span>
+        <span class="sp-head-note">${note}</span>
+      </div>
+      <div class="sp-controls">
+        <button class="sp-btn primary" id="sp-play-all" onclick="spPlayAll()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play all
+        </button>
+        ${changedIdx.length ? `<button class="sp-btn changes" id="sp-play-changes" onclick="spPlayChanges()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play changes only (${changedIdx.length})
+        </button>` : ''}
+        <button class="sp-btn" id="sp-pause" onclick="spTogglePause()" disabled>Pause</button>
+        <button class="sp-btn" id="sp-stop" onclick="stopScriptPlayer()" disabled>Stop</button>
+        <span class="sp-now" id="sp-now">Tap a paragraph to start there</span>
+      </div>
+      <div class="sp-list" id="sp-list">${rows}</div>
+    </div>`;
+}
+
+async function scriptPlayerLoad(paragraphs) {
+  sp.paragraphs = paragraphs;
+  sp.urls = {};
+  const paths = [...new Set(paragraphs.map(p => p.audio_path).filter(Boolean))];
+  if (!paths.length) return;
+  const { data, error } = await sb.storage.from(SCRIPT_AUDIO_BUCKET).createSignedUrls(paths, 60 * 60);
+  if (error) { console.warn('[script player] sign failed:', error.message); return; }
+  (data || []).forEach(d => { if (d.signedUrl) sp.urls[d.path] = d.signedUrl; });
+}
+
+function spEnsureAudio() {
+  if (sp.audio) return sp.audio;
+  const a = new Audio();
+  a.preload = 'auto';
+  a.addEventListener('ended', () => spNext());
+  a.addEventListener('error', () => { console.warn('[script player] clip error'); spNext(); });
+  sp.audio = a;
+  return a;
+}
+
+function spPlayAll() {
+  spPlayQueue(sp.paragraphs.map((_, i) => i));
+}
+
+// Changed paragraphs plus the one before each, so Joe hears them in context
+function spPlayChanges() {
+  const q = new Set();
+  sp.paragraphs.forEach((p, i) => { if (p.changed) { if (i > 0) q.add(i - 1); q.add(i); } });
+  spPlayQueue([...q].sort((a, b) => a - b));
+}
+
+function spPlayFrom(i) {
+  if (!sp.paragraphs[i]?.audio_path) return;
+  spPlayQueue(sp.paragraphs.map((_, k) => k).filter(k => k >= i));
+}
+
+function spPlayQueue(indices) {
+  sp.queue = indices.filter(i => sp.paragraphs[i]?.audio_path);
+  sp.pos = -1;
+  spNext();
+}
+
+function spNext() {
+  sp.pos += 1;
+  if (sp.pos >= sp.queue.length) { stopScriptPlayer(true); return; }
+  const i = sp.queue[sp.pos];
+  const p = sp.paragraphs[i];
+  const url = sp.urls[p.audio_path];
+  if (!url) { spNext(); return; }
+
+  const a = spEnsureAudio();
+  a.src = url;
+  a.play().catch(err => { console.warn('[script player] play blocked:', err); });
+  sp.playing = true;
+  spHighlight(i);
+
+  // Warm the next clip so paragraph boundaries don't stall on mobile
+  const nextI = sp.queue[sp.pos + 1];
+  const nextUrl = nextI != null ? sp.urls[sp.paragraphs[nextI]?.audio_path] : null;
+  if (nextUrl) { const pre = new Audio(); pre.preload = 'auto'; pre.src = nextUrl; }
+
+  spRenderControls();
+}
+
+function spHighlight(i) {
+  document.querySelectorAll('.sp-para.active').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.sp-chip.playing').forEach(el => el.remove());
+  const el = document.getElementById(`sp-para-${i}`);
+  if (!el) return;
+  el.classList.add('active');
+  el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function spTogglePause() {
+  const a = sp.audio;
+  if (!a || !sp.queue.length) return;
+  if (a.paused) { a.play().catch(() => {}); sp.playing = true; }
+  else { a.pause(); sp.playing = false; }
+  spRenderControls();
+}
+
+function spRenderControls() {
+  const pause = document.getElementById('sp-pause');
+  const stop  = document.getElementById('sp-stop');
+  const now   = document.getElementById('sp-now');
+  const active = sp.queue.length > 0 && sp.pos >= 0 && sp.pos < sp.queue.length;
+  if (pause) { pause.disabled = !active; pause.textContent = sp.playing ? 'Pause' : 'Resume'; }
+  if (stop)  stop.disabled = !active;
+  if (now) {
+    now.textContent = active
+      ? `Playing ${sp.pos + 1} of ${sp.queue.length}${sp.queue.length !== sp.paragraphs.length ? ' (selection)' : ''}`
+      : 'Tap a paragraph to start there';
+  }
+}
+
+function stopScriptPlayer(finished = false) {
+  if (sp.audio) { try { sp.audio.pause(); } catch (_) {} sp.audio.removeAttribute('src'); }
+  sp.queue = []; sp.pos = -1; sp.playing = false;
+  document.querySelectorAll('.sp-para.active').forEach(el => el.classList.remove('active'));
+  spRenderControls();
+  const now = document.getElementById('sp-now');
+  if (now && finished) now.textContent = 'Finished';
+}
+
+// ── Rendering (Ravi): loop the edge function until every paragraph is cached ──
+async function renderScriptAudio(text, onProgress) {
+  let totalRendered = 0, totalChars = 0, rounds = 0, result;
+  do {
+    const { data, error } = await invokeEdge(SCRIPT_TTS_FUNCTION, { body: { text } });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) throw new Error(detail);
+    result = data;
+    totalRendered += result.rendered || 0;
+    totalChars    += result.charsRendered || 0;
+    if (result.warning) console.warn('[script-tts]', result.warning);
+    onProgress?.({ done: result.paragraphs.length - result.pending, total: result.paragraphs.length, pending: result.pending });
+    if (result.pending > 0 && result.rendered === 0) {
+      throw new Error(result.warning || 'Rendering stalled — try again');
+    }
+    if (++rounds > 80) throw new Error('Rendering took too many rounds');
+  } while (result.pending > 0);
+  return { paragraphs: result.paragraphs, rendered: totalRendered, chars: totalChars, model: result.model, voice: result.voice };
+}
+
+function setScriptEditorStatus(text, cls = '') {
+  const el = document.getElementById('sc-editor-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sc-editor-status ' + cls;
+}
+
+function scriptEditorBusy(busy) {
+  ['sc-save-btn', 'sc-preview-btn', 'sc-send-btn'].forEach(id => {
+    const b = document.getElementById(id); if (b) b.disabled = busy;
+  });
+}
+
+async function saveScriptDraft() {
+  const text = document.getElementById('sc-body')?.value ?? '';
+  scriptEditorBusy(true);
+  await ensureFreshSession();
+  const { error } = await sb.from('scripts').update({ draft_body: text || null }).eq('id', currentScriptId);
+  scriptEditorBusy(false);
+  if (error) { setScriptEditorStatus('Save failed: ' + error.message, 'err'); return; }
+  currentScript.draft_body = text || null;
+  setScriptEditorStatus('Draft saved.', 'ok');
+  loadScripts();
+}
+
+async function previewScriptDraft() {
+  const text = document.getElementById('sc-body')?.value.trim();
+  if (!text) { setScriptEditorStatus('Write something first.', 'err'); return; }
+  scriptEditorBusy(true);
+  try {
+    setScriptEditorStatus('Rendering preview…');
+    const r = await renderScriptAudio(text, ({ done, total }) => setScriptEditorStatus(`Rendering preview… ${done}/${total} paragraphs`));
+    // Mark what differs from the latest sent version so the preview shows Joe's view
+    const prevHashes = new Set((scriptVersions.at(-1)?.paragraphs || []).map(p => p.hash));
+    scriptDraftPreview = r.paragraphs.map(p => ({ ...p, changed: scriptVersions.length ? !prevHashes.has(p.hash) : false }));
+    // Keep the unsaved text: renderScriptModal re-reads draft_body, so stash it first
+    currentScript.draft_body = text;
+    renderScriptModal();
+    setScriptEditorStatus(r.rendered
+      ? `Preview ready — rendered ${r.rendered} new paragraph${r.rendered !== 1 ? 's' : ''} (${r.chars.toLocaleString()} chars), rest from cache.`
+      : 'Preview ready — everything was already cached, nothing rendered.', 'ok');
+    document.getElementById('sp-list')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  } catch (err) {
+    setScriptEditorStatus('Preview failed: ' + (err.message || err), 'err');
+  } finally {
+    scriptEditorBusy(false);
+  }
+}
+
+async function sendScriptToJoe() {
+  if (scriptSending) return;
+  const text = document.getElementById('sc-body')?.value.trim();
+  if (!text) { setScriptEditorStatus('Write something first.', 'err'); return; }
+
+  const latest = scriptVersions.at(-1) || null;
+  scriptSending = true;
+  scriptEditorBusy(true);
+  const sendBtn = document.getElementById('sc-send-btn');
+  const sendHtml = sendBtn?.innerHTML;
+  if (sendBtn) sendBtn.textContent = 'Rendering…';
+
+  try {
+    setScriptEditorStatus('Rendering audio…');
+    const r = await renderScriptAudio(text, ({ done, total }) => setScriptEditorStatus(`Rendering audio… ${done}/${total} paragraphs`));
+
+    // Diff against the previous version by paragraph hash
+    const prevHashes = new Set((latest?.paragraphs || []).map(p => p.hash));
+    const paragraphs = r.paragraphs.map(p => ({ ...p, changed: latest ? !prevHashes.has(p.hash) : false }));
+    const changedCount = paragraphs.filter(p => p.changed).length;
+
+    if (latest && changedCount === 0 && paragraphs.length === (latest.paragraphs || []).length) {
+      if (!confirm(`Nothing changed since v${latest.version}. Send it to Joe again anyway?`)) {
+        setScriptEditorStatus('Not sent.'); return;
+      }
+    }
+
+    if (sendBtn) sendBtn.textContent = 'Sending…';
+    await ensureFreshSession();
+    const versionNo = (latest?.version || 0) + 1;
+    const { data: ver, error: verErr } = await sb.from('script_versions').insert({
+      script_id: currentScriptId,
+      version: versionNo,
+      body: text,
+      paragraphs,
+      changed_count: changedCount,
+      total_count: paragraphs.length,
+      created_by: currentUser.id,
+    }).select('id').single();
+    if (verErr) throw verErr;
+
+    const { error: scErr } = await sb.from('scripts').update({
+      status: 'sent',
+      current_version: versionNo,
+      draft_body: null,
+    }).eq('id', currentScriptId);
+    if (scErr) throw scErr;
+
+    const title = currentScript.title;
+    showToast(`v${versionNo} sent — Joe has been notified`, 'success');
+    invokeEdge(NOTIFY_FUNCTION, {
+      body: { type: 'script_sent', scriptId: currentScriptId, scriptTitle: title, versionNo },
+    }).catch(err => console.warn('[notify script_sent]', err));
+
+    await loadScripts();
+    await openScript(currentScriptId, ver.id);
+  } catch (err) {
+    setScriptEditorStatus('Send failed: ' + (err.message || err), 'err');
+    if (sendBtn && sendHtml) sendBtn.innerHTML = sendHtml;
+  } finally {
+    scriptSending = false;
+    scriptEditorBusy(false);
+  }
+}
+
+async function startScriptRevision() {
+  const latest = scriptVersions.at(-1);
+  if (!latest) return;
+  if (!confirm(`Start a revision of the approved v${latest.version}? Joe will need to approve the new version.`)) return;
+  await ensureFreshSession();
+  const { error } = await sb.from('scripts').update({ status: 'draft', draft_body: latest.body }).eq('id', currentScriptId);
+  if (error) { showToast('Could not start revision: ' + error.message, 'error'); return; }
+  await loadScripts();
+  openScript(currentScriptId);
+}
+
+async function copyApprovedScript(btn) {
+  const v = scriptVersions.find(x => x.id === currentScript?.approved_version_id) || scriptVersions.at(-1);
+  if (!v) return;
+  try {
+    await navigator.clipboard.writeText(v.body);
+    const orig = btn.textContent; btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  } catch (_) { showToast('Could not copy to clipboard', 'error'); }
+}
+
+// ── Reviewer decision (Joe) ──────────────────────────────────
+async function scriptDecision(decision) {
+  if (!isReviewerUser() || !currentScriptId) return;
+  const latest = scriptVersions.at(-1);
+  if (!latest || currentScript.status !== 'sent') return;
+
+  if (decision === 'changes') {
+    const { count } = await sb.from('script_feedback')
+      .select('id', { count: 'exact', head: true })
+      .eq('version_id', latest.id).eq('user_id', currentUser.id);
+    if (!count && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
+  } else if (!confirm(`Approve v${latest.version}? The text is locked and Ravi records the final narration from it.`)) {
+    return;
+  }
+
+  const approveBtn = document.getElementById('sc-approve-btn');
+  const changesBtn = document.getElementById('sc-changes-btn');
+  [approveBtn, changesBtn].forEach(b => { if (b) b.disabled = true; });
+  const btn = decision === 'approved' ? approveBtn : changesBtn;
+  if (btn) btn.textContent = 'Saving…';
+
+  await ensureFreshSession();
+  const now = new Date().toISOString();
+  const { error: vErr } = await sb.from('script_versions')
+    .update({ decision, decided_at: now, decided_by: currentUser.id })
+    .eq('id', latest.id);
+  const scriptPatch = decision === 'approved'
+    ? { status: 'approved', approved_version_id: latest.id, approved_at: now, approved_by: currentUser.id }
+    : { status: 'changes' };
+  const { error: sErr } = vErr ? { error: vErr } : await sb.from('scripts').update(scriptPatch).eq('id', currentScriptId);
+
+  if (vErr || sErr) {
+    showToast('Could not save decision: ' + (vErr || sErr).message, 'error');
+    renderScriptModal();
+    return;
+  }
+
+  const title = currentScript.title, scriptId = currentScriptId, versionNo = latest.version;
+  showToast(decision === 'approved' ? `v${versionNo} approved — Ravi notified` : 'Sent back for changes — Ravi notified', 'success');
+  invokeEdge(NOTIFY_FUNCTION, {
+    body: { type: decision === 'approved' ? 'script_approved' : 'script_changes', scriptId, scriptTitle: title, versionNo },
+  }).catch(err => console.warn('[notify script decision]', err));
+
+  await loadScripts();
+  if (decision === 'approved') { closeScriptModal(); showScriptsPage(document.getElementById('sidebar-scripts-item')); }
+  else openScript(scriptId);
+}
+
+// ── Feedback ─────────────────────────────────────────────────
+async function loadScriptFeedback() {
+  const list = document.getElementById('sc-feedback-list');
+  if (!list || !currentScriptId) return;
+
+  let q = sb.from('script_feedback')
+    .select('id, user_id, version_id, body, audio_path, image_path, duration_seconds, transcript, created_at, profiles:user_id(full_name)')
+    .eq('script_id', currentScriptId)
+    .order('created_at', { ascending: false });
+  // Feedback is per version; before any version exists, show unscoped notes
+  q = scriptViewVersionId ? q.eq('version_id', scriptViewVersionId) : q.is('version_id', null);
+  const { data, error } = await q;
+
+  if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`; return; }
+  if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
+
+  const isAdmin = currentProfile?.role === 'admin';
+  const items = await Promise.all(data.map(async (fb) => {
+    const name = fb.profiles?.full_name || 'Staff';
+    const when = new Date(fb.created_at).toLocaleString();
+    const canDelete = fb.user_id === currentUser?.id;
+
+    let audioHtml = '';
+    if (fb.audio_path) {
+      const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (fb.transcript) {
+        audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
+      } else if (isAdmin) {
+        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}">Not transcribed yet ·
+          <a class="sc-link" onclick="transcribeScriptFeedback('${fb.id}', '${fb.audio_path}')">transcribe now</a></div>`;
+      }
+    }
+    const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
+
+    return `
+      <div class="feedback-item">
+        <div class="feedback-item-header">
+          <span><span class="feedback-item-author">${escapeHtml(name)}</span> · ${when}</span>
+          ${canDelete ? `<button class="feedback-delete" onclick="deleteScriptFeedback('${fb.id}')">Delete</button>` : ''}
+        </div>
+        ${bodyHtml}
+        ${audioHtml}
+      </div>`;
+  }));
+  list.innerHTML = items.join('');
+}
+
+// Whisper via the existing transcribe function; result is stored on the row so
+// Ravi reads Joe's notes as text without pressing anything.
+async function transcribeScriptFeedback(fbId, audioPath) {
+  const box = document.getElementById(`sc-transcript-${fbId}`);
+  if (box) box.textContent = 'Transcribing…';
+  try {
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { audioPath } });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) throw new Error(detail);
+    const text = (data.text || '').trim() || '(empty transcript)';
+    await sb.from('script_feedback').update({ transcript: text }).eq('id', fbId);
+    if (currentScriptId) loadScriptFeedback();
+  } catch (err) {
+    console.warn('[script transcript]', err);
+    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', '${audioPath}')">retry</a>`;
+  }
+}
+
+async function deleteScriptFeedback(id) {
+  if (!confirm('Delete this note?')) return;
+  const { data: row } = await sb.from('script_feedback').select('audio_path, image_path').eq('id', id).single();
+  const paths = [row?.audio_path, row?.image_path].filter(Boolean);
+  if (paths.length) await sb.storage.from(FEEDBACK_BUCKET).remove(paths).catch(() => {});
+  const { error } = await sb.from('script_feedback').delete().eq('id', id);
+  if (error) { showToast('Could not delete: ' + error.message, 'error'); return; }
+  loadScriptFeedback();
+}
+
+async function submitScriptComment() {
+  if (!isStaffUser() || !currentScriptId) return;
+  if (scRecorder && scRecorder.state === 'recording') { showToast('Stop the recording before sending', 'error'); return; }
+
+  const body = document.getElementById('sc-comment-text')?.value.trim() || '';
+  if (!body && !scAudioBlob) { showToast('Add a note or a voice note first', 'error'); return; }
+
+  const sendBtn = document.getElementById('sc-comment-send-btn');
+  const sendHtml = sendBtn.innerHTML;
+  sendBtn.disabled = true; sendBtn.textContent = 'Sending…';
+  await ensureFreshSession();
+
+  try {
+    let audioPath = null;
+    if (scAudioBlob) {
+      const ext = scAudioBlob.type.includes('webm') ? 'webm' : scAudioBlob.type.includes('mp4') ? 'm4a' : 'ogg';
+      audioPath = `scripts/${currentScriptId}/${currentUser.id}-${Date.now()}.${ext}`;
+      const { error } = await sb.storage.from(FEEDBACK_BUCKET)
+        .upload(audioPath, scAudioBlob, { contentType: scAudioBlob.type, upsert: false });
+      if (error) throw error;
+    }
+
+    const { data: inserted, error: insErr } = await sb.from('script_feedback').insert({
+      script_id: currentScriptId,
+      version_id: scriptViewVersionId,
+      user_id: currentUser.id,
+      body: body || null,
+      audio_path: audioPath,
+      duration_seconds: scAudioBlob ? scAudioDuration : null,
+    }).select('id').single();
+    if (insErr) throw insErr;
+
+    resetScriptComposer();
+    showToast('Note posted', 'success');
+    await loadScriptFeedback();
+    // Transcribe in the background — the list refreshes when it lands
+    if (audioPath) transcribeScriptFeedback(inserted.id, audioPath);
+  } catch (err) {
+    showToast('Could not post: ' + (err?.message || 'Unknown error'), 'error');
+  } finally {
+    sendBtn.disabled = false; sendBtn.innerHTML = sendHtml;
+  }
+}
+
+// ── Voice-note recorder for the script composer ──────────────
+async function toggleScriptRecording() {
+  if (scRecorder && scRecorder.state === 'recording') { scRecorder.stop(); return; }
+  if (scAudioBlob) { showToast('Remove the current voice note first', 'error'); return; }
+  try {
+    scStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (_) { showToast('Microphone access denied', 'error'); return; }
+
+  const mimeType = _bestAudioMime();
+  try {
+    scRecorder = mimeType ? new MediaRecorder(scStream, { mimeType }) : new MediaRecorder(scStream);
+  } catch (_) {
+    showToast('Recording not supported in this browser', 'error');
+    scStopStream(); return;
+  }
+  scChunks = [];
+  scRecorder.addEventListener('dataavailable', e => { if (e.data?.size > 0) scChunks.push(e.data); });
+  scRecorder.addEventListener('stop', scHandleRecordingStop);
+  scRecorder.start();
+  scRecStart = Date.now();
+
+  const btn = document.getElementById('sc-mic-btn');
+  btn?.classList.add('mic-recording');
+  const timer = document.getElementById('sc-record-timer');
+  if (timer) { timer.classList.remove('hidden'); timer.textContent = '0:00'; }
+  scTimerInterval = setInterval(() => {
+    const elapsed = Date.now() - scRecStart;
+    if (elapsed >= MAX_RECORDING_MS) { scRecorder?.stop(); return; }
+    const t = Math.floor(elapsed / 1000);
+    if (timer) timer.textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+  }, 250);
+}
+
+function scStopStream() {
+  if (scStream) { scStream.getTracks().forEach(t => t.stop()); scStream = null; }
+}
+
+function scHandleRecordingStop() {
+  clearInterval(scTimerInterval); scTimerInterval = null;
+  scAudioDuration = Math.max(1, Math.round((Date.now() - scRecStart) / 1000));
+  document.getElementById('sc-mic-btn')?.classList.remove('mic-recording');
+  document.getElementById('sc-record-timer')?.classList.add('hidden');
+  scStopStream();
+  scAudioBlob = new Blob(scChunks, { type: scChunks[0]?.type || scRecorder?.mimeType || 'audio/webm' });
+  scChunks = [];
+  const player = document.getElementById('sc-comment-audio-player');
+  if (player) player.src = URL.createObjectURL(scAudioBlob);
+  document.getElementById('sc-comment-attachments')?.classList.remove('hidden');
+}
+
+function clearScriptComposerAudio() {
+  scAudioBlob = null; scAudioDuration = 0;
+  const player = document.getElementById('sc-comment-audio-player');
+  if (player?.src) { URL.revokeObjectURL(player.src); player.removeAttribute('src'); }
+  document.getElementById('sc-comment-attachments')?.classList.add('hidden');
+}
+
+function resetScriptComposer() {
+  if (scRecorder && scRecorder.state === 'recording') { try { scRecorder.stop(); } catch (_) {} }
+  clearInterval(scTimerInterval); scTimerInterval = null;
+  scStopStream(); scChunks = [];
+  const text = document.getElementById('sc-comment-text');
+  if (text) text.value = '';
+  clearScriptComposerAudio();
+}
+
+// ── Realtime: keep the Scripts count + page fresh when the other person acts ──
+function subscribeToScriptChanges() {
+  if (!isStaffUser()) return;
+  sb.channel('script-changes')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'scripts' }, async () => {
+      await loadScripts();
+      if (document.getElementById('sidebar-scripts-item')?.classList.contains('active')) {
+        showScriptsPage(document.getElementById('sidebar-scripts-item'));
+      }
+    })
+    .subscribe();
 }

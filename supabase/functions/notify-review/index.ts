@@ -1,4 +1,4 @@
-import { createClient } from "npm:@supabase/supabase-js@2";
+import { createClient, SupabaseClient } from "npm:@supabase/supabase-js@2";
 import webpush from "npm:web-push@3";
 
 const corsHeaders = {
@@ -21,17 +21,129 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
   );
 }
 
+type VideoType  = "video_uploaded" | "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
+type ScriptType = "script_sent" | "script_changes" | "script_approved";
 type NotifyBody = {
-  type: "video_uploaded" | "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
-  videoId: string;
-  videoTitle: string;
+  type: VideoType | ScriptType;
+  // Video events
+  videoId?: string;
+  videoTitle?: string;
+  // Script-review events
+  scriptId?: string;
+  scriptTitle?: string;
+  versionNo?: number;
 };
+type Profile = { role: string; is_reviewer: boolean | null; full_name: string | null };
+
+const SCRIPT_TYPES: ScriptType[] = ["script_sent", "script_changes", "script_approved"];
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+// ── Shared delivery: in-app rows + Web Push, with expired-endpoint cleanup ──
+async function deliver(
+  supabase: SupabaseClient,
+  recipientIds: string[],
+  n: { type: string; title: string; message: string; videoId?: string | null; scriptId?: string | null; tag: string },
+) {
+  await supabase.from("notifications").insert(
+    recipientIds.map((id) => ({
+      user_id:   id,
+      video_id:  n.videoId ?? null,
+      script_id: n.scriptId ?? null,
+      type:      n.type,
+      title:     n.title,
+      message:   n.message,
+    }))
+  );
+
+  if (!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) || !recipientIds.length) return;
+
+  const { data: pushSubs } = await supabase
+    .from("push_subscriptions")
+    .select("endpoint, p256dh, auth, user_id")
+    .in("user_id", recipientIds);
+  if (!pushSubs?.length) return;
+
+  // Unread notification count per recipient → home-screen icon badge
+  const unreadByUser: Record<string, number> = {};
+  await Promise.all(recipientIds.map(async (uid) => {
+    const { count } = await supabase
+      .from("notifications")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", uid)
+      .eq("read", false);
+    unreadByUser[uid] = count || 0;
+  }));
+
+  const pushResults = await Promise.allSettled(
+    pushSubs.map((sub) =>
+      webpush.sendNotification(
+        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+        JSON.stringify({
+          title:      n.title,
+          body:       n.message,
+          tag:        n.tag,
+          url:        "/",
+          badgeCount: unreadByUser[sub.user_id] ?? 1,
+        })
+      )
+    )
+  );
+
+  // Clean up expired/invalid subscriptions (410 Gone)
+  const expiredEndpoints: string[] = [];
+  pushResults.forEach((result, i) => {
+    if (result.status === "rejected") {
+      const err = result.reason as { statusCode?: number };
+      if (err?.statusCode === 410 || err?.statusCode === 404) {
+        expiredEndpoints.push(pushSubs[i].endpoint);
+      } else {
+        console.warn("[notify-review] push error:", result.reason);
+      }
+    }
+  });
+  if (expiredEndpoints.length) {
+    await supabase.from("push_subscriptions").delete().in("endpoint", expiredEndpoints);
+    console.log("[notify-review] removed", expiredEndpoints.length, "expired push subscriptions");
+  }
+}
+
+// ── Script-review events ─────────────────────────────────────
+// script_sent     → Ravi sent a version   → notify reviewers (Joe)
+// script_changes  → Joe wants changes     → notify other admins (Ravi)
+// script_approved → Joe approved          → notify other admins (Ravi)
+async function notifyScript(supabase: SupabaseClient, callerId: string, caller: Profile, body: NotifyBody) {
+  const { type, scriptId, scriptTitle, versionNo } = body;
+  const v = versionNo ? `v${versionNo}` : "the latest version";
+  const callerName = caller.full_name || (type === "script_sent" ? "Ravi" : "Joe");
+
+  let recipientsQuery = supabase.from("profiles").select("id");
+  recipientsQuery = type === "script_sent"
+    ? recipientsQuery.eq("is_reviewer", true)
+    : recipientsQuery.eq("role", "admin").neq("id", callerId);
+  const { data: recipients } = await recipientsQuery;
+  if (!recipients?.length) return json(200, { ok: true, skipped: "no recipients" });
+
+  const title =
+    type === "script_sent"     ? `Script ready to review: ${scriptTitle}` :
+    type === "script_changes"  ? `${callerName} wants changes: ${scriptTitle}` :
+                                 `${callerName} approved the script: ${scriptTitle}`;
+  const message =
+    type === "script_sent"
+      ? `${callerName} sent ${v} of "${scriptTitle}". Tap to listen and approve or request changes.`
+      : type === "script_changes"
+      ? `${callerName} listened to ${v} of "${scriptTitle}" and left feedback. Revise and send again.`
+      : `${v} of "${scriptTitle}" is approved and locked — ready to record the final narration.`;
+
+  await deliver(supabase, recipients.map((r) => r.id), {
+    type: type!, title, message, scriptId, tag: `lmp-${type}-${scriptId}`,
+  });
+  return json(200, { ok: true });
 }
 
 Deno.serve(async (req) => {
@@ -60,7 +172,17 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { type, videoId, videoTitle } = (await req.json()) as NotifyBody;
+    const body = (await req.json()) as NotifyBody;
+    const { type } = body;
+
+    if (SCRIPT_TYPES.includes(type as ScriptType)) {
+      if (!body.scriptId || !body.scriptTitle) {
+        return json(400, { error: "scriptId and scriptTitle are required" });
+      }
+      return await notifyScript(supabase, caller.id, callerProfile as Profile, body);
+    }
+
+    const videoId = body.videoId, videoTitle = body.videoTitle;
     if (!type || !videoId || !videoTitle) {
       return json(400, { error: "type, videoId, and videoTitle are required" });
     }
@@ -94,8 +216,6 @@ Deno.serve(async (req) => {
     const { data: recipients } = await recipientsQuery;
     if (!recipients?.length) return json(200, { ok: true, skipped: "no recipients" });
 
-    const recipientIds = recipients.map((r) => r.id);
-
     // Build notification copy
     const callerName = callerProfile.full_name || "Reviewer";
     const notifTitle =
@@ -115,77 +235,9 @@ Deno.serve(async (req) => {
         ? `${callerName} reviewed "${videoTitle}" and needs more changes. Please revise and mark as Done again.`
         : `"${videoTitle}" has been revised and is ready for your final review.`;
 
-    // ── Insert in-app notifications ──
-    await supabase.from("notifications").insert(
-      recipientIds.map((id) => ({
-        user_id:  id,
-        video_id: videoId,
-        type,
-        title:    notifTitle,
-        message:  notifMessage,
-      }))
-    );
-
-    // ── Send Web Push notifications ──
-    if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY && recipientIds.length) {
-      // Get all push subscriptions for the recipients
-      const { data: pushSubs } = await supabase
-        .from("push_subscriptions")
-        .select("endpoint, p256dh, auth, user_id")
-        .in("user_id", recipientIds);
-
-      if (pushSubs?.length) {
-        // Unread notification count per recipient → home-screen icon badge
-        const unreadByUser: Record<string, number> = {};
-        await Promise.all(recipientIds.map(async (uid) => {
-          const { count } = await supabase
-            .from("notifications")
-            .select("id", { count: "exact", head: true })
-            .eq("user_id", uid)
-            .eq("read", false);
-          unreadByUser[uid] = count || 0;
-        }));
-
-        const pushResults = await Promise.allSettled(
-          pushSubs.map((sub) =>
-            webpush.sendNotification(
-              {
-                endpoint: sub.endpoint,
-                keys: { p256dh: sub.p256dh, auth: sub.auth },
-              },
-              JSON.stringify({
-                title:      notifTitle,
-                body:       notifMessage,
-                tag:        `lmp-${type}-${videoId}`,
-                url:        "/",
-                badgeCount: unreadByUser[sub.user_id] ?? 1,
-              })
-            )
-          )
-        );
-
-        // Clean up expired/invalid subscriptions (410 Gone)
-        const expiredEndpoints: string[] = [];
-        pushResults.forEach((result, i) => {
-          if (result.status === "rejected") {
-            const err = result.reason as { statusCode?: number };
-            if (err?.statusCode === 410 || err?.statusCode === 404) {
-              expiredEndpoints.push(pushSubs[i].endpoint);
-            } else {
-              console.warn("[notify-review] push error:", result.reason);
-            }
-          }
-        });
-
-        if (expiredEndpoints.length) {
-          await supabase
-            .from("push_subscriptions")
-            .delete()
-            .in("endpoint", expiredEndpoints);
-          console.log("[notify-review] removed", expiredEndpoints.length, "expired push subscriptions");
-        }
-      }
-    }
+    await deliver(supabase, recipients.map((r) => r.id), {
+      type, title: notifTitle, message: notifMessage, videoId, tag: `lmp-${type}-${videoId}`,
+    });
 
     return json(200, { ok: true });
   } catch (err) {

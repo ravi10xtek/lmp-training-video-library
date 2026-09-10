@@ -42,6 +42,36 @@ Required secrets: `WASABI_REGION`, `WASABI_BUCKET`, `WASABI_ACCESS_KEY_ID`, `WAS
 
 ---
 
+## Script review (confirm narration with Joe before producing video)
+
+Sidebar → **Scripts**. Ravi writes the narration, sends Joe a cheap preview,
+Joe listens on his phone and approves. Only then is the video produced.
+
+```
+draft → sent (with Joe) → changes requested → sent … → approved (locked)
+```
+
+- **Preview voice** is OpenAI `gpt-4o-mini-tts` (~$0.15 for a 10-min script),
+  rendered per paragraph and cached by content hash in `tts_cache` +
+  the private `script-audio` bucket. A revision re-renders only the
+  paragraphs whose text changed.
+- **Paragraphs** are blank-line separated. A line starting with `#` is a
+  section heading and is read aloud as "Section: …".
+- Joe's **voice notes** are transcribed automatically (Whisper) and stored on
+  `script_feedback.transcript`.
+- **Play changes only** plays the changed paragraphs (with the one before each
+  for context) so Joe doesn't re-listen to the whole thing.
+- Approving **locks** the version; "Start a revision" makes a new draft that
+  needs approval again. The approved script is tagged on the linked video slot.
+
+Setup (once): run `database/scripts_migration.sql`, deploy `script-tts` and
+`notify-review` (`supabase functions deploy <name> --use-api`). Needs the
+`OPENAI_API_KEY` secret (already used by `transcribe`). Optional secrets:
+`SCRIPT_TTS_VOICE` (default `ash`), `SCRIPT_TTS_MODEL`, `SCRIPT_TTS_INSTRUCTIONS`.
+Changing voice/model invalidates the cache (they're part of the hash).
+
+---
+
 ## YouTube cleanup SQL
 
 After Wasabi playback is stable, run `database/youtube_cleanup.sql` to clear legacy YouTube fields.

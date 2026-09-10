@@ -184,6 +184,12 @@
             Completed Videos
             <span class="sidebar-count" id="count-completed">0</span>
           </div>
+          <!-- Script review (admin / reviewer) — confirm narration before producing video -->
+          <div class="sidebar-item all" id="sidebar-scripts-item" onclick="showScriptsPage(this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+            Scripts
+            <span class="sidebar-count" id="count-scripts">—</span>
+          </div>
           <div class="sidebar-item all" onclick="showAdmin()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
             Manage videos
@@ -218,6 +224,8 @@
       <div class="modal-title" id="modal-title"></div>
       <div class="modal-desc" id="modal-desc"></div>
       <div class="modal-meta" id="modal-meta"></div>
+      <!-- Pinned script (set when a script is linked to this slot) -->
+      <div class="modal-script-link hidden" id="modal-script-link"></div>
 
       <!-- Transcription (admin only) -->
       <div class="transcribe-section hidden" id="video-transcribe-section">
@@ -554,9 +562,49 @@
   </div>
 </div>
 
+<!-- ══════════════════════════
+     SCRIPT REVIEW MODAL
+     Body is rendered by renderScriptModal() — it depends on role + status.
+══════════════════════════ -->
+<div class="modal-overlay" id="script-modal" onclick="closeScriptModal(event)">
+  <div class="modal" style="max-width:860px">
+    <button class="modal-close" onclick="closeScriptModal()">✕</button>
+    <div class="modal-info" id="script-modal-body"></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════
+     NEW SCRIPT MODAL
+══════════════════════════ -->
+<div class="modal-overlay" id="script-new-modal" onclick="closeScriptNewModal(event)">
+  <div class="modal" style="max-width:520px">
+    <button class="modal-close" onclick="closeScriptNewModal()">✕</button>
+    <div class="modal-info">
+      <h3 style="font-family:var(--font-head);font-size:18px;font-weight:700;color:var(--white);margin-bottom:6px">New script</h3>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:24px">Write the narration, send Joe a preview, get it approved before you produce the video.</p>
+
+      <div class="form-group">
+        <label class="form-label">Script title</label>
+        <input class="form-input" id="sc-new-title" placeholder="e.g. Greenbrier — Property Overview">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Video slot <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional — link later)</span></label>
+        <select class="form-select" id="sc-new-video">
+          <option value="">Not linked yet</option>
+        </select>
+      </div>
+
+      <div style="display:flex;gap:12px;margin-top:24px">
+        <button class="btn btn-ghost" onclick="closeScriptNewModal()" style="flex:1">Cancel</button>
+        <button class="btn btn-primary" id="sc-new-create-btn" onclick="createScript()" style="flex:2;margin-top:0">Create script</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=20260618a"></script>
+<script src="app.js?v=20260910a"></script>
 </body>
 </html>
