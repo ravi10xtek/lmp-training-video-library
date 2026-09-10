@@ -22,7 +22,7 @@ if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
 }
 
 type VideoType  = "video_uploaded" | "round1_reviewed" | "round2_reviewed" | "video_ready" | "more_changes_requested";
-type ScriptType = "script_sent" | "script_changes" | "script_approved";
+type ScriptType = "script_sent" | "script_changes" | "script_approved" | "script_assigned";
 type NotifyBody = {
   type: VideoType | ScriptType;
   // Video events
@@ -32,10 +32,13 @@ type NotifyBody = {
   scriptId?: string;
   scriptTitle?: string;
   versionNo?: number;
+  // script_assigned
+  assigneeId?: string;
+  assigneeRole?: "writer" | "editor";
 };
 type Profile = { role: string; is_reviewer: boolean | null; full_name: string | null };
 
-const SCRIPT_TYPES: ScriptType[] = ["script_sent", "script_changes", "script_approved"];
+const SCRIPT_TYPES: ScriptType[] = ["script_sent", "script_changes", "script_approved", "script_assigned"];
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
@@ -114,36 +117,62 @@ async function deliver(
 }
 
 // ── Script-review events ─────────────────────────────────────
-// script_sent     → Ravi sent a version   → notify reviewers (Joe)
-// script_changes  → Joe wants changes     → notify other admins (Ravi)
-// script_approved → Joe approved          → notify other admins (Ravi)
+// script_sent     → writer sent a version → reviewers (Joe)
+// script_changes  → Joe wants changes     → admins + assigned writer
+// script_approved → Joe approved          → admins + writer + assigned editor
+// script_assigned → Ravi assigned someone → that person
 async function notifyScript(supabase: SupabaseClient, callerId: string, caller: Profile, body: NotifyBody) {
-  const { type, scriptId, scriptTitle, versionNo } = body;
+  const { type, scriptId, scriptTitle, versionNo, assigneeId, assigneeRole } = body;
   const v = versionNo ? `v${versionNo}` : "the latest version";
-  const callerName = caller.full_name || (type === "script_sent" ? "Ravi" : "Joe");
+  const callerName = caller.full_name || (type === "script_sent" ? "The writer" : "Joe");
 
-  let recipientsQuery = supabase.from("profiles").select("id");
-  recipientsQuery = type === "script_sent"
-    ? recipientsQuery.eq("is_reviewer", true)
-    : recipientsQuery.eq("role", "admin").neq("id", callerId);
-  const { data: recipients } = await recipientsQuery;
-  if (!recipients?.length) return json(200, { ok: true, skipped: "no recipients" });
+  const { data: script } = await supabase
+    .from("scripts").select("writer_id, editor_id").eq("id", scriptId!).single();
 
+  const ids = new Set<string>();
+  if (type === "script_assigned") {
+    if (assigneeId) ids.add(assigneeId);
+  } else if (type === "script_sent") {
+    const { data } = await supabase.from("profiles").select("id").eq("is_reviewer", true);
+    (data || []).forEach((r) => ids.add(r.id));
+  } else {
+    const { data } = await supabase.from("profiles").select("id").eq("role", "admin");
+    (data || []).forEach((r) => ids.add(r.id));
+    if (script?.writer_id) ids.add(script.writer_id);
+    if (type === "script_approved" && script?.editor_id) ids.add(script.editor_id);
+  }
+  ids.delete(callerId);
+  const recipientIds = [...ids];
+  if (!recipientIds.length) return json(200, { ok: true, skipped: "no recipients" });
+
+  const roleLabel = assigneeRole === "editor" ? "editor" : "content writer";
   const title =
     type === "script_sent"     ? `Script ready to review: ${scriptTitle}` :
     type === "script_changes"  ? `${callerName} wants changes: ${scriptTitle}` :
-                                 `${callerName} approved the script: ${scriptTitle}`;
+    type === "script_approved" ? `${callerName} approved the script: ${scriptTitle}` :
+                                 `You're the ${roleLabel} on: ${scriptTitle}`;
   const message =
     type === "script_sent"
       ? `${callerName} sent ${v} of "${scriptTitle}". Tap to listen and approve or request changes.`
       : type === "script_changes"
       ? `${callerName} listened to ${v} of "${scriptTitle}" and left feedback. Revise and send again.`
-      : `${v} of "${scriptTitle}" is approved and locked — ready to record the final narration.`;
+      : type === "script_approved"
+      ? `${v} of "${scriptTitle}" is approved and locked — ready to record the final narration and produce the video.`
+      : assigneeRole === "editor"
+      ? `${callerName} assigned you to edit the video for "${scriptTitle}". You'll be notified when the script is approved.`
+      : `${callerName} assigned you to write "${scriptTitle}". Open Scripts to start the draft.`;
 
-  await deliver(supabase, recipients.map((r) => r.id), {
-    type: type!, title, message, scriptId, tag: `lmp-${type}-${scriptId}`,
+  await deliver(supabase, recipientIds, {
+    type: type!, title, message, scriptId, tag: `lmp-${type}-${scriptId}${assigneeId ? "-" + assigneeId : ""}`,
   });
   return json(200, { ok: true });
+}
+
+// Assigned writers/editors are plain accounts (role 'worker'); they may fire
+// script events for their own script.
+async function isScriptAssignee(supabase: SupabaseClient, userId: string, scriptId: string) {
+  const { data } = await supabase.from("scripts").select("writer_id, editor_id").eq("id", scriptId).single();
+  return !!data && (data.writer_id === userId || data.editor_id === userId);
 }
 
 Deno.serve(async (req) => {
@@ -167,9 +196,7 @@ Deno.serve(async (req) => {
     .single();
 
   if (!callerProfile) return json(403, { error: "Profile not found" });
-  if (callerProfile.role !== "admin" && !callerProfile.is_reviewer) {
-    return json(403, { error: "Not authorized" });
-  }
+  const isStaff = callerProfile.role === "admin" || !!callerProfile.is_reviewer;
 
   try {
     const body = (await req.json()) as NotifyBody;
@@ -179,8 +206,13 @@ Deno.serve(async (req) => {
       if (!body.scriptId || !body.scriptTitle) {
         return json(400, { error: "scriptId and scriptTitle are required" });
       }
+      if (!isStaff && !(await isScriptAssignee(supabase, caller.id, body.scriptId))) {
+        return json(403, { error: "Not authorized" });
+      }
       return await notifyScript(supabase, caller.id, callerProfile as Profile, body);
     }
+
+    if (!isStaff) return json(403, { error: "Not authorized" });
 
     const videoId = body.videoId, videoTitle = body.videoTitle;
     if (!type || !videoId || !videoTitle) {

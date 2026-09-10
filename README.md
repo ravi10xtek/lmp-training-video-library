@@ -44,12 +44,20 @@ Required secrets: `WASABI_REGION`, `WASABI_BUCKET`, `WASABI_ACCESS_KEY_ID`, `WAS
 
 ## Script review (confirm narration with Joe before producing video)
 
-Sidebar → **Scripts**. Ravi writes the narration, sends Joe a cheap preview,
-Joe listens on his phone and approves. Only then is the video produced.
+Sidebar → **Scripts**. A script is the start of a video's project: Ravi
+creates it against a slot (category → sub-category → free slot) and assigns a
+**content writer**; an **editor** is assigned later (usually after approval).
+The writer drafts and sends Joe a cheap preview, Joe listens on his phone and
+approves. Only then is the video produced.
 
 ```
 draft → sent (with Joe) → changes requested → sent … → approved (locked)
 ```
+
+Writers and editors are ordinary invited accounts (role `worker`). They see
+only the scripts they're assigned to; access is granted by assignment, not
+role (`database/scripts_assignments_migration.sql`). "Waiting on you" is
+per role: Joe = sent, writer = draft/changes, editor = approved.
 
 - **Preview voice** is OpenAI `gpt-4o-mini-tts` (~$0.15 for a 10-min script),
   rendered per paragraph and cached by content hash in `tts_cache` +

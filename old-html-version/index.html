@@ -162,6 +162,19 @@
         </button>
       </div>
 
+      <!-- Script projects — staff, plus anyone assigned as writer/editor (toggled in initApp) -->
+      <div id="sidebar-scripts" class="hidden">
+        <div class="sidebar-divider"></div>
+        <div class="sidebar-section">
+          <div class="sidebar-section-label">Projects</div>
+          <div class="sidebar-item all" id="sidebar-scripts-item" onclick="showScriptsPage(this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
+            Scripts
+            <span class="sidebar-count" id="count-scripts">—</span>
+          </div>
+        </div>
+      </div>
+
       <!-- Admin only -->
       <div id="sidebar-admin" class="hidden">
         <div class="sidebar-divider"></div>
@@ -183,12 +196,6 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
             Completed Videos
             <span class="sidebar-count" id="count-completed">0</span>
-          </div>
-          <!-- Script review (admin / reviewer) — confirm narration before producing video -->
-          <div class="sidebar-item all" id="sidebar-scripts-item" onclick="showScriptsPage(this)">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-            Scripts
-            <span class="sidebar-count" id="count-scripts">—</span>
           </div>
           <div class="sidebar-item all" onclick="showAdmin()">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
@@ -581,17 +588,45 @@
     <button class="modal-close" onclick="closeScriptNewModal()">✕</button>
     <div class="modal-info">
       <h3 style="font-family:var(--font-head);font-size:18px;font-weight:700;color:var(--white);margin-bottom:6px">New script</h3>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:24px">Write the narration, send Joe a preview, get it approved before you produce the video.</p>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:24px">Pick the video slot this script is for, assign a writer, and the project starts. Joe approves the narration before the video is produced.</p>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Category</label>
+          <select class="form-select" id="sc-new-category" onchange="scNewCategoryChanged(this.value)">
+            <option value="">Select category…</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sub-category</label>
+          <select class="form-select" id="sc-new-subcat" onchange="scNewSubcatChanged(this.value)">
+            <option value="">Select sub-category…</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Video slot</label>
+        <select class="form-select" id="sc-new-video" onchange="scNewVideoChanged(this.value)">
+          <option value="">Pick a sub-category first…</option>
+        </select>
+        <div class="form-hint" style="font-size:11px;color:var(--muted);margin-top:4px">Empty slots that don't have a script yet. Slots with a video already are listed last.</div>
+      </div>
 
       <div class="form-group">
         <label class="form-label">Script title</label>
-        <input class="form-input" id="sc-new-title" placeholder="e.g. Greenbrier — Property Overview">
+        <input class="form-input" id="sc-new-title" placeholder="Filled from the slot — edit if you like">
       </div>
-      <div class="form-group">
-        <label class="form-label">Video slot <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional — link later)</span></label>
-        <select class="form-select" id="sc-new-video">
-          <option value="">Not linked yet</option>
-        </select>
+
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Content writer</label>
+          <select class="form-select" id="sc-new-writer"></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Editor <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional — assign later)</span></label>
+          <select class="form-select" id="sc-new-editor"></select>
+        </div>
       </div>
 
       <div style="display:flex;gap:12px;margin-top:24px">
@@ -605,6 +640,6 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=20260910a"></script>
+<script src="app.js?v=20260910b"></script>
 </body>
 </html>

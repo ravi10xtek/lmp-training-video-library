@@ -9,7 +9,7 @@
 // first-time script can't hit the edge-function wall clock — the client
 // keeps calling until `pending` is 0.
 //
-// Body:    { text: string, maxRender?: number }
+// Body:    { text: string, scriptId?: string, maxRender?: number }
 // Returns: { paragraphs: [{ i, text, hash, heading, audio_path|null }],
 //            pending, rendered, cached, charsRendered, model, voice }
 import { createClient } from "npm:@supabase/supabase-js@2";
@@ -45,14 +45,20 @@ function json(status: number, body: Record<string, unknown>) {
   });
 }
 
-async function requireAdmin(authHeader: string | null) {
+// Admins may render anything; an assigned content writer may render for the
+// script they are assigned to (scriptId in the body).
+async function requireRenderer(authHeader: string | null, scriptId?: string) {
   if (!authHeader?.startsWith("Bearer ")) throw new Error("Unauthorized");
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   const { data: { user }, error } = await supabase.auth.getUser(authHeader.replace("Bearer ", ""));
   if (error || !user) throw new Error("Unauthorized");
   const { data: profile } = await supabase.from("profiles").select("role").eq("id", user.id).single();
-  if (profile?.role !== "admin") throw new Error("Admin access required");
-  return supabase;
+  if (profile?.role === "admin") return supabase;
+  if (scriptId) {
+    const { data: s } = await supabase.from("scripts").select("writer_id").eq("id", scriptId).single();
+    if (s?.writer_id === user.id) return supabase;
+  }
+  throw new Error("Only an admin or the assigned writer can render this script");
 }
 
 // ── Paragraph splitting ───────────────────────────────────────
@@ -105,15 +111,22 @@ Deno.serve(async (req) => {
   if (req.method !== "POST") return json(405, { error: "Method not allowed" });
   if (!OPENAI_API_KEY) return json(500, { error: "OPENAI_API_KEY is not configured on the server." });
 
+  let body: { text?: string; maxRender?: number; scriptId?: string };
+  try {
+    body = await req.json();
+  } catch (_) {
+    return json(400, { error: "Invalid JSON body" });
+  }
+
   let supabase;
   try {
-    supabase = await requireAdmin(req.headers.get("authorization"));
+    supabase = await requireRenderer(req.headers.get("authorization"), body.scriptId);
   } catch (e) {
     return json(401, { error: e instanceof Error ? e.message : "Unauthorized" });
   }
 
   try {
-    const { text, maxRender } = (await req.json()) as { text?: string; maxRender?: number };
+    const { text, maxRender } = body;
     if (!text || !text.trim()) return json(400, { error: "text is required" });
 
     const parts = splitParagraphs(text);

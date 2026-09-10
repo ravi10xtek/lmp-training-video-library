@@ -2779,26 +2779,35 @@ if ('serviceWorker' in navigator) {
 }
 
 // ══════════════════════════════════════════════════════
-// SCRIPT REVIEW — confirm the narration with Joe BEFORE producing video
+// SCRIPT PROJECTS — confirm the narration with Joe BEFORE producing video
 //
-// Ravi writes → "Send to Joe" renders a cheap OpenAI TTS preview (cached per
-// paragraph, only changed paragraphs re-render) → Joe listens on his phone,
-// leaves voice notes (auto-transcribed) → Approve / Needs changes.
-// The approved version is pinned to the video slot for the video review flow.
+// A script is the start of a video's project: it's created against a slot
+// (category → sub-category → empty slot) with a content writer assigned, and
+// an editor assigned later. The writer drafts → "Send to Joe" renders a cheap
+// OpenAI TTS preview (cached per paragraph, only changed paragraphs re-render)
+// → Joe listens on his phone, leaves voice notes (auto-transcribed) →
+// Approve / Needs changes. The approved version is pinned to the video slot.
+//
+// Roles: Ravi = admin (manages projects, can also write). Joe = reviewer.
+// Writers/editors are plain accounts; access comes purely from assignment.
 // ══════════════════════════════════════════════════════
 const SCRIPT_TTS_FUNCTION = 'script-tts';
 const SCRIPT_AUDIO_BUCKET = 'script-audio';
+// PostgREST needs the FK name to embed profiles twice (writer + editor)
+const SCRIPT_SELECT = `*, videos(title, status), categories(name, slug), subcategories(name),
+  writer:profiles!scripts_writer_id_fkey(full_name), editor:profiles!scripts_editor_id_fkey(full_name)`;
 
 const SCRIPT_STATUS_META = {
-  draft:    { color: 'var(--muted)', label: 'Draft',             who: 'editor' },
-  sent:     { color: '#f5a524',      label: 'With Joe',          who: 'reviewer' },
-  changes:  { color: '#60a5fa',      label: 'Changes requested', who: 'editor' },
-  approved: { color: 'var(--teal)',  label: 'Approved',          who: null },
+  draft:    { color: 'var(--muted)', label: 'Draft' },
+  sent:     { color: '#f5a524',      label: 'With Joe' },
+  changes:  { color: '#60a5fa',      label: 'Changes requested' },
+  approved: { color: 'var(--teal)',  label: 'Approved' },
 };
 
 let allScripts = [];
+let allProfiles = [];
 let currentScriptId = null;
-let currentScript = null;         // scripts row (+ videos(title))
+let currentScript = null;         // scripts row (+ embeds)
 let scriptVersions = [];          // ascending by version
 let scriptViewVersionId = null;   // version shown in player + feedback
 let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
@@ -2811,25 +2820,48 @@ const sp = { audio: null, paragraphs: [], queue: [], pos: -1, urls: {}, playing:
 let scAudioBlob = null, scAudioDuration = 0, scRecorder = null, scStream = null, scChunks = [];
 let scTimerInterval = null, scRecStart = 0;
 
+// ── Roles ────────────────────────────────────────────────────
 const isStaffUser    = () => currentProfile?.role === 'admin' || currentProfile?.is_reviewer === true;
 const isReviewerUser = () => currentProfile?.is_reviewer === true;
-const isEditorUser   = () => currentProfile?.role === 'admin' && !currentProfile?.is_reviewer;
+// Ravi: creates projects, assigns people, links slots
+const canManageScripts = () => currentProfile?.role === 'admin' && !currentProfile?.is_reviewer;
+// Who may edit the text: the manager, or the assigned writer
+const canWriteScript   = (s) => !!s && (canManageScripts() || s.writer_id === currentUser?.id);
+const isScriptAssignee = (s) => !!s && (s.writer_id === currentUser?.id || s.editor_id === currentUser?.id);
+const canCommentScript = (s) => isStaffUser() || isScriptAssignee(s);
+
+function profileName(p) {
+  const n = p?.full_name || '';
+  return n.includes('@') ? n.split('@')[0] : (n || 'Unnamed');
+}
 
 // ── Data ─────────────────────────────────────────────────────
 async function loadScripts() {
-  if (!isStaffUser()) return;
-  const { data, error } = await sb.from('scripts')
-    .select('*, videos(title)')
-    .order('updated_at', { ascending: false });
+  // Everyone may call this — RLS returns staff everything, assignees their own.
+  const { data, error } = await sb.from('scripts').select(SCRIPT_SELECT).order('updated_at', { ascending: false });
   if (error) { console.warn('[scripts] load failed:', error.message); return; }
   allScripts = data || [];
+
+  // Sidebar entry + bell for anyone who has a project, not just staff
+  const hasScripts = isStaffUser() || allScripts.length > 0;
+  document.getElementById('sidebar-scripts')?.classList.toggle('hidden', !hasScripts);
+  if (hasScripts) document.getElementById('notif-wrap')?.classList.remove('hidden');
   updateScriptsCount();
 }
 
-// Scripts waiting on the current user: Joe → sent; Ravi → changes requested
+async function loadProfiles() {
+  if (!canManageScripts()) return;
+  const { data } = await sb.from('profiles').select('id, full_name, role, is_reviewer').order('full_name');
+  allProfiles = data || [];
+}
+
+// "Waiting on you" per role
 function scriptNeedsMe(s) {
-  if (isReviewerUser()) return s.status === 'sent';
-  if (isEditorUser())   return s.status === 'changes';
+  const me = currentUser?.id;
+  if (isReviewerUser() && s.status === 'sent') return true;
+  if (s.writer_id === me && (s.status === 'draft' || s.status === 'changes')) return true;
+  if (canManageScripts() && !s.writer_id && (s.status === 'draft' || s.status === 'changes')) return true;
+  if (s.editor_id === me && s.status === 'approved') return true;
   return false;
 }
 
@@ -2845,7 +2877,7 @@ function scriptForVideo(videoId) {
   return allScripts.find(s => s.video_id === videoId) || null;
 }
 
-// Tag shown on a video card / in the video modal for its linked script
+// Tag shown on a video card for its linked script
 function scriptTagHtml(s) {
   if (!s) return '';
   if (s.status === 'approved') return `<span class="card-tag script-ok">Script ✓ v${s.current_version}</span>`;
@@ -2856,7 +2888,7 @@ function renderModalScriptLink(videoId) {
   const box = document.getElementById('modal-script-link');
   if (!box) return;
   const s = scriptForVideo(videoId);
-  if (!s || !isStaffUser()) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  if (!s || !(isStaffUser() || isScriptAssignee(s))) { box.classList.add('hidden'); box.innerHTML = ''; return; }
   const approved = s.status === 'approved';
   box.classList.toggle('is-wip', !approved);
   box.innerHTML = `
@@ -2883,9 +2915,9 @@ async function showScriptsPage(sidebarEl) {
     <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
       <div>
         <div class="page-title">Scripts</div>
-        <div class="page-sub">${allScripts.length} script${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
+        <div class="page-sub">${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
       </div>
-      ${isEditorUser() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
+      ${canManageScripts() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         New script
       </button>` : ''}
@@ -2895,7 +2927,7 @@ async function showScriptsPage(sidebarEl) {
     html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
       <div style="font-size:15px">No scripts yet.</div>
-      <div style="font-size:13px;margin-top:6px">${isEditorUser() ? 'Click <strong>New script</strong> to write the first one.' : 'Ravi hasn\'t sent anything to review yet.'}</div>
+      <div style="font-size:13px;margin-top:6px">${canManageScripts() ? 'Click <strong>New script</strong> to start the first project.' : 'Nothing has been assigned to you yet.'}</div>
     </div>`;
     main.innerHTML = html;
     return;
@@ -2904,6 +2936,7 @@ async function showScriptsPage(sidebarEl) {
   const card = (s) => {
     const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
     const ver  = s.current_version ? `v${s.current_version}` : 'not sent';
+    const where = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
     return `
       <div class="script-card ${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
         <div class="card-tags" style="margin-bottom:0">
@@ -2912,7 +2945,12 @@ async function showScriptsPage(sidebarEl) {
         </div>
         <div class="script-card-title">${escapeHtml(s.title)}</div>
         <div class="script-card-meta">
-          ${s.videos?.title ? `<span>Video: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No video linked</span>'}
+          ${where ? `<span>${escapeHtml(where)}</span>` : ''}
+          ${s.videos?.title ? `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No slot linked</span>'}
+        </div>
+        <div class="script-card-meta">
+          <span>Writer: <strong>${s.writer ? escapeHtml(profileName(s.writer)) : '—'}</strong></span>
+          <span>Editor: <strong>${s.editor ? escapeHtml(profileName(s.editor)) : '—'}</strong></span>
           <span>· ${timeAgo(s.updated_at || s.created_at)}</span>
         </div>
       </div>`;
@@ -2926,19 +2964,63 @@ async function showScriptsPage(sidebarEl) {
   main.innerHTML = html;
 }
 
-// ── New script ───────────────────────────────────────────────
-function openScriptNewModal() {
+// ── New script (project initiation) ──────────────────────────
+function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
+  let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
+  allProfiles.forEach(p => {
+    const you = p.id === currentUser?.id ? ' (you)' : '';
+    const tag = p.is_reviewer ? ' · reviewer' : p.role === 'admin' ? ' · admin' : '';
+    html += `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${escapeHtml(profileName(p))}${you}${tag}</option>`;
+  });
+  return html;
+}
+
+async function openScriptNewModal() {
+  if (!allProfiles.length) await loadProfiles();
+  const catSel = document.getElementById('sc-new-category');
+  catSel.innerHTML = '<option value="">Select category…</option>' +
+    allCategories.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  document.getElementById('sc-new-subcat').innerHTML = '<option value="">Select sub-category…</option>';
+  document.getElementById('sc-new-video').innerHTML  = '<option value="">Pick a sub-category first…</option>';
   document.getElementById('sc-new-title').value = '';
-  const sel = document.getElementById('sc-new-video');
-  sel.innerHTML = '<option value="">Not linked yet</option>';
-  // Slots without a script yet, unpublished first — that's where scripts are needed
-  const taken = new Set(allScripts.map(s => s.video_id).filter(Boolean));
-  [...allVideos]
-    .filter(v => !taken.has(v.id))
-    .sort((a, b) => (a.status === 'published') - (b.status === 'published') || a.title.localeCompare(b.title))
-    .forEach(v => { sel.innerHTML += `<option value="${v.id}">${escapeHtml(v.title)}${v.status === 'published' ? ' (published)' : ''}</option>`; });
+  document.getElementById('sc-new-title').dataset.auto = '';
+  document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id);
+  document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true });
   document.getElementById('script-new-modal').classList.add('open');
-  setTimeout(() => document.getElementById('sc-new-title').focus(), 50);
+}
+
+function scNewCategoryChanged(catId) {
+  const sub = document.getElementById('sc-new-subcat');
+  sub.innerHTML = '<option value="">Select sub-category…</option>' +
+    allSubcats.filter(s => s.category_id === catId).map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  scNewSubcatChanged('');
+}
+
+// Slots in this sub-category that don't have a script yet. Empty slots first —
+// that's what scripts are for; slots that already have a video come last.
+function scNewSubcatChanged(subId) {
+  const sel = document.getElementById('sc-new-video');
+  if (!subId) { sel.innerHTML = '<option value="">Pick a sub-category first…</option>'; scNewVideoChanged(''); return; }
+  const taken = new Set(allScripts.map(s => s.video_id).filter(Boolean));
+  const rank = v => (v.status === 'empty' ? 0 : v.status === 'raw' ? 1 : 2);
+  const slots = allVideos
+    .filter(v => v.subcategory_id === subId && !taken.has(v.id))
+    .sort((a, b) => rank(a) - rank(b) || (a.sort_order || 0) - (b.sort_order || 0) || a.title.localeCompare(b.title));
+  sel.innerHTML = slots.length
+    ? '<option value="">Select a slot…</option>' + slots.map(v =>
+        `<option value="${v.id}">${escapeHtml(v.title)}${v.status !== 'empty' ? ` · ${v.status.replace('_', ' ')}` : ''}</option>`).join('')
+    : '<option value="">No free slots in this sub-category</option>';
+  scNewVideoChanged('');
+}
+
+// Title follows the slot until the user types their own
+function scNewVideoChanged(videoId) {
+  const title = document.getElementById('sc-new-title');
+  const v = allVideos.find(x => x.id === videoId);
+  if (!title.value || title.value === title.dataset.auto) {
+    title.value = v?.title || '';
+    title.dataset.auto = v?.title || '';
+  }
 }
 
 function closeScriptNewModal(e) {
@@ -2947,32 +3029,71 @@ function closeScriptNewModal(e) {
 }
 
 async function createScript() {
-  const title = document.getElementById('sc-new-title').value.trim();
-  const videoId = document.getElementById('sc-new-video').value || null;
+  if (!canManageScripts()) return;
+  const categoryId    = document.getElementById('sc-new-category').value || null;
+  const subcategoryId = document.getElementById('sc-new-subcat').value || null;
+  const videoId       = document.getElementById('sc-new-video').value || null;
+  const title         = document.getElementById('sc-new-title').value.trim();
+  const writerId      = document.getElementById('sc-new-writer').value || null;
+  const editorId      = document.getElementById('sc-new-editor').value || null;
   if (!title) { showToast('Give the script a title', 'error'); return; }
+  if (!writerId) { showToast('Pick a content writer', 'error'); return; }
 
   const btn = document.getElementById('sc-new-create-btn');
   btn.disabled = true; btn.textContent = 'Creating…';
   await ensureFreshSession();
   const { data, error } = await sb.from('scripts')
-    .insert({ title, video_id: videoId, created_by: currentUser.id, status: 'draft' })
+    .insert({
+      title, video_id: videoId, category_id: categoryId, subcategory_id: subcategoryId,
+      writer_id: writerId, editor_id: editorId, created_by: currentUser.id, status: 'draft',
+    })
     .select('id').single();
   btn.disabled = false; btn.textContent = 'Create script';
-
   if (error) { showToast('Could not create: ' + error.message, 'error'); return; }
+
   closeScriptNewModal();
+  showToast('Project started', 'success');
+  notifyAssigned(data.id, title, 'writer', writerId);
+  if (editorId) notifyAssigned(data.id, title, 'editor', editorId);
+
   await loadScripts();
+  renderVideos();
   if (document.getElementById('sidebar-scripts-item')?.classList.contains('active')) {
     showScriptsPage(document.getElementById('sidebar-scripts-item'));
   }
   openScript(data.id);
 }
 
+function notifyAssigned(scriptId, scriptTitle, role, assigneeId) {
+  if (!assigneeId || assigneeId === currentUser?.id) return;
+  invokeEdge(NOTIFY_FUNCTION, {
+    body: { type: 'script_assigned', scriptId, scriptTitle, assigneeId, assigneeRole: role },
+  }).catch(err => console.warn('[notify script_assigned]', err));
+}
+
+// Re-assign from inside the script modal (manager only)
+async function assignScript(role, userId) {
+  if (!canManageScripts() || !currentScriptId) return;
+  const col = role === 'editor' ? 'editor_id' : 'writer_id';
+  if (role === 'writer' && !userId) { showToast('A script needs a writer', 'error'); renderScriptModal(); return; }
+  await ensureFreshSession();
+  const { error } = await sb.from('scripts').update({ [col]: userId || null }).eq('id', currentScriptId);
+  if (error) { showToast('Could not assign: ' + error.message, 'error'); renderScriptModal(); return; }
+  currentScript[col] = userId || null;
+  const p = allProfiles.find(x => x.id === userId);
+  currentScript[role] = p ? { full_name: p.full_name } : null;
+  showToast(p ? `${profileName(p)} assigned as ${role}` : `${role} cleared`, 'success');
+  notifyAssigned(currentScriptId, currentScript.title, role, userId);
+  renderScriptModal();
+  loadScripts();
+}
+
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
+  if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
-    sb.from('scripts').select('*, videos(title)').eq('id', id).single(),
+    sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
     sb.from('script_versions').select('*').eq('script_id', id).order('version'),
   ]);
   if (error || !s) { showToast('Could not open script', 'error'); return; }
@@ -3016,12 +3137,14 @@ function renderScriptModal() {
   const body = document.getElementById('script-modal-body');
   if (!s || !body) return;
 
-  const meta   = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
-  const latest = scriptVersions.at(-1) || null;
-  const view   = viewedVersion();
+  const meta     = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
+  const latest   = scriptVersions.at(-1) || null;
+  const view     = viewedVersion();
   const isLatest = view && latest && view.id === latest.id;
-  const editor = isEditorUser();
+  const manager  = canManageScripts();
+  const writer   = canWriteScript(s);
   const reviewer = isReviewerUser();
+  const where    = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
 
   // ── Header ──
   let html = `
@@ -3029,13 +3152,32 @@ function renderScriptModal() {
       <span class="card-tag sc-status-${s.status}">${meta.label}</span>
       ${latest ? `<span class="card-tag sc-version">v${latest.version}${s.status === 'approved' ? ' · locked' : ''}</span>` : '<span class="card-tag sc-version">not sent yet</span>'}
     </div>
-    <div class="sc-title">${escapeHtml(s.title)}</div>
+    <div class="sc-title">${escapeHtml(s.title)}${manager ? ` <a class="sc-link" style="font-size:12px;font-weight:400" onclick="renameScript()">rename</a>` : ''}</div>
     <div class="sc-sub">
+      ${where ? `${escapeHtml(where)} · ` : ''}
       ${s.videos?.title
-        ? `Video: <strong style="color:var(--white);font-weight:500">${escapeHtml(s.videos.title)}</strong>`
-        : 'No video linked'}
-      ${editor ? ` · <a onclick="linkScriptVideo()">${s.video_id ? 'change' : 'link a video slot'}</a> · <a onclick="renameScript()">rename</a>` : ''}
+        ? `Slot: <strong style="color:var(--white);font-weight:500">${escapeHtml(s.videos.title)}</strong>`
+        : 'No slot linked'}
+      ${manager ? ` · <a onclick="linkScriptVideo()">${s.video_id ? 'change slot' : 'link a slot'}</a>` : ''}
       ${latest ? ` · sent ${timeAgo(latest.created_at)}` : ''}
+    </div>`;
+
+  // ── Project team ──
+  const person = (p) => p ? escapeHtml(profileName(p)) : '<span style="color:var(--muted)">—</span>';
+  html += `
+    <div class="sc-team">
+      <div class="sc-team-role">
+        <span class="sc-team-label">Content writer</span>
+        ${manager
+          ? `<select class="form-select sc-team-select" onchange="assignScript('writer', this.value)">${peopleOptions(s.writer_id)}</select>`
+          : `<span class="sc-team-name">${person(s.writer)}${s.writer_id === currentUser?.id ? ' (you)' : ''}</span>`}
+      </div>
+      <div class="sc-team-role">
+        <span class="sc-team-label">Editor</span>
+        ${manager
+          ? `<select class="form-select sc-team-select" onchange="assignScript('editor', this.value)">${peopleOptions(s.editor_id, { allowNone: true })}</select>`
+          : `<span class="sc-team-name">${person(s.editor)}${s.editor_id === currentUser?.id ? ' (you)' : ''}</span>`}
+      </div>
     </div>`;
 
   // ── Version tabs (only once there's more than one round) ──
@@ -3047,7 +3189,7 @@ function renderScriptModal() {
       </button>`).join('') + `</div>`;
   }
 
-  // ── Player: the viewed version, or Ravi's unsent draft preview ──
+  // ── Player: the viewed version, or the writer's unsent draft preview ──
   const showingDraft = !!scriptDraftPreview;
   const paragraphs = showingDraft ? scriptDraftPreview : (view?.paragraphs || []);
   if (paragraphs.length) {
@@ -3059,8 +3201,8 @@ function renderScriptModal() {
           ? (changed ? `${changed} of ${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''} changed since v${view.version - 1}` : `No text changes since v${view.version - 1}`)
           : `${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''}`);
     html += renderScriptPlayerHtml(paragraphs, { label, note, changed });
-  } else if (!latest && !editor) {
-    html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — Ravi hasn't sent a version.</div></div>`;
+  } else if (!latest && !writer) {
+    html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — the writer hasn't sent a version.</div></div>`;
   }
 
   // ── Reviewer decision (Joe) — only on the latest version while it's with him ──
@@ -3082,48 +3224,49 @@ function renderScriptModal() {
       </div>`;
   }
 
-  // ── Editor (Ravi) ──
-  if (editor) {
-    if (s.status === 'approved') {
-      html += `
-        <div class="sc-locked">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          <div class="sc-locked-text"><strong>Approved by Joe</strong> ${s.approved_at ? timeAgo(s.approved_at) : ''} — v${latest?.version} is locked. Record the final narration from this text. Any further change is a new version that needs approval again.</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="copyApprovedScript(this)">Copy text</button>
-            <button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="startScriptRevision()">Start a revision</button>
-          </div>
-        </div>`;
-    } else {
-      const draftText = s.draft_body ?? latest?.body ?? '';
-      const ctx =
-        s.status === 'changes' ? `Joe asked for changes on v${latest?.version}. His notes are below — edit and send v${(latest?.version || 0) + 1}.` :
-        s.status === 'sent'    ? `v${latest?.version} is with Joe. You can keep editing; sending again replaces it with v${latest.version + 1}.` :
-        latest                 ? `Editing a new draft after v${latest.version}.` :
-                                 'Write the narration. Blank line between paragraphs; start a line with # for a section heading (it\'s read aloud as "Section: …").';
-      html += `
-        <div class="sc-editor">
-          <div class="workflow-section-label">Script text</div>
-          <textarea class="form-input" id="sc-body" placeholder="# Intro&#10;&#10;Hi, I'm Joe, master plumber at Loch Monster Plumbing…&#10;&#10;# Step one&#10;&#10;First thing you do on site is…" oninput="scriptDraftDirty()">${escapeHtmlAttr(draftText)}</textarea>
-          <div class="sc-editor-hint">${ctx}<br>Only paragraphs whose text changed get re-rendered — an edit to a few lines costs a few cents.</div>
-          <div class="sc-btn-row">
-            <button class="btn btn-ghost btn-sm" id="sc-save-btn" onclick="saveScriptDraft()">Save draft</button>
-            <button class="btn btn-ghost btn-sm" id="sc-preview-btn" onclick="previewScriptDraft()">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-              Preview audio
-            </button>
-            <button class="btn btn-primary btn-sm" id="sc-send-btn" onclick="sendScriptToJoe()">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-              Send to Joe${latest ? ` as v${latest.version + 1}` : ''}
-            </button>
-          </div>
-          <div class="sc-editor-status" id="sc-editor-status"></div>
-        </div>`;
-    }
+  // ── Approved: locked text, visible to everyone on the project ──
+  if (s.status === 'approved') {
+    html += `
+      <div class="sc-locked">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <div class="sc-locked-text"><strong>Approved by Joe</strong> ${s.approved_at ? timeAgo(s.approved_at) : ''} — v${latest?.version} is locked. ${s.editor_id === currentUser?.id ? 'Record the final narration from this text and produce the video.' : 'The editor produces the video from this text.'} Any further change is a new version that needs approval again.</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="copyApprovedScript(this)">Copy text</button>
+          ${writer ? `<button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0" onclick="startScriptRevision()">Start a revision</button>` : ''}
+        </div>
+      </div>`;
+  }
+
+  // ── Writer's editor ──
+  if (writer && s.status !== 'approved') {
+    const draftText = s.draft_body ?? latest?.body ?? '';
+    const ctx =
+      s.status === 'changes' ? `Joe asked for changes on v${latest?.version}. His notes are below — edit and send v${(latest?.version || 0) + 1}.` :
+      s.status === 'sent'    ? `v${latest?.version} is with Joe. You can keep editing; sending again replaces it with v${latest.version + 1}.` :
+      latest                 ? `Editing a new draft after v${latest.version}.` :
+                               'Write the narration. Blank line between paragraphs; start a line with # for a section heading (it\'s read aloud as "Section: …").';
+    html += `
+      <div class="sc-editor">
+        <div class="workflow-section-label">Script text</div>
+        <textarea class="form-input" id="sc-body" placeholder="# Intro&#10;&#10;Hi, I'm Joe, master plumber at Loch Monster Plumbing…&#10;&#10;# Step one&#10;&#10;First thing you do on site is…" oninput="scriptDraftDirty()">${escapeHtmlAttr(draftText)}</textarea>
+        <div class="sc-editor-hint">${ctx}<br>Only paragraphs whose text changed get re-rendered — an edit to a few lines costs a few cents.</div>
+        <div class="sc-btn-row">
+          <button class="btn btn-ghost btn-sm" id="sc-save-btn" onclick="saveScriptDraft()">Save draft</button>
+          <button class="btn btn-ghost btn-sm" id="sc-preview-btn" onclick="previewScriptDraft()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            Preview audio
+          </button>
+          <button class="btn btn-primary btn-sm" id="sc-send-btn" onclick="sendScriptToJoe()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            Send to Joe${latest ? ` as v${latest.version + 1}` : ''}
+          </button>
+        </div>
+        <div class="sc-editor-status" id="sc-editor-status"></div>
+      </div>`;
   }
 
   // ── Feedback ──
-  const canComment = isStaffUser();
+  const canComment = canCommentScript(s);
   html += `
     <div class="feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
@@ -3183,18 +3326,27 @@ async function renameScript() {
 
 async function linkScriptVideo() {
   const taken = new Set(allScripts.filter(s => s.id !== currentScriptId).map(s => s.video_id).filter(Boolean));
-  const choices = allVideos.filter(v => !taken.has(v.id));
+  // Prefer slots in the script's own sub-category, then everything else
+  const sub = currentScript?.subcategory_id;
+  const choices = allVideos
+    .filter(v => !taken.has(v.id))
+    .sort((a, b) => ((b.subcategory_id === sub) - (a.subcategory_id === sub)) || a.title.localeCompare(b.title));
   if (!choices.length) { showToast('No unlinked video slots', 'error'); return; }
-  const list = choices.map((v, i) => `${i + 1}. ${v.title}`).join('\n');
+  const list = choices.map((v, i) => `${i + 1}. ${v.title}${v.status !== 'empty' ? ` (${v.status})` : ''}`).join('\n');
   const ans = prompt(`Link to which video slot? Enter a number (0 to unlink):\n\n${list}`);
   if (ans == null) return;
   const n = parseInt(ans, 10);
   if (Number.isNaN(n) || n < 0 || n > choices.length) return;
-  const videoId = n === 0 ? null : choices[n - 1].id;
-  const { error } = await sb.from('scripts').update({ video_id: videoId }).eq('id', currentScriptId);
+  const v = n === 0 ? null : choices[n - 1];
+  const patch = { video_id: v?.id || null };
+  if (v) { patch.category_id = v.category_id || null; patch.subcategory_id = v.subcategory_id || null; }
+  const { error } = await sb.from('scripts').update(patch).eq('id', currentScriptId);
   if (error) { showToast('Could not link: ' + error.message, 'error'); return; }
-  currentScript.video_id = videoId;
-  currentScript.videos = videoId ? { title: choices[n - 1].title } : null;
+  Object.assign(currentScript, patch, { videos: v ? { title: v.title, status: v.status } : null });
+  if (v) {
+    currentScript.categories    = allCategories.find(c => c.id === v.category_id) || null;
+    currentScript.subcategories = allSubcats.find(x => x.id === v.subcategory_id) || null;
+  }
   renderScriptModal(); loadScripts().then(renderVideos);
 }
 
@@ -3295,7 +3447,6 @@ function spNext() {
 
 function spHighlight(i) {
   document.querySelectorAll('.sp-para.active').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.sp-chip.playing').forEach(el => el.remove());
   const el = document.getElementById(`sp-para-${i}`);
   if (!el) return;
   el.classList.add('active');
@@ -3333,11 +3484,11 @@ function stopScriptPlayer(finished = false) {
   if (now && finished) now.textContent = 'Finished';
 }
 
-// ── Rendering (Ravi): loop the edge function until every paragraph is cached ──
+// ── Rendering (writer): loop the edge function until every paragraph is cached ──
 async function renderScriptAudio(text, onProgress) {
   let totalRendered = 0, totalChars = 0, rounds = 0, result;
   do {
-    const { data, error } = await invokeEdge(SCRIPT_TTS_FUNCTION, { body: { text } });
+    const { data, error } = await invokeEdge(SCRIPT_TTS_FUNCTION, { body: { text, scriptId: currentScriptId } });
     const detail = error ? await parseFunctionError(error) : (data?.error || null);
     if (detail) throw new Error(detail);
     result = data;
@@ -3499,7 +3650,7 @@ async function scriptDecision(decision) {
       .select('id', { count: 'exact', head: true })
       .eq('version_id', latest.id).eq('user_id', currentUser.id);
     if (!count && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
-  } else if (!confirm(`Approve v${latest.version}? The text is locked and Ravi records the final narration from it.`)) {
+  } else if (!confirm(`Approve v${latest.version}? The text is locked and the final narration is recorded from it.`)) {
     return;
   }
 
@@ -3526,7 +3677,7 @@ async function scriptDecision(decision) {
   }
 
   const title = currentScript.title, scriptId = currentScriptId, versionNo = latest.version;
-  showToast(decision === 'approved' ? `v${versionNo} approved — Ravi notified` : 'Sent back for changes — Ravi notified', 'success');
+  showToast(decision === 'approved' ? `v${versionNo} approved — the team has been notified` : 'Sent back for changes — the writer has been notified', 'success');
   invokeEdge(NOTIFY_FUNCTION, {
     body: { type: decision === 'approved' ? 'script_approved' : 'script_changes', scriptId, scriptTitle: title, versionNo },
   }).catch(err => console.warn('[notify script decision]', err));
@@ -3554,7 +3705,7 @@ async function loadScriptFeedback() {
 
   const isAdmin = currentProfile?.role === 'admin';
   const items = await Promise.all(data.map(async (fb) => {
-    const name = fb.profiles?.full_name || 'Staff';
+    const name = fb.profiles ? profileName(fb.profiles) : 'Team';
     const when = new Date(fb.created_at).toLocaleString();
     const canDelete = fb.user_id === currentUser?.id;
 
@@ -3584,9 +3735,10 @@ async function loadScriptFeedback() {
   list.innerHTML = items.join('');
 }
 
-// Whisper via the existing transcribe function; result is stored on the row so
-// Ravi reads Joe's notes as text without pressing anything.
+// Whisper via the existing transcribe function (admin-only on the server, so
+// Joe's own upload triggers it). Stored on the row so the writer reads text.
 async function transcribeScriptFeedback(fbId, audioPath) {
+  if (currentProfile?.role !== 'admin') return;
   const box = document.getElementById(`sc-transcript-${fbId}`);
   if (box) box.textContent = 'Transcribing…';
   try {
@@ -3613,7 +3765,7 @@ async function deleteScriptFeedback(id) {
 }
 
 async function submitScriptComment() {
-  if (!isStaffUser() || !currentScriptId) return;
+  if (!canCommentScript(currentScript) || !currentScriptId) return;
   if (scRecorder && scRecorder.state === 'recording') { showToast('Stop the recording before sending', 'error'); return; }
 
   const body = document.getElementById('sc-comment-text')?.value.trim() || '';
@@ -3722,9 +3874,8 @@ function resetScriptComposer() {
   clearScriptComposerAudio();
 }
 
-// ── Realtime: keep the Scripts count + page fresh when the other person acts ──
+// ── Realtime: keep the Scripts count + page fresh when someone else acts ──
 function subscribeToScriptChanges() {
-  if (!isStaffUser()) return;
   sb.channel('script-changes')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'scripts' }, async () => {
       await loadScripts();
