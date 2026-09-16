@@ -64,6 +64,10 @@ let currentFilter = 'all';
 let currentSubcatFilter = 'all';
 let currentStatus = null;
 let currentSearch = '';
+// Which page owns #main-content. loadVideos() finishes after the user may
+// already have navigated away, and renderVideos() would then overwrite
+// whatever they opened — so every writer of #main-content claims it here.
+let currentPage = 'library';
 let editingVideoId = null;
 let pendingWasabiFile = null;
 let pendingThumbnail = null;
@@ -258,6 +262,7 @@ function updateCounts() {
 // FILTERING & RENDERING
 // ══════════════════════════════════════════════════════
 function filterCategory(slug, el) {
+  currentPage = 'library';
   currentFilter = slug;
   
   // Auto-select first subcategory if not 'all'
@@ -287,6 +292,7 @@ function filterSubcat(slug) {
 }
 
 function filterStatus(status, el) {
+  currentPage = 'library';
   currentStatus = status;
   currentFilter = 'all';
   currentSubcatFilter = 'all';
@@ -299,6 +305,8 @@ function filterStatus(status, el) {
 // from the sidebar with the matching status key.
 
 function handleSearch(val) {
+  // Searching from another page brings you back to the library.
+  currentPage = 'library';
   currentSearch = val.toLowerCase();
   renderVideos();
 }
@@ -332,6 +340,7 @@ function getFilteredVideos() {
 }
 
 function renderVideos() {
+  if (currentPage !== 'library') return;
   const videos = getFilteredVideos();
   const isAdmin = currentProfile?.role === 'admin';
   const main = document.getElementById('main-content');
@@ -2555,6 +2564,7 @@ function _fmtDuration(secs) {
 }
 
 async function showRecordingsPage(sidebarEl) {
+  currentPage = 'recordings';
   // Update sidebar active state
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
@@ -2994,6 +3004,7 @@ function renderModalScriptLink(videoId) {
 
 // ── Projects page (a project = one video: script, then video) ─
 async function showScriptsPage(sidebarEl) {
+  currentPage = 'projects';
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
