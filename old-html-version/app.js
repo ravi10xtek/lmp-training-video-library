@@ -208,20 +208,23 @@ async function loadSubcats(catId) {
 }
 
 async function loadVideos() {
-  const isAdmin = currentProfile?.role === 'admin';
-  let query = sb.from('videos').select(`
+  const { data, error } = await sb.from('videos').select(`
     *,
     categories(name, slug, color),
     subcategories(name, slug)
   `).order('sort_order').order('title');
 
-  const { data, error } = await query;
+  // A failed load and an genuinely empty library look identical once the rows
+  // are dropped, so keep the error and let renderVideos() say which it was.
+  videosLoadError = error ? (error.message || 'Could not load videos') : null;
+  if (error) console.error('[videos] load failed:', error);
   allVideos = data || [];
 
-  // Update counts
   updateCounts();
   renderVideos();
 }
+
+let videosLoadError = null;
 
 // In-pipeline statuses — hidden from the main browse, shown only in their folders
 const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
@@ -244,6 +247,11 @@ function updateCounts() {
   setCount('count-to-review', allVideos.filter(v => v.status === 'to_review').length);
   setCount('count-to-edit',   allVideos.filter(v => v.status === 'to_edit').length);
   setCount('count-completed', allVideos.filter(v => v.status === 'completed').length);
+
+  // STATUS section — these count what clicking them actually shows, so an
+  // admin with 152 unfilled slots doesn't see an app that reads as empty.
+  setCount('count-published', total);
+  setCount('count-empty', allVideos.filter(v => v.status === 'empty' || v.status === 'raw').length);
 }
 
 // ══════════════════════════════════════════════════════
@@ -269,7 +277,7 @@ function filterCategory(slug, el) {
   
   currentStatus = null;
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
+  el?.classList.add('active');
   renderVideos();
 }
 
@@ -283,7 +291,7 @@ function filterStatus(status, el) {
   currentFilter = 'all';
   currentSubcatFilter = 'all';
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
+  el?.classList.add('active');
   renderVideos();
 }
 
@@ -377,10 +385,7 @@ function renderVideos() {
   }
 
   if (videos.length === 0) {
-    html += `<div class="empty-state">
-      <h3>No videos found</h3>
-      <p>${currentSearch ? 'Try a different search term' : 'No videos in this category yet'}</p>
-    </div>`;
+    html += emptyStateHtml(isAdmin);
   } else {
     html += `<div class="video-grid">`;
     videos.forEach(v => { html += renderVideoCard(v, isAdmin); });
@@ -388,6 +393,52 @@ function renderVideos() {
   }
 
   main.innerHTML = html;
+}
+
+// "No videos found" was shown for a failed load, an unfilled library and a
+// bad search alike. Each of those needs a different next step.
+function emptyStateHtml(isAdmin) {
+  if (videosLoadError) {
+    return `<div class="empty-state">
+      <h3>Couldn't load the library</h3>
+      <p>${escapeHtml(videosLoadError)}</p>
+      <p style="margin-top:10px"><button class="btn btn-ghost btn-sm" style="width:auto" onclick="loadVideos()">Try again</button></p>
+    </div>`;
+  }
+  if (currentSearch) {
+    return `<div class="empty-state">
+      <h3>Nothing matches "${escapeHtml(currentSearch)}"</h3>
+      <p>Try fewer words, or search by category name.</p>
+    </div>`;
+  }
+  if (currentStatus === 'empty') {
+    return `<div class="empty-state">
+      <h3>No unfilled slots</h3>
+      <p>Every slot has a video. Nice.</p>
+    </div>`;
+  }
+  if (isWorkflowStatus(currentStatus)) {
+    const where = { to_review: 'waiting for review', to_edit: 'waiting to be edited', completed: 'finished and waiting to publish' }[currentStatus];
+    return `<div class="empty-state">
+      <h3>Nothing here</h3>
+      <p>No videos are ${where} right now.</p>
+    </div>`;
+  }
+  // The common case on a fresh install: slots exist, none are published yet.
+  const unfilled = allVideos.filter(v => v.status === 'empty' || v.status === 'raw').length;
+  if (isAdmin && unfilled) {
+    return `<div class="empty-state">
+      <h3>Nothing published yet</h3>
+      <p>${unfilled} slot${unfilled !== 1 ? 's are' : ' is'} waiting to be filled. Start a project to script one, or open a slot to upload a video.</p>
+      <p style="margin-top:10px">
+        <button class="btn btn-ghost btn-sm" style="width:auto" onclick="filterStatus('empty', document.getElementById('sidebar-empty-item'))">See empty slots</button>
+      </p>
+    </div>`;
+  }
+  return `<div class="empty-state">
+    <h3>No videos yet</h3>
+    <p>${isAdmin ? 'Add a video slot to get started.' : 'Nothing has been published here yet — check back soon.'}</p>
+  </div>`;
 }
 
 function renderVideoCard(v, isAdmin) {

@@ -147,10 +147,12 @@
         <div class="sidebar-item all" onclick="filterStatus('published', this)">
           <div class="sidebar-dot" style="background:var(--teal)"></div>
           Published
+          <span class="sidebar-count" id="count-published">0</span>
         </div>
-        <div class="sidebar-item all" onclick="filterStatus('empty', this)">
+        <div class="sidebar-item all" id="sidebar-empty-item" onclick="filterStatus('empty', this)">
           <div class="sidebar-dot" style="background:var(--muted)"></div>
           Empty slots
+          <span class="sidebar-count" id="count-empty">0</span>
         </div>
       </div>
 
