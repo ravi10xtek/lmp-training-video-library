@@ -26,8 +26,8 @@ create policy "delete_own_storage" on storage.objects
     auth.uid()::text = (storage.foldername(name))[1]
   );
 
--- Signup trigger runs under supabase_auth_admin, whose search_path lacks
--- public, so unqualified "profiles" fails ("Database error creating new user").
+-- Now fixed at source in database/supabase_schema.sql. Kept here so projects
+-- created before that fix can be repaired without re-running the schema.
 alter function public.handle_new_user() set search_path = public;
 
 notify pgrst, 'reload schema';
