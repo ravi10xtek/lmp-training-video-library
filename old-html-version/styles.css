@@ -24,6 +24,11 @@
   --font-head: 'Work Sans', sans-serif;
   --font-body: 'Work Sans', sans-serif;
 
+  /* Text that sits ON the bright teal gradient. White on #00f2fe is 1.4:1 —
+     unreadable. This deep navy-teal is ~14:1 against it and still on-brand. */
+  --ink:      #03202b;
+  --focus:    #ffd166;
+
   --radius:   12px;
   --radius-lg: 20px;
   --shadow:   0 8px 32px rgba(0, 0, 0, 0.4);
@@ -2437,3 +2442,172 @@ img, video, canvas, svg { max-width: 100%; }
 .sc-team-name  { font-size: 14px; color: var(--white); font-weight: 500; }
 .sc-team-select { padding: 8px 32px 8px 12px; font-size: 13px; }
 @media (max-width: 560px) { .sc-team { grid-template-columns: 1fr; } }
+
+/* ══════════════════════════════════════
+   BUTTON CONTRAST REVAMP
+
+   The brand gradient (#4facfe → #00f2fe) is very light. White text on it
+   measures 1.4:1 at the teal end and 2.6:1 at the blue end, against a WCAG
+   AA minimum of 4.5:1 — the primary call to action was the least readable
+   thing on the page. Every surface painted with that gradient now carries
+   dark ink instead, and the quieter buttons were given enough edge to read
+   as controls. Overrides live here, at the end, so the change is one block.
+══════════════════════════════════════ */
+
+/* ── Primary: dark ink on the gradient (~14:1) ── */
+.btn-primary,
+.filter-tab.active {
+  color: var(--ink);
+  /* Slightly deeper stops so the fill doesn't glare on a dark page. */
+  background: linear-gradient(135deg, #58b0f5 0%, #12dcf0 100%);
+  text-shadow: none;
+}
+.btn-primary svg,
+.filter-tab.active svg { stroke: var(--ink); }
+
+.btn-primary:hover,
+.filter-tab.active:hover {
+  background: linear-gradient(135deg, #6ec0ff 0%, #35e8fb 100%);
+  color: var(--ink);
+}
+
+/* Disabled was opacity alone, which dimmed low-contrast text further.
+   Drop the gradient entirely and use a flat, still-legible grey. */
+.btn-primary:disabled,
+.btn-primary:disabled:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.08);
+  color: #7f8fa6;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  transform: none;
+}
+
+/* ── Secondary: enough edge and fill to read as a button ── */
+.btn-ghost {
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: var(--white);
+}
+.btn-ghost:hover {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.45);
+}
+.btn-ghost:disabled {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.10);
+  color: #6f7f96;
+  cursor: not-allowed;
+}
+
+/* ── Destructive: #ff9a9e on a red tint was 3.9:1 ── */
+.btn-danger {
+  background: rgba(220, 60, 60, 0.20);
+  border: 1px solid rgba(255, 138, 142, 0.45);
+  color: #ffb3b6;
+}
+.btn-danger:hover {
+  background: rgba(220, 60, 60, 0.34);
+  border-color: rgba(255, 138, 142, 0.7);
+}
+
+/* ── Inactive filter pills sat at 4.3:1 ── */
+.filter-tab {
+  color: #a7b6cc;
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.filter-tab:hover { color: var(--white); }
+
+/* ── Same gradient, same problem: the logo marks and the play button ── */
+.login-logo-mark,
+.topbar-logo-mark {
+  background: linear-gradient(135deg, #58b0f5 0%, #12dcf0 100%);
+  color: var(--ink);
+}
+.play-btn-circle {
+  background: linear-gradient(135deg, #58b0f5 0%, #12dcf0 100%);
+}
+.play-btn-circle svg { fill: var(--ink); }
+
+/* ── Workflow buttons: the tinted fills were fine, the disabled state
+      was not — 0.45 opacity put them at roughly 2:1. ── */
+.btn-submit-review:disabled,
+.btn-mark-done:disabled,
+.btn-publish:disabled,
+.btn-more-changes:disabled,
+.btn-reviewer:disabled {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #7f8fa6;
+  box-shadow: none;
+}
+
+/* ── Keyboard focus: there was none anywhere, so tabbing through the app
+      was invisible. Amber reads against both the dark page and the teal
+      gradient, which a teal ring would not. ── */
+.btn:focus-visible,
+.filter-tab:focus-visible,
+.capture-btn:focus-visible,
+.capture-tab:focus-visible,
+.sidebar-item:focus-visible,
+.sidebar-signout-btn:focus-visible,
+.btn-submit-review:focus-visible,
+.btn-mark-done:focus-visible,
+.btn-publish:focus-visible,
+.btn-more-changes:focus-visible,
+.btn-reviewer:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* Sidebar rows are divs with onclick, so they are not keyboard-reachable at
+   all — the focus rule above only pays off once they get tabindex/role in
+   index.html. Sizing them as the touch targets they look like is free. */
+.sidebar-item { min-height: 40px; }
+
+/* ── Respect a reduced-motion preference: the primary button lifts, the
+      play circle scales, and the workflow buttons animate in. ── */
+@media (prefers-reduced-motion: reduce) {
+  .btn, .btn-primary, .filter-tab, .play-btn-circle, .video-card,
+  .btn-submit-review, .btn-mark-done, .btn-publish,
+  .btn-more-changes, .btn-reviewer {
+    transition: none !important;
+    animation: none !important;
+  }
+  .btn-primary:hover { transform: none; }
+  .video-card:hover .play-btn-circle { transform: scale(1); }
+}
+
+/* A sidebar count that has something waiting for you. Replaces an inline
+   style so the colour lives with the rest of the palette. */
+.sidebar-count.needs-you {
+  background: rgba(245, 165, 36, 0.22);
+  color: #ffc766;
+  border: 1px solid rgba(245, 165, 36, 0.45);
+}
+
+/* ── Manage videos page ─────────────────────────────── */
+.manage-form-panel { margin-bottom: 24px; padding: 8px; border: var(--glass-border); border-radius: 12px; }
+.manage-form-panel .modal-info { padding: 16px; }
+.manage-table-wrap { overflow-x: auto; }
+.manage-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.manage-table th { text-align: left; color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding: 8px 10px; border-bottom: var(--glass-border); }
+.manage-table td { padding: 10px; border-bottom: var(--glass-border); vertical-align: middle; }
+.manage-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.manage-chip { background: transparent; color: var(--muted); border: var(--glass-border); border-radius: 999px; padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.manage-chip:hover { color: var(--white); }
+.manage-chip.active { color: var(--teal); border-color: var(--teal); }
+.manage-chip-count { opacity: .7; margin-left: 4px; }
+
+/* Dismiss (✕) on read notifications */
+.notif-item { position: relative; }
+.notif-item.read { padding-right: 36px; }
+.notif-dismiss { position: absolute; top: 10px; right: 10px; background: none; border: none; color: var(--muted); font-size: 12px; cursor: pointer; padding: 4px 6px; border-radius: 6px; }
+.notif-dismiss:hover { color: var(--white); background: rgba(255, 255, 255, 0.08); }

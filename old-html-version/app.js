@@ -82,6 +82,7 @@ let composerAudioBlob = null;
 let composerAudioDuration = 0;
 let composerImageFile = null;
 let allNotifications = [];
+let notifPollTimer = null;
 let notifPanelOpen = false;
 let notifSubscription = null;
 const NOTIFY_FUNCTION = 'notify-review';
@@ -159,6 +160,7 @@ async function initApp(user) {
     badge.textContent = 'Admin';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
+    document.getElementById('sidebar-manage-item').classList.remove('hidden');
   }
   if (profile?.is_reviewer) {
     badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
@@ -252,10 +254,6 @@ function updateCounts() {
   setCount('count-to-edit',   allVideos.filter(v => v.status === 'to_edit').length);
   setCount('count-completed', allVideos.filter(v => v.status === 'completed').length);
 
-  // STATUS section — these count what clicking them actually shows, so an
-  // admin with 152 unfilled slots doesn't see an app that reads as empty.
-  setCount('count-published', total);
-  setCount('count-empty', allVideos.filter(v => v.status === 'empty' || v.status === 'raw').length);
 }
 
 // ══════════════════════════════════════════════════════
@@ -341,6 +339,7 @@ function getFilteredVideos() {
 
 function renderVideos() {
   if (currentPage !== 'library') return;
+  parkVideoForm();
   const videos = getFilteredVideos();
   const isAdmin = currentProfile?.role === 'admin';
   const main = document.getElementById('main-content');
@@ -445,7 +444,7 @@ function emptyStateHtml(isAdmin) {
       <h3>Nothing published yet</h3>
       <p>${unfilled} slot${unfilled !== 1 ? 's are' : ' is'} waiting to be filled. Start a project to script one, or open a slot to upload a video.</p>
       <p style="margin-top:10px">
-        <button class="btn btn-ghost btn-sm" style="width:auto" onclick="filterStatus('empty', document.getElementById('sidebar-empty-item'))">See empty slots</button>
+        <button class="btn btn-ghost btn-sm" style="width:auto" onclick="showManageVideosPage(null, 'empty')">See empty slots</button>
       </p>
     </div>`;
   }
@@ -1176,8 +1175,91 @@ function closeModal(e) {
 // ══════════════════════════════════════════════════════
 // ADMIN — ADD / EDIT VIDEO
 // ══════════════════════════════════════════════════════
+// Manage videos is a page, not a modal. The add/edit form markup still lives in
+// #admin-modal (never opened now); it is moved into the page while in use and
+// parked back before any page rewrites #main-content, so its inputs survive.
+const VIDEO_STATUS_LABELS = {
+  empty: 'Empty slot', raw: 'Raw', to_review: 'To Review', to_edit: 'To Edit',
+  completed: 'Completed', published: 'Published',
+};
+
+function parkVideoForm() {
+  const form = document.getElementById('video-form');
+  const home = document.querySelector('#admin-modal .modal');
+  if (form && home && form.parentElement !== home) home.appendChild(form);
+}
+
 function showAdmin() {
-  openAddVideo();
+  showManageVideosPage(document.getElementById('sidebar-manage-item'));
+}
+
+// Status filter on the Manage videos page (moved here from the sidebar — admin only)
+let manageStatusFilter = 'all';
+const MANAGE_STATUS_FILTERS = [
+  { key: 'all',       label: 'All',         match: () => true },
+  { key: 'published', label: 'Published',   match: v => v.status === 'published' },
+  { key: 'empty',     label: 'Empty slots', match: v => v.status === 'empty' || v.status === 'raw' },
+  { key: 'to_review', label: 'To Review',   match: v => v.status === 'to_review' },
+  { key: 'to_edit',   label: 'To Edit',     match: v => v.status === 'to_edit' },
+  { key: 'completed', label: 'Completed',   match: v => v.status === 'completed' },
+];
+
+function showManageVideosPage(sidebarEl, statusFilter) {
+  if (currentProfile?.role !== 'admin') return;
+  if (statusFilter) manageStatusFilter = statusFilter;
+  currentPage = 'manage';
+  parkVideoForm();
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('sidebar-manage-item'))?.classList.add('active');
+
+  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  const shown = allVideos.filter(activeFilter.match);
+  const chips = MANAGE_STATUS_FILTERS.map(f => `
+    <button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''}" onclick="showManageVideosPage(null, '${f.key}')">
+      ${f.label} <span class="manage-chip-count">${allVideos.filter(f.match).length}</span>
+    </button>`).join('');
+
+  const rows = shown.map(v => `
+    <tr>
+      <td>${escapeHtml(v.title || 'Untitled')}</td>
+      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
+      <td>${escapeHtml(v.video_type || '—')}</td>
+      <td><span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || escapeHtml(v.status || '')}</span></td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0;padding:4px 12px;font-size:12px" onclick="openEditVideo('${v.id}')">Edit</button></td>
+    </tr>`).join('');
+
+  document.getElementById('main-content').innerHTML = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <div class="page-title">Manage videos</div>
+        <div class="page-sub">${shown.length} video${shown.length !== 1 ? 's' : ''}${activeFilter.key !== 'all' ? ` · ${activeFilter.label}` : ''}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openAddVideo()">+ Add video slot</button>
+    </div>
+    <div class="manage-chips">${chips}</div>
+    <div id="manage-form-slot" class="manage-form-panel hidden"></div>
+    <div class="manage-table-wrap">
+      <table class="manage-table">
+        <thead><tr><th>Title</th><th>Category</th><th>Type</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted)">No videos with this status.</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+function mountVideoForm() {
+  if (currentPage !== 'manage' || !document.getElementById('manage-form-slot')) showManageVideosPage();
+  const slot = document.getElementById('manage-form-slot');
+  const form = document.getElementById('video-form');
+  if (!slot || !form) return;
+  slot.appendChild(form);
+  slot.classList.remove('hidden');
+  document.getElementById('v-status-group').classList.toggle('hidden', currentProfile?.role !== 'admin');
+  slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeVideoForm() {
+  parkVideoForm();
+  document.getElementById('manage-form-slot')?.classList.add('hidden');
 }
 
 function openAddVideo() {
@@ -1196,7 +1278,7 @@ function openAddVideo() {
   document.getElementById('v-desc').value = '';
   document.getElementById('delete-video-btn').classList.add('hidden');
   hideUploadProgress();
-  document.getElementById('admin-modal').classList.add('open');
+  mountVideoForm();
 }
 
 function openEditVideo(id) {
@@ -1220,7 +1302,7 @@ function openEditVideo(id) {
   document.getElementById('v-desc').value = v.description || '';
   document.getElementById('delete-video-btn').classList.remove('hidden');
   hideUploadProgress();
-  document.getElementById('admin-modal').classList.add('open');
+  mountVideoForm();
 }
 
 function handleWasabiFileSelected(files) {
@@ -1564,8 +1646,9 @@ async function saveVideo() {
     } else {
       showToast('Video updated', 'success');
     }
-    document.getElementById('admin-modal').classList.remove('open');
+    closeVideoForm();
     await loadVideos();
+    if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
@@ -1586,8 +1669,9 @@ async function deleteVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast('Video deleted', 'success');
-    document.getElementById('admin-modal').classList.remove('open');
+    closeVideoForm();
     await loadVideos();
+    if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
@@ -1620,11 +1704,12 @@ function showToast(msg, type = 'success') {
 // NOTIFICATIONS
 // ══════════════════════════════════════════════════════
 async function loadNotifications() {
-  const { data } = await sb.from('notifications')
+  const { data, error } = await sb.from('notifications')
     .select('*, videos(title)')
     .eq('user_id', currentUser.id)
     .order('created_at', { ascending: false })
     .limit(30);
+  if (error) return; // keep what we have rather than blanking the bell
   allNotifications = data || [];
   renderNotificationBell();
 }
@@ -1638,11 +1723,27 @@ function subscribeToNotifications() {
       table: 'notifications',
       filter: `user_id=eq.${currentUser.id}`,
     }, payload => {
+      if (allNotifications.some(n => n.id === payload.new.id)) return;
       allNotifications.unshift(payload.new);
       renderNotificationBell();
       showToast(payload.new.title, 'success');
     })
-    .subscribe();
+    .subscribe(status => {
+      // Catch anything that arrived while the socket was (re)connecting
+      if (status === 'SUBSCRIBED') loadNotifications();
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') console.warn('[notifications] realtime', status);
+    });
+
+  // Fallback so the bell stays current even if realtime isn't delivering:
+  // refetch when the tab comes back into view, and poll lightly while visible.
+  if (!notifPollTimer) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && currentUser) loadNotifications();
+    });
+    notifPollTimer = setInterval(() => {
+      if (currentUser && document.visibilityState === 'visible') loadNotifications();
+    }, 30000);
+  }
 
   // ── Video status changes (real-time modal refresh) ──────────────────
   // Fires whenever any video row is updated in the DB — covers status
@@ -1732,8 +1833,23 @@ function renderNotifPanel() {
       <div class="notif-title">${n.title}</div>
       ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
+      ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
     </div>
   `).join('');
+}
+
+async function dismissNotification(id) {
+  const prev = allNotifications;
+  allNotifications = allNotifications.filter(n => n.id !== id);
+  renderNotifPanel();
+  renderNotificationBell();
+  const { error } = await sb.from('notifications').delete().eq('id', id);
+  if (error) {
+    allNotifications = prev;
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not dismiss: ' + error.message, 'error');
+  }
 }
 
 async function markAllNotifsRead() {
@@ -2569,6 +2685,7 @@ async function showRecordingsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
+  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading recordings…</div>';
 
@@ -2971,9 +3088,16 @@ function scriptNeedsMe(s) {
 function updateScriptsCount() {
   const el = document.getElementById('count-scripts');
   if (!el) return;
-  const n = allScripts.filter(scriptNeedsMe).length;
-  el.textContent = n;
-  el.style.background = n > 0 ? 'rgba(245,165,36,0.25)' : '';
+  // Every other sidebar badge counts the things behind it, so this one does
+  // too — it used to show only the "waiting on you" subset, which read as 0
+  // whenever projects existed but none were yours to act on. The waiting
+  // count survives as the amber highlight and the title.
+  const waiting = allScripts.filter(scriptNeedsMe).length;
+  el.textContent = allScripts.length;
+  el.classList.toggle('needs-you', waiting > 0);
+  el.title = waiting
+    ? `${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}, ${waiting} waiting on you`
+    : `${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}`;
 }
 
 function scriptForVideo(videoId) {
@@ -3008,6 +3132,7 @@ async function showScriptsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
+  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
@@ -3159,7 +3284,7 @@ async function createScript() {
       writer_id: writerId, editor_id: editorId, created_by: currentUser.id, status: 'draft',
     })
     .select('id').single();
-  btn.disabled = false; btn.textContent = 'Create script';
+  btn.disabled = false; btn.textContent = 'Create project';
   if (error) { showToast('Could not create: ' + error.message, 'error'); return; }
 
   closeScriptNewModal();

@@ -140,21 +140,6 @@
         </div>
       </div>
 
-      <div class="sidebar-divider"></div>
-
-      <div class="sidebar-section">
-        <div class="sidebar-section-label">Status</div>
-        <div class="sidebar-item all" onclick="filterStatus('published', this)">
-          <div class="sidebar-dot" style="background:var(--teal)"></div>
-          Published
-          <span class="sidebar-count" id="count-published">0</span>
-        </div>
-        <div class="sidebar-item all" id="sidebar-empty-item" onclick="filterStatus('empty', this)">
-          <div class="sidebar-dot" style="background:var(--muted)"></div>
-          Empty slots
-          <span class="sidebar-count" id="count-empty">0</span>
-        </div>
-      </div>
 
       <!-- Sign out (mobile only) -->
       <div class="sidebar-signout-wrap">
@@ -171,7 +156,7 @@
           <div class="sidebar-section-label">Projects</div>
           <div class="sidebar-item all" id="sidebar-scripts-item" onclick="showScriptsPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-            All projects
+            Video projects
             <span class="sidebar-count" id="count-scripts">—</span>
           </div>
         </div>
@@ -199,7 +184,7 @@
             Completed Videos
             <span class="sidebar-count" id="count-completed">0</span>
           </div>
-          <div class="sidebar-item all" onclick="showAdmin()">
+          <div class="sidebar-item all hidden" id="sidebar-manage-item" onclick="showManageVideosPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
             Manage videos
           </div>
@@ -338,7 +323,7 @@
 <div class="modal-overlay" id="admin-modal" onclick="closeAdminModal(event)">
   <div class="modal" style="max-width:600px">
     <button class="modal-close" onclick="document.getElementById('admin-modal').classList.remove('open')">✕</button>
-    <div class="modal-info">
+    <div class="modal-info" id="video-form">
       <h3 style="font-family:var(--font-head);font-size:18px;margin-bottom:20px;color:var(--white)" id="admin-modal-title">Add video</h3>
 
       <div class="form-group">
@@ -375,7 +360,7 @@
             <option value="DEEP-DIVE">DEEP-DIVE</option>
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="v-status-group">
           <label class="form-label">Status</label>
           <select class="form-select" id="v-status">
             <option value="empty">Empty slot</option>
@@ -421,7 +406,7 @@
 
       <div class="admin-btn-row" style="display:flex; gap:12px; margin-top:24px; padding-top:24px; border-top:var(--glass-border)">
         <button class="btn btn-danger hidden" id="delete-video-btn" onclick="deleteVideo()" style="margin-right:auto">Delete Video</button>
-        <button class="btn btn-ghost" onclick="document.getElementById('admin-modal').classList.remove('open')">Cancel</button>
+        <button class="btn btn-ghost" onclick="closeVideoForm()">Cancel</button>
         <button class="btn btn-primary" id="save-video-btn" onclick="saveVideo()" style="margin-top:0; width:auto">Save video</button>
       </div>
     </div>
@@ -633,7 +618,7 @@
 
       <div style="display:flex;gap:12px;margin-top:24px">
         <button class="btn btn-ghost" onclick="closeScriptNewModal()" style="flex:1">Cancel</button>
-        <button class="btn btn-primary" id="sc-new-create-btn" onclick="createScript()" style="flex:2;margin-top:0">Create script</button>
+        <button class="btn btn-primary" id="sc-new-create-btn" onclick="createScript()" style="flex:2;margin-top:0">Create project</button>
       </div>
     </div>
   </div>
