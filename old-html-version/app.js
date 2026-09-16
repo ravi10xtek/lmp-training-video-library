@@ -2806,6 +2806,41 @@ const SCRIPT_STATUS_META = {
   approved: { color: 'var(--teal)',  label: 'Approved' },
 };
 
+// A project = making one video. Stage 1 is the script, stage 2 is the video.
+// The script row carries the project; `videos.status` drives stage 2.
+const PROJECT_VIDEO_META = {
+  empty:     { key: 'empty',     label: 'Not started' },
+  raw:       { key: 'raw',       label: 'Raw footage' },
+  to_review: { key: 'to_review', label: 'To review' },
+  to_edit:   { key: 'to_edit',   label: 'To edit' },
+  completed: { key: 'completed', label: 'Completed' },
+  published: { key: 'published', label: 'Published' },
+};
+
+// → { n, of, name, detail, done } — `n` is the stage the project is sitting in.
+function projectStage(s) {
+  if (!s || s.status !== 'approved') {
+    return {
+      n: 1, of: 2, name: 'Script', done: false,
+      detail: SCRIPT_STATUS_META[s?.status]?.label || 'Draft',
+    };
+  }
+  const vs = s.videos?.status || 'empty';
+  const meta = PROJECT_VIDEO_META[vs] || PROJECT_VIDEO_META.empty;
+  return { n: 2, of: 2, name: 'Video', done: vs === 'published', detail: meta.label, vkey: meta.key };
+}
+
+function projectStageHtml(s) {
+  const st = projectStage(s);
+  return `
+    <div class="proj-stage" title="Stage ${st.n} of ${st.of}: ${st.name} — ${st.detail}">
+      <span class="proj-step ${st.n >= 1 ? 'on' : ''} ${st.n > 1 ? 'past' : ''}">Script</span>
+      <span class="proj-arrow">›</span>
+      <span class="proj-step ${st.n >= 2 ? 'on' : ''} ${st.done ? 'past' : ''}">Video</span>
+      <span class="proj-stage-detail">${escapeHtml(st.detail)}</span>
+    </div>`;
+}
+
 let allScripts = [];
 let allProfiles = [];
 let currentScriptId = null;
@@ -2901,13 +2936,13 @@ function renderModalScriptLink(videoId) {
   box.classList.remove('hidden');
 }
 
-// ── Scripts page ─────────────────────────────────────────────
+// ── Projects page (a project = one video: script, then video) ─
 async function showScriptsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
   const main = document.getElementById('main-content');
-  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading scripts…</div>';
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
 
   const mine   = allScripts.filter(scriptNeedsMe);
@@ -2916,20 +2951,20 @@ async function showScriptsPage(sidebarEl) {
   let html = `
     <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
       <div>
-        <div class="page-title">Scripts</div>
+        <div class="page-title">Projects</div>
         <div class="page-sub">${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
       </div>
       ${canManageScripts() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New script
+        New project
       </button>` : ''}
     </div>`;
 
   if (!allScripts.length) {
     html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
       <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-      <div style="font-size:15px">No scripts yet.</div>
-      <div style="font-size:13px;margin-top:6px">${canManageScripts() ? 'Click <strong>New script</strong> to start the first project.' : 'Nothing has been assigned to you yet.'}</div>
+      <div style="font-size:15px">No projects yet.</div>
+      <div style="font-size:13px;margin-top:6px">${canManageScripts() ? 'Click <strong>New project</strong> to start the first one.' : 'Nothing has been assigned to you yet.'}</div>
     </div>`;
     main.innerHTML = html;
     return;
@@ -2942,10 +2977,11 @@ async function showScriptsPage(sidebarEl) {
     return `
       <div class="script-card ${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
         <div class="card-tags" style="margin-bottom:0">
-          <span class="card-tag sc-status-${s.status}">${meta.label}</span>
+          <span class="card-tag sc-status-${s.status}">Script: ${meta.label}</span>
           <span class="card-tag sc-version">${ver}</span>
         </div>
         <div class="script-card-title">${escapeHtml(s.title)}</div>
+        ${projectStageHtml(s)}
         <div class="script-card-meta">
           ${where ? `<span>${escapeHtml(where)}</span>` : ''}
           ${s.videos?.title ? `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No slot linked</span>'}
@@ -2966,7 +3002,7 @@ async function showScriptsPage(sidebarEl) {
   main.innerHTML = html;
 }
 
-// ── New script (project initiation) ──────────────────────────
+// ── New project (starts with its script) ─────────────────────
 function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
   let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
   allProfiles.forEach(p => {
