@@ -640,6 +640,10 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
+<script>
+  // Local dev only: load env.local.js (dev Supabase project) if present.
+  if (['localhost', '127.0.0.1'].includes(location.hostname)) document.write('<script src="env.local.js"><\/script>');
+</script>
 <script src="app.js?v=20260910c"></script>
 </body>
 </html>

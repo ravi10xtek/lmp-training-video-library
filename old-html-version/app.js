@@ -1,8 +1,10 @@
 // ══════════════════════════════════════════════════════
 // CONFIGURATION — Replace with your Supabase details
 // ══════════════════════════════════════════════════════
-const SUPABASE_URL = 'https://tdxwsgfjkpurtjmgwabr.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkeHdzZ2Zqa3B1cnRqbWd3YWJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNjE3NzAsImV4cCI6MjA5NDczNzc3MH0.9t1S-8kw6LCp7WDDTvs7Um0REVCvIoQt-d8xoF9ITbA';
+// A gitignored env.local.js (written by dev/setup-dev-db.ps1) can point a
+// local copy at a separate dev project via window.LMP_ENV.
+const SUPABASE_URL = window.LMP_ENV?.SUPABASE_URL || 'https://tdxwsgfjkpurtjmgwabr.supabase.co';
+const SUPABASE_ANON_KEY = window.LMP_ENV?.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkeHdzZ2Zqa3B1cnRqbWd3YWJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNjE3NzAsImV4cCI6MjA5NDczNzc3MH0.9t1S-8kw6LCp7WDDTvs7Um0REVCvIoQt-d8xoF9ITbA';
 
 // ══════════════════════════════════════════════════════
 // INIT
