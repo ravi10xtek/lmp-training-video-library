@@ -352,11 +352,16 @@ function renderVideos() {
   }
 
   // Page header
-  const catLabel = currentFilter === 'all' ? 'All Videos' :
-    allCategories.find(c => c.slug === currentFilter)?.name || 'Videos';
+  const STATUS_TITLES = {
+    empty: 'Empty slots', published: 'Published',
+    to_review: 'To Review', to_edit: 'To Edit', completed: 'Completed Videos',
+  };
+  const catLabel = STATUS_TITLES[currentStatus]
+    || (currentFilter === 'all' ? 'All Videos'
+        : allCategories.find(c => c.slug === currentFilter)?.name || 'Videos');
   html += `<div class="page-header">
     <div class="page-title">${catLabel}</div>
-    <div class="page-sub">${videos.length} video${videos.length !== 1 ? 's' : ''}${currentSearch ? ` matching "${currentSearch}"` : ''}</div>
+    <div class="page-sub">${videos.length} ${currentStatus === 'empty' ? `slot${videos.length !== 1 ? 's' : ''}` : `video${videos.length !== 1 ? 's' : ''}`}${currentSearch ? ` matching "${escapeHtml(currentSearch)}"` : ''}</div>
   </div>`;
 
   // Render Subcategory Tabs
@@ -2888,7 +2893,7 @@ function projectStageHtml(s) {
       <span class="proj-step ${st.n >= 1 ? 'on' : ''} ${st.n > 1 ? 'past' : ''}">Script</span>
       <span class="proj-arrow">›</span>
       <span class="proj-step ${st.n >= 2 ? 'on' : ''} ${st.done ? 'past' : ''}">Video</span>
-      <span class="proj-stage-detail">${escapeHtml(st.detail)}</span>
+      ${st.n === 2 ? `<span class="proj-stage-detail">${escapeHtml(st.detail)}</span>` : ''}
     </div>`;
 }
 
@@ -3035,7 +3040,10 @@ async function showScriptsPage(sidebarEl) {
         ${projectStageHtml(s)}
         <div class="script-card-meta">
           ${where ? `<span>${escapeHtml(where)}</span>` : ''}
-          ${s.videos?.title ? `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No slot linked</span>'}
+          ${!s.videos?.title
+              ? '<span style="color:#f5a524">No slot linked</span>'
+              : s.videos.title === s.title ? ''
+              : `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>`}
         </div>
         <div class="script-card-meta">
           <span>Writer: <strong>${s.writer ? escapeHtml(profileName(s.writer)) : '—'}</strong></span>
@@ -3047,9 +3055,11 @@ async function showScriptsPage(sidebarEl) {
 
   if (mine.length) {
     html += `<div class="script-section-label">Waiting on you</div><div class="script-grid" style="margin-bottom:28px">${mine.map(card).join('')}</div>`;
-    html += `<div class="script-section-label">Everything else</div>`;
+    // Only label the second group when there is one — an "Everything else"
+    // heading over empty space reads as a section that failed to load.
+    if (others.length) html += `<div class="script-section-label">Everything else</div>`;
   }
-  html += `<div class="script-grid">${others.map(card).join('')}</div>`;
+  if (others.length) html += `<div class="script-grid">${others.map(card).join('')}</div>`;
   main.innerHTML = html;
 }
 
