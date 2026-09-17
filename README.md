@@ -5,9 +5,10 @@ Built with plain HTML/JS + Supabase. No build step required.
 
 ---
 
-## Run locally (correct app)
+## Run locally
 
-The production app lives in `old-html-version` (not the Vite starter in `frontend`).
+The app lives in `old-html-version/`. There is no build step and no
+`package.json` — `npm install` will fail and is not needed.
 
 From the project root:
 
@@ -22,6 +23,12 @@ To use a different port:
 ```bash
 ./run-training-library.sh 8090
 ```
+
+By default this runs against **production**. To work against a throwaway
+Supabase project instead, see `dev/HANDOFF.md` and run `dev/setup-dev-db.ps1`:
+it provisions the schema, migrations and test accounts, then writes
+`old-html-version/env.local.js`, which the app loads on localhost only.
+Delete that file to go back to production.
 
 ---
 
@@ -88,7 +95,7 @@ After Wasabi playback is stable, run `database/youtube_cleanup.sql` to clear leg
 
 ## Stack
 
-- **Frontend** — `old-html-version/` (HTML + JS, no build step)
+- **Frontend** — `old-html-version/` (HTML + JS, no build step, served by Vercel)
 - **Database** — Supabase (Postgres + Auth + RLS)
 - **Video hosting** — Wasabi (S3-compatible private bucket)
 
@@ -121,16 +128,18 @@ Copy:
 - Project URL  → looks like https://abcdefgh.supabase.co
 - anon/public key → long string starting with eyJ...
 
-### 4. Add keys to index.html
+### 4. Add keys
 
-Open `index.html` and find these two lines near the top of the `<script>`:
+The production keys live at the top of `old-html-version/app.js`:
 
 ```js
-const SUPABASE_URL = 'YOUR_SUPABASE_URL';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+const SUPABASE_URL = window.LMP_ENV?.SUPABASE_URL || 'https://….supabase.co';
+const SUPABASE_ANON_KEY = window.LMP_ENV?.SUPABASE_ANON_KEY || 'eyJ…';
 ```
 
-Replace with your actual values.
+For local work, don't edit those — put the values in
+`old-html-version/env.local.js` as `window.LMP_ENV`, which is gitignored and
+loaded on localhost only.
 
 ### 5. Create your first admin user
 
@@ -152,16 +161,19 @@ Authentication → Users → Invite user for each team member.
 They receive an email to set their password. No further setup needed —
 they automatically get the 'worker' role.
 
-### 7. Host the file
+### 7. Deploy
 
-Drop `index.html` on any static host:
+The site is on **Vercel**, which serves `old-html-version/` as the web root
+(see `vercel.json`). Pushing to the repo deploys the frontend.
 
-- **Netlify** — drag and drop the file at app.netlify.com/drop
-- **Vercel** — `npx vercel` in this folder
-- **GitHub Pages** — push to a repo, enable Pages
-- **Cloudflare Pages** — connect repo or drag and drop
+Edge Functions are **not** deployed by a push — each one goes to each
+Supabase project separately:
 
-The file has no dependencies to install — it loads Supabase from CDN.
+```bash
+npx supabase functions deploy <name> --project-ref <project-ref> --use-api
+```
+
+There are no dependencies to install; Supabase loads from a CDN.
 
 ---
 

@@ -1,8 +1,10 @@
 // ══════════════════════════════════════════════════════
 // CONFIGURATION — Replace with your Supabase details
 // ══════════════════════════════════════════════════════
-const SUPABASE_URL = 'https://tdxwsgfjkpurtjmgwabr.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkeHdzZ2Zqa3B1cnRqbWd3YWJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNjE3NzAsImV4cCI6MjA5NDczNzc3MH0.9t1S-8kw6LCp7WDDTvs7Um0REVCvIoQt-d8xoF9ITbA';
+// A gitignored env.local.js (written by dev/setup-dev-db.ps1) can point a
+// local copy at a separate dev project via window.LMP_ENV.
+const SUPABASE_URL = window.LMP_ENV?.SUPABASE_URL || 'https://tdxwsgfjkpurtjmgwabr.supabase.co';
+const SUPABASE_ANON_KEY = window.LMP_ENV?.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRkeHdzZ2Zqa3B1cnRqbWd3YWJyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNjE3NzAsImV4cCI6MjA5NDczNzc3MH0.9t1S-8kw6LCp7WDDTvs7Um0REVCvIoQt-d8xoF9ITbA';
 
 // ══════════════════════════════════════════════════════
 // INIT
@@ -62,10 +64,15 @@ let currentFilter = 'all';
 let currentSubcatFilter = 'all';
 let currentStatus = null;
 let currentSearch = '';
+// Which page owns #main-content. loadVideos() finishes after the user may
+// already have navigated away, and renderVideos() would then overwrite
+// whatever they opened — so every writer of #main-content claims it here.
+let currentPage = 'library';
 let editingVideoId = null;
 let pendingWasabiFile = null;
 let pendingThumbnail = null;
 let currentVideoId = null;
+let vidChangesOpen = false;   // Joe clicked "Send back for edits": video feedback is showing
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStream = null;
@@ -76,6 +83,7 @@ let composerAudioBlob = null;
 let composerAudioDuration = 0;
 let composerImageFile = null;
 let allNotifications = [];
+let notifPollTimer = null;
 let notifPanelOpen = false;
 let notifSubscription = null;
 const NOTIFY_FUNCTION = 'notify-review';
@@ -153,6 +161,7 @@ async function initApp(user) {
     badge.textContent = 'Admin';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
+    if (!profile?.is_reviewer) document.getElementById('sidebar-manage-item').classList.remove('hidden');
   }
   if (profile?.is_reviewer) {
     badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
@@ -206,20 +215,24 @@ async function loadSubcats(catId) {
 }
 
 async function loadVideos() {
-  const isAdmin = currentProfile?.role === 'admin';
-  let query = sb.from('videos').select(`
+  const { data, error } = await sb.from('videos').select(`
     *,
     categories(name, slug, color),
     subcategories(name, slug)
   `).order('sort_order').order('title');
 
-  const { data, error } = await query;
+  // A failed load and an genuinely empty library look identical once the rows
+  // are dropped, so keep the error and let renderVideos() say which it was.
+  videosLoadError = error ? (error.message || 'Could not load videos') : null;
+  if (error) console.error('[videos] load failed:', error);
   allVideos = data || [];
 
-  // Update counts
   updateCounts();
+  if (currentPage === 'review') { showReviewPage(); return; }
   renderVideos();
 }
+
+let videosLoadError = null;
 
 // In-pipeline statuses — hidden from the main browse, shown only in their folders
 const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
@@ -239,15 +252,17 @@ function updateCounts() {
 
   // Role-specific workflow folders
   const setCount = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
-  setCount('count-to-review', allVideos.filter(v => v.status === 'to_review').length);
+  setCount('count-to-review', reviewQueueCount());
   setCount('count-to-edit',   allVideos.filter(v => v.status === 'to_edit').length);
   setCount('count-completed', allVideos.filter(v => v.status === 'completed').length);
+
 }
 
 // ══════════════════════════════════════════════════════
 // FILTERING & RENDERING
 // ══════════════════════════════════════════════════════
 function filterCategory(slug, el) {
+  currentPage = 'library';
   currentFilter = slug;
   
   // Auto-select first subcategory if not 'all'
@@ -267,7 +282,7 @@ function filterCategory(slug, el) {
   
   currentStatus = null;
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
+  el?.classList.add('active');
   renderVideos();
 }
 
@@ -276,12 +291,84 @@ function filterSubcat(slug) {
   renderVideos();
 }
 
+// ══════════════════════════════════════════════════════
+// TO REVIEW — the client's one page: scripts waiting for a decision and
+// videos waiting for review, as simple cards that work on a phone.
+// ══════════════════════════════════════════════════════
+const reviewQueueCount = () =>
+  allVideos.filter(v => v.status === 'to_review').length +
+  (isReviewerUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
+
+async function showReviewPage(sidebarEl) {
+  if (!isReviewerUser()) return;
+  currentPage = 'review';
+  currentStatus = null;
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('folder-to-review'))?.classList.add('active');
+  if (typeof closeSidebar === 'function') closeSidebar();
+
+  const main = document.getElementById('main-content');
+  if (!allScripts.length) { main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading…</div>'; await loadScripts(); }
+  if (currentPage !== 'review') return;
+
+  const byTime = (a, b) => new Date(a.updated_at || a.created_at) - new Date(b.updated_at || b.created_at);
+  const scripts = allScripts.filter(s => s.status === 'sent').sort(byTime);
+  const videos = allVideos.filter(v => v.status === 'to_review').sort(byTime);
+  const projectOf = (v) => allScripts.find(s => s.video_id === v.id);
+  const where = (x) => [x.categories?.name, x.subcategories?.name].filter(Boolean).join(' › ');
+
+  const scriptCard = (s) => `
+    <div class="rv-card" onclick="openScript('${s.id}')">
+      <div class="rv-card-ico">${PJ_STAGE_ICONS.script}</div>
+      <div class="rv-card-body">
+        <div class="rv-card-title">${escapeHtml(s.title)}</div>
+        <div class="rv-card-sub">${escapeHtml(where(s) || 'Script')} · v${s.current_version || 1} · sent ${timeAgo(s.updated_at || s.created_at)}</div>
+      </div>
+      <div class="rv-card-cta">Listen &amp; decide ›</div>
+    </div>`;
+  const videoCard = (v) => {
+    const p = projectOf(v);
+    const open = p ? `openScriptTab('${p.id}', 'video')` : `openVideo('${v.id}')`;
+    return `
+    <div class="rv-card" onclick="${open}">
+      <div class="rv-card-ico rv-thumb">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : PJ_STAGE_ICONS.video}</div>
+      <div class="rv-card-body">
+        <div class="rv-card-title">${escapeHtml(v.title)}</div>
+        <div class="rv-card-sub">${escapeHtml(where(v) || 'Video')}${(v.review_round || 1) > 1 ? ` · revision ${v.review_round}` : ''} · ${timeAgo(v.updated_at || v.created_at)}</div>
+      </div>
+      <div class="rv-card-cta">Watch &amp; decide ›</div>
+    </div>`;
+  };
+
+  const total = scripts.length + videos.length;
+  main.innerHTML = `
+    <div class="page-header">
+      <div class="page-title">To Review</div>
+      <div class="page-sub">${total ? `${total} item${total !== 1 ? 's' : ''} waiting for you` : 'Nothing waiting for you right now'}</div>
+    </div>
+    <div class="rv-section">
+      <div class="rv-section-head">${PJ_STAGE_ICONS.script} Scripts <span class="pj-muted">${scripts.length}</span></div>
+      ${scripts.length ? scripts.map(scriptCard).join('') : '<div class="rv-empty">No scripts waiting. You get a notification when a writer sends one.</div>'}
+    </div>
+    <div class="rv-section">
+      <div class="rv-section-head">${PJ_STAGE_ICONS.video} Videos <span class="pj-muted">${videos.length}</span></div>
+      ${videos.length ? videos.map(videoCard).join('') : '<div class="rv-empty">No videos waiting. Approved scripts come back here once the video is produced.</div>'}
+    </div>`;
+}
+
+// Open a project straight on a given tab (the review page opens videos on the Video tab)
+async function openScriptTab(id, tab) {
+  await openScript(id);
+  if (currentScriptId === id && tab === 'video') setScriptTab('video');
+}
+
 function filterStatus(status, el) {
+  currentPage = 'library';
   currentStatus = status;
   currentFilter = 'all';
   currentSubcatFilter = 'all';
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
-  el.classList.add('active');
+  el?.classList.add('active');
   renderVideos();
 }
 
@@ -289,6 +376,8 @@ function filterStatus(status, el) {
 // from the sidebar with the matching status key.
 
 function handleSearch(val) {
+  // Searching from another page brings you back to the library.
+  currentPage = 'library';
   currentSearch = val.toLowerCase();
   renderVideos();
 }
@@ -322,6 +411,8 @@ function getFilteredVideos() {
 }
 
 function renderVideos() {
+  if (currentPage !== 'library') return;
+  parkVideoForm();
   const videos = getFilteredVideos();
   const isAdmin = currentProfile?.role === 'admin';
   const main = document.getElementById('main-content');
@@ -342,11 +433,16 @@ function renderVideos() {
   }
 
   // Page header
-  const catLabel = currentFilter === 'all' ? 'All Videos' :
-    allCategories.find(c => c.slug === currentFilter)?.name || 'Videos';
+  const STATUS_TITLES = {
+    empty: 'Empty slots', published: 'Published',
+    to_review: 'To Review', to_edit: 'To Edit', completed: 'Completed Videos',
+  };
+  const catLabel = STATUS_TITLES[currentStatus]
+    || (currentFilter === 'all' ? 'All Videos'
+        : allCategories.find(c => c.slug === currentFilter)?.name || 'Videos');
   html += `<div class="page-header">
     <div class="page-title">${catLabel}</div>
-    <div class="page-sub">${videos.length} video${videos.length !== 1 ? 's' : ''}${currentSearch ? ` matching "${currentSearch}"` : ''}</div>
+    <div class="page-sub">${videos.length} ${currentStatus === 'empty' ? `slot${videos.length !== 1 ? 's' : ''}` : `video${videos.length !== 1 ? 's' : ''}`}${currentSearch ? ` matching "${escapeHtml(currentSearch)}"` : ''}</div>
   </div>`;
 
   // Render Subcategory Tabs
@@ -375,10 +471,7 @@ function renderVideos() {
   }
 
   if (videos.length === 0) {
-    html += `<div class="empty-state">
-      <h3>No videos found</h3>
-      <p>${currentSearch ? 'Try a different search term' : 'No videos in this category yet'}</p>
-    </div>`;
+    html += emptyStateHtml(isAdmin);
   } else {
     html += `<div class="video-grid">`;
     videos.forEach(v => { html += renderVideoCard(v, isAdmin); });
@@ -386,6 +479,52 @@ function renderVideos() {
   }
 
   main.innerHTML = html;
+}
+
+// "No videos found" was shown for a failed load, an unfilled library and a
+// bad search alike. Each of those needs a different next step.
+function emptyStateHtml(isAdmin) {
+  if (videosLoadError) {
+    return `<div class="empty-state">
+      <h3>Couldn't load the library</h3>
+      <p>${escapeHtml(videosLoadError)}</p>
+      <p style="margin-top:10px"><button class="btn btn-ghost btn-sm" style="width:auto" onclick="loadVideos()">Try again</button></p>
+    </div>`;
+  }
+  if (currentSearch) {
+    return `<div class="empty-state">
+      <h3>Nothing matches "${escapeHtml(currentSearch)}"</h3>
+      <p>Try fewer words, or search by category name.</p>
+    </div>`;
+  }
+  if (currentStatus === 'empty') {
+    return `<div class="empty-state">
+      <h3>No unfilled slots</h3>
+      <p>Every slot has a video. Nice.</p>
+    </div>`;
+  }
+  if (isWorkflowStatus(currentStatus)) {
+    const where = { to_review: 'waiting for review', to_edit: 'waiting to be edited', completed: 'finished and waiting to publish' }[currentStatus];
+    return `<div class="empty-state">
+      <h3>Nothing here</h3>
+      <p>No videos are ${where} right now.</p>
+    </div>`;
+  }
+  // The common case on a fresh install: slots exist, none are published yet.
+  const unfilled = allVideos.filter(v => v.status === 'empty' || v.status === 'raw').length;
+  if (isAdmin && unfilled) {
+    return `<div class="empty-state">
+      <h3>Nothing published yet</h3>
+      <p>${unfilled} slot${unfilled !== 1 ? 's are' : ' is'} waiting to be filled. Start a project to script one, or open a slot to upload a video.</p>
+      <p style="margin-top:10px">
+        <button class="btn btn-ghost btn-sm" style="width:auto" onclick="showManageVideosPage(null, 'empty')">See empty slots</button>
+      </p>
+    </div>`;
+  }
+  return `<div class="empty-state">
+    <h3>No videos yet</h3>
+    <p>${isAdmin ? 'Add a video slot to get started.' : 'Nothing has been published here yet — check back soon.'}</p>
+  </div>`;
 }
 
 function renderVideoCard(v, isAdmin) {
@@ -521,6 +660,7 @@ async function openVideo(id) {
   currentVideoId = v.id;
   const isAdmin = currentProfile?.role === 'admin';
   const isReviewer = currentProfile?.is_reviewer === true;
+  vidChangesOpen = false;
   const feedbackSection = document.getElementById('feedback-section');
   if (isAdmin || isReviewer) {
     feedbackSection.classList.remove('hidden');
@@ -528,6 +668,7 @@ async function openVideo(id) {
   } else {
     feedbackSection.classList.add('hidden');
   }
+  applyVideoReviewMode(v);
 
   // Transcription — admin only. Shown for every video: Wasabi-backed videos
   // transcribe server-side; embedded/linked videos fall back to a local file pick.
@@ -572,6 +713,13 @@ async function openVideo(id) {
 }
 
 function closeVideoModal() {
+  if (paWorkflowMounted()) {
+    // Ran from the project modal's Video tab: keep it open and refresh the slot state
+    resetComposer();
+    const id = currentScriptId;
+    setTimeout(() => { if (id && id === currentScriptId) openScript(id); }, 0);
+    return;
+  }
   document.getElementById('video-modal').classList.remove('open');
   document.getElementById('video-player').innerHTML = '';
   resetComposer();
@@ -594,7 +742,7 @@ async function loadFeedback(videoId) {
     .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: true });   // oldest at the top, newest just above the composer
 
   if (error) {
     list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
@@ -602,7 +750,7 @@ async function loadFeedback(videoId) {
   }
 
   if (!data || data.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one above.</div>';
+    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one below.</div>';
     return;
   }
 
@@ -925,6 +1073,7 @@ async function submitComment() {
 
     resetComposer();
     showToast('Comment posted', 'success');
+    if (vidChangesOpen) { vidChangesPostedThisRound = true; document.getElementById('video-changes-cancel')?.classList.add('hidden'); }
     loadFeedback(currentVideoId);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
@@ -1109,8 +1258,91 @@ function closeModal(e) {
 // ══════════════════════════════════════════════════════
 // ADMIN — ADD / EDIT VIDEO
 // ══════════════════════════════════════════════════════
+// Manage videos is a page, not a modal. The add/edit form markup still lives in
+// #admin-modal (never opened now); it is moved into the page while in use and
+// parked back before any page rewrites #main-content, so its inputs survive.
+const VIDEO_STATUS_LABELS = {
+  empty: 'Empty slot', raw: 'Raw', to_review: 'To Review', to_edit: 'To Edit',
+  completed: 'Completed', published: 'Published',
+};
+
+function parkVideoForm() {
+  const form = document.getElementById('video-form');
+  const home = document.querySelector('#admin-modal .modal');
+  if (form && home && form.parentElement !== home) home.appendChild(form);
+}
+
 function showAdmin() {
-  openAddVideo();
+  showManageVideosPage(document.getElementById('sidebar-manage-item'));
+}
+
+// Status filter on the Manage videos page (moved here from the sidebar — admin only)
+let manageStatusFilter = 'all';
+const MANAGE_STATUS_FILTERS = [
+  { key: 'all',       label: 'All',         match: () => true },
+  { key: 'published', label: 'Published',   match: v => v.status === 'published' },
+  { key: 'empty',     label: 'Empty slots', match: v => v.status === 'empty' || v.status === 'raw' },
+  { key: 'to_review', label: 'To Review',   match: v => v.status === 'to_review' },
+  { key: 'to_edit',   label: 'To Edit',     match: v => v.status === 'to_edit' },
+  { key: 'completed', label: 'Completed',   match: v => v.status === 'completed' },
+];
+
+function showManageVideosPage(sidebarEl, statusFilter) {
+  if (currentProfile?.role !== 'admin') return;
+  if (statusFilter) manageStatusFilter = statusFilter;
+  currentPage = 'manage';
+  parkVideoForm();
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('sidebar-manage-item'))?.classList.add('active');
+
+  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  const shown = allVideos.filter(activeFilter.match);
+  const chips = MANAGE_STATUS_FILTERS.map(f => `
+    <button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''}" onclick="showManageVideosPage(null, '${f.key}')">
+      ${f.label} <span class="manage-chip-count">${allVideos.filter(f.match).length}</span>
+    </button>`).join('');
+
+  const rows = shown.map(v => `
+    <tr>
+      <td>${escapeHtml(v.title || 'Untitled')}</td>
+      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
+      <td>${escapeHtml(v.video_type || '—')}</td>
+      <td><span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || escapeHtml(v.status || '')}</span></td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0;padding:4px 12px;font-size:12px" onclick="openEditVideo('${v.id}')">Edit</button></td>
+    </tr>`).join('');
+
+  document.getElementById('main-content').innerHTML = `
+    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+      <div>
+        <div class="page-title">Manage videos</div>
+        <div class="page-sub">${shown.length} video${shown.length !== 1 ? 's' : ''}${activeFilter.key !== 'all' ? ` · ${activeFilter.label}` : ''}</div>
+      </div>
+      <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openAddVideo()">+ Add video slot</button>
+    </div>
+    <div class="manage-chips">${chips}</div>
+    <div id="manage-form-slot" class="manage-form-panel hidden"></div>
+    <div class="manage-table-wrap">
+      <table class="manage-table">
+        <thead><tr><th>Title</th><th>Category</th><th>Type</th><th>Status</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted)">No videos with this status.</td></tr>'}</tbody>
+      </table>
+    </div>`;
+}
+
+function mountVideoForm() {
+  if (currentPage !== 'manage' || !document.getElementById('manage-form-slot')) showManageVideosPage();
+  const slot = document.getElementById('manage-form-slot');
+  const form = document.getElementById('video-form');
+  if (!slot || !form) return;
+  slot.appendChild(form);
+  slot.classList.remove('hidden');
+  document.getElementById('v-status-group').classList.toggle('hidden', currentProfile?.role !== 'admin');
+  slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function closeVideoForm() {
+  parkVideoForm();
+  document.getElementById('manage-form-slot')?.classList.add('hidden');
 }
 
 function openAddVideo() {
@@ -1129,7 +1361,7 @@ function openAddVideo() {
   document.getElementById('v-desc').value = '';
   document.getElementById('delete-video-btn').classList.add('hidden');
   hideUploadProgress();
-  document.getElementById('admin-modal').classList.add('open');
+  mountVideoForm();
 }
 
 function openEditVideo(id) {
@@ -1153,7 +1385,7 @@ function openEditVideo(id) {
   document.getElementById('v-desc').value = v.description || '';
   document.getElementById('delete-video-btn').classList.remove('hidden');
   hideUploadProgress();
-  document.getElementById('admin-modal').classList.add('open');
+  mountVideoForm();
 }
 
 function handleWasabiFileSelected(files) {
@@ -1497,8 +1729,9 @@ async function saveVideo() {
     } else {
       showToast('Video updated', 'success');
     }
-    document.getElementById('admin-modal').classList.remove('open');
+    closeVideoForm();
     await loadVideos();
+    if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
@@ -1519,8 +1752,9 @@ async function deleteVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast('Video deleted', 'success');
-    document.getElementById('admin-modal').classList.remove('open');
+    closeVideoForm();
     await loadVideos();
+    if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
@@ -1553,11 +1787,12 @@ function showToast(msg, type = 'success') {
 // NOTIFICATIONS
 // ══════════════════════════════════════════════════════
 async function loadNotifications() {
-  const { data } = await sb.from('notifications')
+  const { data, error } = await sb.from('notifications')
     .select('*, videos(title)')
     .eq('user_id', currentUser.id)
     .order('created_at', { ascending: false })
     .limit(30);
+  if (error) return; // keep what we have rather than blanking the bell
   allNotifications = data || [];
   renderNotificationBell();
 }
@@ -1571,11 +1806,27 @@ function subscribeToNotifications() {
       table: 'notifications',
       filter: `user_id=eq.${currentUser.id}`,
     }, payload => {
+      if (allNotifications.some(n => n.id === payload.new.id)) return;
       allNotifications.unshift(payload.new);
       renderNotificationBell();
       showToast(payload.new.title, 'success');
     })
-    .subscribe();
+    .subscribe(status => {
+      // Catch anything that arrived while the socket was (re)connecting
+      if (status === 'SUBSCRIBED') loadNotifications();
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') console.warn('[notifications] realtime', status);
+    });
+
+  // Fallback so the bell stays current even if realtime isn't delivering:
+  // refetch when the tab comes back into view, and poll lightly while visible.
+  if (!notifPollTimer) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && currentUser) loadNotifications();
+    });
+    notifPollTimer = setInterval(() => {
+      if (currentUser && document.visibilityState === 'visible') loadNotifications();
+    }, 30000);
+  }
 
   // ── Video status changes (real-time modal refresh) ──────────────────
   // Fires whenever any video row is updated in the DB — covers status
@@ -1665,8 +1916,23 @@ function renderNotifPanel() {
       <div class="notif-title">${n.title}</div>
       ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
+      ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
     </div>
   `).join('');
+}
+
+async function dismissNotification(id) {
+  const prev = allNotifications;
+  allNotifications = allNotifications.filter(n => n.id !== id);
+  renderNotifPanel();
+  renderNotificationBell();
+  const { error } = await sb.from('notifications').delete().eq('id', id);
+  if (error) {
+    allNotifications = prev;
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not dismiss: ' + error.message, 'error');
+  }
 }
 
 async function markAllNotifsRead() {
@@ -1681,6 +1947,7 @@ function notifClick(videoId, scriptId) {
   if (!videoId && !scriptId) return;
   document.getElementById('notif-panel').classList.add('hidden');
   notifPanelOpen = false;
+  if (isReviewerUser() && currentPage !== 'review') showReviewPage(document.getElementById('folder-to-review'));
   if (scriptId) { openScript(scriptId); return; }
   const v = allVideos.find(x => x.id === videoId);
   if (v && (v.video_url || v.storage_key)) openVideo(videoId);
@@ -1694,6 +1961,44 @@ const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill
 const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Complete';
 
 // Joe sends the video back to Ravi's TO EDIT folder with his feedback.
+// While Joe is deciding on a video, the feedback section stays hidden until he
+// clicks "Send back for edits"; then the decision buttons give way to the notes
+// and a Done button that records the decision.
+function applyVideoReviewMode(v) {
+  const deciding = currentProfile?.is_reviewer === true && v?.status === 'to_review';
+  const fb = document.getElementById('feedback-section');
+  const buttons = document.querySelector('#reviewer-section .reviewer-buttons');
+  const foot = document.getElementById('video-changes-foot');
+  const status = document.getElementById('reviewer-status');
+  const send = document.getElementById('comment-send-btn');
+  if (!deciding) {
+    foot?.classList.add('hidden'); buttons?.classList.remove('hidden');
+    if (send) send.innerHTML = COMMENT_SEND_HTML;
+    return;
+  }
+  fb?.classList.toggle('hidden', !vidChangesOpen);
+  buttons?.classList.toggle('hidden', vidChangesOpen);
+  foot?.classList.toggle('hidden', !vidChangesOpen);
+  document.getElementById('video-changes-cancel')?.classList.toggle('hidden', vidChangesOpen && vidChangesPostedThisRound);
+  if (send) send.innerHTML = vidChangesOpen ? COMMENT_SEND_HTML.replace('Send', 'Add more') : COMMENT_SEND_HTML;
+  if (status && vidChangesOpen) setStatusText(status, 'Leave your notes for Ravi, then click Done to send the video back.');
+}
+const COMMENT_SEND_HTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Send';
+let vidChangesPostedThisRound = false;
+function openVideoChanges() {
+  vidChangesOpen = true; vidChangesPostedThisRound = false;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  applyVideoReviewMode(v);
+  document.getElementById('feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function cancelVideoChanges() {
+  vidChangesOpen = false;
+  resetComposer();
+  const v = allVideos.find(x => x.id === currentVideoId);
+  applyVideoReviewMode(v);
+  updateReviewedBtnState(v);
+}
+
 async function sendBackForEdits() {
   await reviewerDecision({
     status: 'to_edit',
@@ -2497,10 +2802,12 @@ function _fmtDuration(secs) {
 }
 
 async function showRecordingsPage(sidebarEl) {
+  currentPage = 'recordings';
   // Update sidebar active state
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
+  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading recordings…</div>';
 
@@ -2794,7 +3101,7 @@ if ('serviceWorker' in navigator) {
 const SCRIPT_TTS_FUNCTION = 'script-tts';
 const SCRIPT_AUDIO_BUCKET = 'script-audio';
 // PostgREST needs the FK name to embed profiles twice (writer + editor)
-const SCRIPT_SELECT = `*, videos(title, status), categories(name, slug), subcategories(name),
+const SCRIPT_SELECT = `*, videos(id, title, status, thumbnail_url, storage_key, video_url, description, duration_seconds), categories(name, slug), subcategories(name),
   writer:profiles!scripts_writer_id_fkey(full_name), editor:profiles!scripts_editor_id_fkey(full_name)`;
 
 const SCRIPT_STATUS_META = {
@@ -2804,11 +3111,49 @@ const SCRIPT_STATUS_META = {
   approved: { color: 'var(--teal)',  label: 'Approved' },
 };
 
+// A project = making one video. Stage 1 is the script, stage 2 is the video.
+// The script row carries the project; `videos.status` drives stage 2.
+const PROJECT_VIDEO_META = {
+  empty:     { key: 'empty',     label: 'Not started' },
+  raw:       { key: 'raw',       label: 'Raw footage' },
+  to_review: { key: 'to_review', label: 'To review' },
+  to_edit:   { key: 'to_edit',   label: 'To edit' },
+  completed: { key: 'completed', label: 'Completed' },
+  published: { key: 'published', label: 'Published' },
+};
+
+// → { n, of, name, detail, done } — `n` is the stage the project is sitting in.
+function projectStage(s) {
+  if (!s || s.status !== 'approved') {
+    return {
+      n: 1, of: 2, name: 'Script', done: false,
+      detail: SCRIPT_STATUS_META[s?.status]?.label || 'Draft',
+    };
+  }
+  const vs = s.videos?.status || 'empty';
+  const meta = PROJECT_VIDEO_META[vs] || PROJECT_VIDEO_META.empty;
+  return { n: 2, of: 2, name: 'Video', done: vs === 'published', detail: meta.label, vkey: meta.key };
+}
+
+function projectStageHtml(s) {
+  const st = projectStage(s);
+  return `
+    <div class="proj-stage" title="Stage ${st.n} of ${st.of}: ${st.name} — ${st.detail}">
+      <span class="proj-step ${st.n >= 1 ? 'on' : ''} ${st.n > 1 ? 'past' : ''}">Script</span>
+      <span class="proj-arrow">›</span>
+      <span class="proj-step ${st.n >= 2 ? 'on' : ''} ${st.done ? 'past' : ''}">Video</span>
+      ${st.n === 2 ? `<span class="proj-stage-detail">${escapeHtml(st.detail)}</span>` : ''}
+    </div>`;
+}
+
 let allScripts = [];
 let allProfiles = [];
 let currentScriptId = null;
 let currentScript = null;         // scripts row (+ embeds)
 let scriptVersions = [];          // ascending by version
+let scriptTab = 'script';         // which step tab the project modal shows
+let scChangesOpen = false;        // reviewer clicked "Needs changes": feedback section is showing
+let scChangesPosted = false;      // …and has posted at least one note (Cancel goes away)
 let scriptViewVersionId = null;   // version shown in player + feedback
 let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
 let scriptSending = false;
@@ -2843,7 +3188,7 @@ async function loadScripts() {
   allScripts = data || [];
 
   // Sidebar entry + bell for anyone who has a project, not just staff
-  const hasScripts = isStaffUser() || allScripts.length > 0;
+  const hasScripts = !isReviewerUser() && (isStaffUser() || allScripts.length > 0);
   document.getElementById('sidebar-scripts')?.classList.toggle('hidden', !hasScripts);
   if (hasScripts) document.getElementById('notif-wrap')?.classList.remove('hidden');
   updateScriptsCount();
@@ -2866,11 +3211,20 @@ function scriptNeedsMe(s) {
 }
 
 function updateScriptsCount() {
+  const rc = document.getElementById('count-to-review');
+  if (rc) rc.textContent = reviewQueueCount();
   const el = document.getElementById('count-scripts');
   if (!el) return;
-  const n = allScripts.filter(scriptNeedsMe).length;
-  el.textContent = n;
-  el.style.background = n > 0 ? 'rgba(245,165,36,0.25)' : '';
+  // Every other sidebar badge counts the things behind it, so this one does
+  // too — it used to show only the "waiting on you" subset, which read as 0
+  // whenever projects existed but none were yours to act on. The waiting
+  // count survives as the amber highlight and the title.
+  const waiting = allScripts.filter(scriptNeedsMe).length;
+  el.textContent = allScripts.length;
+  el.classList.toggle('needs-you', waiting > 0);
+  el.title = waiting
+    ? `${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}, ${waiting} waiting on you`
+    : `${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}`;
 }
 
 function scriptForVideo(videoId) {
@@ -2899,72 +3253,269 @@ function renderModalScriptLink(videoId) {
   box.classList.remove('hidden');
 }
 
-// ── Scripts page ─────────────────────────────────────────────
+// ── Projects page (a project = one video: script, then video) ─
 async function showScriptsPage(sidebarEl) {
+  projGroupView = null;   // a fresh visit starts at the overview
+  currentPage = 'projects';
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
+  parkVideoForm();
   const main = document.getElementById('main-content');
-  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading scripts…</div>';
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
+  if (currentPage !== 'projects') return;
+  if (canManageScripts() && !allProfiles.length) await loadProfiles();
+  if (currentPage !== 'projects') return;
 
-  const mine   = allScripts.filter(scriptNeedsMe);
-  const others = allScripts.filter(s => !scriptNeedsMe(s));
+  const count = (fn) => allScripts.filter(fn).length;
+  const group = (s) => projGroup(s);
+  const statsHtml = [
+    ['Total projects',   allScripts.length,                                   ''],
+    ['Needs attention',  count(s => group(s) === 'attention'),                'pj-amber'],
+    ['In progress',      count(s => group(s) === 'progress'),                 'pj-blue'],
+    ['Ready to publish', count(s => group(s) === 'ready'),                    'pj-green'],
+    ['Published',        count(s => group(s) === 'done'),                     ''],
+  ].map(([label, n, cls]) => `<div class="pj-stat"><div class="pj-stat-n">${n}</div><div class="pj-stat-l ${cls}">${label}</div></div>`).join('');
 
-  let html = `
-    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+  const opt = (list, sel) => list.map(([v, l]) => `<option value="${escapeHtmlAttr(v)}" ${v === sel ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
+  const f = projFilters;
+  const peopleOf = (idKey, objKey) => [...new Map(allScripts.filter(s => s[idKey]).map(s => [s[idKey], profileName(s[objKey] || {})])).entries()];
+
+  main.innerHTML = `
+    <div class="page-header pj-header">
       <div>
-        <div class="page-title">Scripts</div>
-        <div class="page-sub">${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
+        <div class="page-title">Video Projects</div>
+        <div class="page-sub">create andpublish training videos.</div>
       </div>
       ${canManageScripts() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New script
+        New video project
       </button>` : ''}
-    </div>`;
+    </div>
+    <div class="pj-stats">${statsHtml}</div>
+    <div class="pj-toolbar">
+      <div class="pj-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="pj-q" placeholder="Search projects…" value="${escapeHtmlAttr(f.q)}" oninput="projSetFilter('q', this.value)">
+      </div>
+      <select class="pj-select" onchange="projSetFilter('cat', this.value)">
+        <option value="">Category</option>${opt(allCategories.map(c => [c.id, c.name]), f.cat)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('stage', this.value)">
+        <option value="">Stage</option>${opt(Object.entries(PROJ_STAGES).map(([k, v]) => [k, k === 'review' ? 'Review (script)' : k === 'vreview' ? 'Review (video)' : v.label]), f.stage)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('writer', this.value)">
+        <option value="">Writer</option>${opt(peopleOf('writer_id', 'writer'), f.writer)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('editor', this.value)">
+        <option value="">Editor</option>${opt(peopleOf('editor_id', 'editor'), f.editor)}
+      </select>
+      <div class="pj-viewtoggle">
+        <button class="${projView === 'list' ? 'active' : ''}" onclick="projSetView('list')">☰ List</button>
+        <button class="${projView === 'board' ? 'active' : ''}" onclick="projSetView('board')">▦ Board</button>
+      </div>
+    </div>
+    <div id="pj-body"></div>`;
+  renderProjectsBody();
+}
 
-  if (!allScripts.length) {
-    html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-      <div style="font-size:15px">No scripts yet.</div>
-      <div style="font-size:13px;margin-top:6px">${canManageScripts() ? 'Click <strong>New script</strong> to start the first project.' : 'Nothing has been assigned to you yet.'}</div>
-    </div>`;
-    main.innerHTML = html;
+// ── Video Projects view (list / board) ───────────────────────
+// Stages derived from the script status + the linked video slot's status.
+const PROJ_STAGES = {
+  script:    { label: 'Script',    step: 1, cls: 'st-amber'  },
+  review:    { label: 'Review',    step: 2, cls: 'st-blue', icon: 'script' },
+  video:     { label: 'Video',     step: 3, cls: 'st-purple' },
+  vreview:   { label: 'Review',    step: 4, cls: 'st-blue', icon: 'video' },
+  completed: { label: 'Completed', step: 5, cls: 'st-green'  },
+  published: { label: 'Published', step: 6, cls: 'st-teal'   },
+};
+const PROJ_STEPS = 6;
+// Which review a "Review" badge means: the script (paper) or the video (camera)
+const PJ_STAGE_ICONS = {
+  script: '<svg class="pj-stage-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
+  video:  '<svg class="pj-stage-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg>',
+};
+const projStageBadge = (st) => `<span class="pj-stage ${st.cls}" title="${st.icon === 'script' ? 'Script review (with Joe)' : st.icon === 'video' ? 'Video review (with Joe)' : st.label}">${PJ_STAGE_ICONS[st.icon] || ''}${st.label}</span>`;
+const PROJ_GROUPS = [
+  { key: 'attention', label: 'Needs your attention', dot: '#f5a524' },
+  { key: 'progress',  label: 'In progress',          dot: '#3b82f6' },
+  { key: 'ready',     label: 'Ready to publish',     dot: '#22c55e' },
+  { key: 'done',      label: 'Published',            dot: 'var(--muted)' },
+];
+const PROJ_GROUP_LIMIT = 4;
+let projPage = {};                // group key → current page (0-based) when not expanded
+let projFilters  = { q: '', cat: '', stage: '', writer: '', editor: '' };
+let projView     = 'list';
+let projGroupView = null;         // group key when "View all" opened a single group as its own view
+
+function projStage(s) {
+  if (s.status === 'draft' || s.status === 'changes' || !s.status) return 'script';
+  if (s.status === 'sent') return 'review';
+  const vs = s.videos?.status || 'empty';
+  if (vs === 'to_review') return 'vreview';
+  if (vs === 'completed') return 'completed';
+  if (vs === 'published') return 'published';
+  return 'video'; // empty / raw / to_edit — the video is being made or fixed
+}
+
+function projGroup(s) {
+  const st = projStage(s);
+  if (st === 'published') return 'done';
+  if (scriptNeedsMe(s)) return 'attention';
+  if (st === 'completed') return 'ready';
+  return 'progress';
+}
+
+
+// Who the project is sitting with right now, by stage:
+// script → writer, video → editor, either review → client (reviewer),
+// completed / published → admin.
+function projCurrentPerson(s) {
+  const byRole = (fn, fallback) => { const p = allProfiles.find(fn); return p ? profileName(p) : fallback; };
+  switch (projStage(s)) {
+    case 'script':  return s.writer ? profileName(s.writer) : 'Writer';
+    case 'video':   return s.editor ? profileName(s.editor) : 'Editor';
+    case 'review':
+    case 'vreview': return byRole(p => p.is_reviewer, 'Client');
+    default:        return byRole(p => p.role === 'admin' && !p.is_reviewer, 'Admin');
+  }
+}
+
+function projAvatar(name) {
+  if (!name || name === '—') return '<span class="pj-muted">—</span>';
+  const palette = ['#f97316', '#3b82f6', '#a855f7', '#22c55e', '#ec4899', '#eab308', '#14b8a6'];
+  let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `<span class="pj-person"><span class="pj-avatar" style="background:${palette[h % palette.length]}">${escapeHtml(name[0].toUpperCase())}</span>${escapeHtml(name)}</span>`;
+}
+
+function projSetFilter(key, val) { projFilters[key] = val; renderProjectsBody(); }
+function projSetView(v) { projView = v; showScriptsPage(document.getElementById('sidebar-scripts-item')); }
+// "View all" opens the group as its own view; the back link returns to the overview
+function projOpenGroup(key) { projGroupView = key; renderProjectsBody(); document.getElementById('main-content')?.scrollTo?.(0, 0); window.scrollTo(0, 0); }
+function projCloseGroup() { projGroupView = null; renderProjectsBody(); }
+function projSetPage(key, page) { projPage[key] = Math.max(0, page); renderProjectsBody(); }
+
+function projFiltered() {
+  const f = projFilters, q = f.q.trim().toLowerCase();
+  return allScripts.filter(s =>
+    (!q || [s.title, s.videos?.title, s.categories?.name, s.subcategories?.name].some(x => (x || '').toLowerCase().includes(q))) &&
+    (!f.cat || s.category_id === f.cat) &&
+    (!f.stage || projStage(s) === f.stage) &&
+    (!f.writer || s.writer_id === f.writer) &&
+    (!f.editor || s.editor_id === f.editor));
+}
+
+function renderProjectsBody() {
+  const body = document.getElementById('pj-body');
+  if (!body) return;
+  const list = projFiltered();
+
+  if (!allScripts.length || !list.length) {
+    body.innerHTML = `<div class="pj-empty">${!allScripts.length
+      ? (canManageScripts() ? 'No projects yet. Click <strong>New video project</strong> to start the first one.' : 'Nothing has been assigned to you yet.')
+      : 'No projects match these filters.'}</div>`;
     return;
   }
 
-  const card = (s) => {
-    const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
-    const ver  = s.current_version ? `v${s.current_version}` : 'not sent';
-    const where = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
-    return `
-      <div class="script-card ${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
-        <div class="card-tags" style="margin-bottom:0">
-          <span class="card-tag sc-status-${s.status}">${meta.label}</span>
-          <span class="card-tag sc-version">${ver}</span>
-        </div>
-        <div class="script-card-title">${escapeHtml(s.title)}</div>
-        <div class="script-card-meta">
-          ${where ? `<span>${escapeHtml(where)}</span>` : ''}
-          ${s.videos?.title ? `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>` : '<span>No slot linked</span>'}
-        </div>
-        <div class="script-card-meta">
-          <span>Writer: <strong>${s.writer ? escapeHtml(profileName(s.writer)) : '—'}</strong></span>
-          <span>Editor: <strong>${s.editor ? escapeHtml(profileName(s.editor)) : '—'}</strong></span>
-          <span>· ${timeAgo(s.updated_at || s.created_at)}</span>
-        </div>
+  if (projView === 'board') {
+    body.innerHTML = `<div class="pj-board">${Object.entries(PROJ_STAGES).map(([k, st]) => {
+      const items = list.filter(s => projStage(s) === k);
+      return `<div class="pj-col">
+        <div class="pj-col-head">${projStageBadge(st)}<span class="pj-muted">${items.length}</span></div>
+        ${items.map(s => `<div class="pj-card" onclick="openScript('${s.id}')">
+          <div class="pj-title">${escapeHtml(s.title)}</div>
+          <div class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › '))}</div>
+          <div class="pj-card-foot">${projAvatar(projCurrentPerson(s))}<span class="pj-muted">${timeAgo(s.updated_at || s.created_at)}</span></div>
+        </div>`).join('') || '<div class="pj-muted" style="padding:8px">—</div>'}
       </div>`;
-  };
-
-  if (mine.length) {
-    html += `<div class="script-section-label">Waiting on you</div><div class="script-grid" style="margin-bottom:28px">${mine.map(card).join('')}</div>`;
-    html += `<div class="script-section-label">Everything else</div>`;
+    }).join('')}</div>`;
+    return;
   }
-  html += `<div class="script-grid">${others.map(card).join('')}</div>`;
-  main.innerHTML = html;
+
+  const table = (rows) => `<div class="pj-table-wrap"><table class="pj-table">
+          <thead><tr><th>Project</th><th>Category</th><th>Stage</th><th>Progress</th><th>Writer</th><th>Editor</th><th>Updated</th></tr></thead>
+          <tbody>${rows.map(projRow).join('')}</tbody>
+        </table></div>`;
+
+  // Single-group view (opened by "View all"): every row, no paging
+  const gv = PROJ_GROUPS.find(g => g.key === projGroupView);
+  if (gv) {
+    const items = list.filter(s => projGroup(s) === gv.key);
+    body.innerHTML = `
+      <div class="pj-group">
+        <div class="pj-group-head">
+          <a class="pj-link pj-back" onclick="projCloseGroup()">‹ All projects</a>
+          <span class="pj-group-dot" style="background:${gv.dot}"></span>
+          <span class="pj-group-label">${gv.label} (${items.length})</span>
+        </div>
+        ${items.length ? table(items) : '<div class="pj-empty">No projects here match these filters.</div>'}
+      </div>`;
+    projStartMarquees(body);
+    return;
+  }
+
+  body.innerHTML = PROJ_GROUPS.map(g => {
+    const items = list.filter(s => projGroup(s) === g.key);
+    if (!items.length) return '';
+    const pages = Math.max(1, Math.ceil(items.length / PROJ_GROUP_LIMIT));
+    const page = Math.min(projPage[g.key] || 0, pages - 1);
+    const shown = items.slice(page * PROJ_GROUP_LIMIT, (page + 1) * PROJ_GROUP_LIMIT);
+    const from = page * PROJ_GROUP_LIMIT + 1, to = page * PROJ_GROUP_LIMIT + shown.length;
+    return `
+      <div class="pj-group">
+        <div class="pj-group-head">
+          <span class="pj-group-dot" style="background:${g.dot}"></span>
+          <span class="pj-group-label">${g.label} (${items.length})</span>
+          ${items.length > PROJ_GROUP_LIMIT ? `<a class="pj-link" onclick="projOpenGroup('${g.key}')">View all ›</a>` : ''}
+        </div>
+        ${table(shown)}
+        ${pages > 1 ? `<div class="pj-pager">
+          <button class="pj-pager-btn" onclick="projSetPage('${g.key}', ${page - 1})" ${page === 0 ? 'disabled' : ''} aria-label="Previous page">‹</button>
+          <span class="pj-muted">${from}–${to} of ${items.length}</span>
+          <button class="pj-pager-btn" onclick="projSetPage('${g.key}', ${page + 1})" ${page >= pages - 1 ? 'disabled' : ''} aria-label="Next page">›</button>
+        </div>` : ''}
+      </div>`;
+  }).join('');
+  projStartMarquees(body);
 }
 
-// ── New script (project initiation) ──────────────────────────
+// Names wider than the fixed column slide back and forth instead of wrapping.
+function projStartMarquees(root) {
+  root.querySelectorAll('.pj-marquee').forEach(box => {
+    const inner = box.firstElementChild;
+    const overflow = inner.scrollWidth - box.clientWidth;
+    box.classList.toggle('sliding', overflow > 0);
+    if (overflow > 0) {
+      inner.style.setProperty('--pj-shift', `-${overflow + 8}px`);
+      inner.style.animationDuration = `${Math.max(4, overflow / 20 + 3)}s`;
+    }
+  });
+}
+
+function projRow(s) {
+  const stKey = projStage(s), st = PROJ_STAGES[stKey];
+  const dotColor = { 'st-amber': '#f5a524', 'st-blue': '#3b82f6', 'st-purple': '#a855f7', 'st-green': '#22c55e', 'st-teal': 'var(--teal)' }[st.cls];
+  const dots = Array.from({ length: PROJ_STEPS }, (_, k) => k + 1).map(i => `<span class="pj-dot" style="${i <= st.step ? `background:${dotColor}` : ''}"></span>`).join('');
+  const thumb = s.videos?.thumbnail_url
+    ? `<img src="${escapeHtmlAttr(s.videos.thumbnail_url)}" alt="" loading="lazy">`
+    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>`;
+  return `
+    <tr class="${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
+      <td><div class="pj-proj"><div class="pj-thumb">${thumb}</div><div>
+        <div class="pj-marquee"><span class="pj-title">${escapeHtml(s.title)}</span></div>
+        <div class="pj-marquee"><span class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ') || '—')}</span></div>
+      </div></div></td>
+      <td>${s.categories?.name ? `<span class="pj-chip">${escapeHtml(s.categories.name)}</span>` : '<span class="pj-muted">—</span>'}</td>
+      <td>${projStageBadge(st)}</td>
+      <td><div class="pj-dots">${dots}</div></td>
+      <td>${projAvatar(s.writer ? profileName(s.writer) : '—')}</td>
+      <td>${projAvatar(s.editor ? profileName(s.editor) : '—')}</td>
+      <td class="pj-muted">${timeAgo(s.updated_at || s.created_at)}</td>
+    </tr>`;
+}
+
+// ── New project (starts with its script) ─────────────────────
 function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
   let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
   allProfiles.forEach(p => {
@@ -2984,6 +3535,7 @@ async function openScriptNewModal() {
   document.getElementById('sc-new-video').innerHTML  = '<option value="">Pick a sub-category first…</option>';
   document.getElementById('sc-new-title').value = '';
   document.getElementById('sc-new-title').dataset.auto = '';
+  const otterIn = document.getElementById('sc-new-otter'); if (otterIn) otterIn.value = '';
   document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id);
   document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true });
   document.getElementById('script-new-modal').classList.add('open');
@@ -3049,11 +3601,17 @@ async function createScript() {
       writer_id: writerId, editor_id: editorId, created_by: currentUser.id, status: 'draft',
     })
     .select('id').single();
-  btn.disabled = false; btn.textContent = 'Create script';
+  btn.disabled = false; btn.textContent = 'Create project';
   if (error) { showToast('Could not create: ' + error.message, 'error'); return; }
 
+  const otterFile = document.getElementById('sc-new-otter')?.files?.[0] || null;
   closeScriptNewModal();
   showToast('Project started', 'success');
+  if (otterFile) {
+    showToast(`Uploading Otter recording${canTranscribe() ? ' and transcribing' : ''}…`, 'info');
+    uploadProjectAsset('original_audio', otterFile, data.id, { transcribe: true })
+      .catch(err => showToast('Otter recording: ' + (err?.message || 'failed'), 'error'));
+  }
   notifyAssigned(data.id, title, 'writer', writerId);
   if (editorId) notifyAssigned(data.id, title, 'editor', editorId);
 
@@ -3092,6 +3650,7 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
+  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false; }
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
@@ -3114,11 +3673,40 @@ async function openScript(id, versionId = null) {
 
 function closeScriptModal(e) {
   if (e && e.target !== document.getElementById('script-modal')) return;
+  paUnmountWorkflow();
   stopScriptPlayer();
   resetScriptComposer();
   document.getElementById('script-modal').classList.remove('open');
   currentScriptId = null; currentScript = null;
+  projectAssets = []; projectAssetUrls = {}; projVideoToken++;
+  scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false;
   scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
+}
+
+function setScriptTab(tab) {
+  if (tab === scriptTab) return;
+  scriptTab = tab;
+  stopScriptPlayer();
+  // Back on the script tab, the player should follow the version being viewed again
+  if (tab === 'script') scriptPlayerLoad(scriptDraftPreview || viewedVersion()?.paragraphs || []);
+  document.getElementById('sc-pane-script')?.toggleAttribute('hidden', tab === 'video');
+  document.getElementById('sc-pane-video')?.toggleAttribute('hidden', tab !== 'video');
+  document.querySelectorAll('.sc-step').forEach((b, i) => b.classList.toggle('active', (i === 1) === (tab === 'video')));
+  if (tab === 'video') { loadProjectVideo(); loadProjectAssets(); paMountWorkflow(); }
+  else paUnmountWorkflow();
+}
+
+// Joe clicked "Needs changes": show the feedback section in its place
+function scOpenChanges() {
+  scChangesOpen = true; scChangesPosted = false;
+  renderScriptModal();
+  loadScriptFeedback();
+  document.getElementById('sc-feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function scCancelChanges() {
+  scChangesOpen = false; scChangesPosted = false;
+  resetScriptComposer();
+  renderScriptModal();
 }
 
 function viewedVersion() {
@@ -3131,6 +3719,28 @@ function selectScriptVersion(versionId) {
   scriptDraftPreview = null;
   renderScriptModal();
   loadScriptFeedback();
+}
+
+// Two chips: where the script stands and where the video stands, each with a
+// tick once Joe has approved it.
+const TICK_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+function projStatusChipsHtml(s, latest) {
+  const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
+  const scriptApproved = s.status === 'approved';
+  const scriptText = scriptApproved
+    ? `Script approved${latest ? ` · v${latest.version} locked` : ''}`
+    : `Script: ${meta.label}${latest ? ` · v${latest.version}` : ' · not sent yet'}`;
+  const vs = s.videos?.status || null;
+  const videoApproved = vs === 'completed' || vs === 'published';
+  const videoText = !s.videos ? 'Video: no slot' :
+    videoApproved ? (vs === 'published' ? 'Video approved · published' : 'Video approved') :
+    vs === 'to_review' ? 'Video: with Joe' :
+    vs === 'to_edit'   ? 'Video: changes requested' :
+    (s.videos.storage_key || s.videos.video_url) ? 'Video: uploaded' : 'Video: not made yet';
+  const videoCls = videoApproved ? 'sc-status-approved' : vs === 'to_review' ? 'sc-status-sent' : vs === 'to_edit' ? 'sc-status-changes' : 'sc-status-draft';
+  return `
+      <span class="card-tag sc-status-${s.status} sc-chip">${scriptApproved ? TICK_SVG : ''}${scriptText}</span>
+      <span class="card-tag ${videoCls} sc-chip">${videoApproved ? TICK_SVG : ''}${videoText}</span>`;
 }
 
 function renderScriptModal() {
@@ -3150,8 +3760,7 @@ function renderScriptModal() {
   // ── Header ──
   let html = `
     <div class="card-tags" style="margin-bottom:0">
-      <span class="card-tag sc-status-${s.status}">${meta.label}</span>
-      ${latest ? `<span class="card-tag sc-version">v${latest.version}${s.status === 'approved' ? ' · locked' : ''}</span>` : '<span class="card-tag sc-version">not sent yet</span>'}
+      ${projStatusChipsHtml(s, latest)}
     </div>
     <div class="sc-title">${escapeHtml(s.title)}${manager ? ` <a class="sc-link" style="font-size:12px;font-weight:400" onclick="renameScript()">rename</a>` : ''}</div>
     <div class="sc-sub">
@@ -3181,6 +3790,15 @@ function renderScriptModal() {
       </div>
     </div>`;
 
+  // ── Step tabs: 1 Script (narration + approval), 2 Video (the produced video + assets) ──
+  html += `
+    <div class="sc-steps">
+      <button class="sc-step ${scriptTab === 'script' ? 'active' : ''}" onclick="setScriptTab('script')"><span class="sc-step-n">1</span>Script</button>
+      <button class="sc-step ${scriptTab === 'video' ? 'active' : ''}" onclick="setScriptTab('video')"><span class="sc-step-n">2</span>Video</button>
+    </div>
+    <div id="sc-pane-script" ${scriptTab === 'video' ? 'hidden' : ''}>`;
+  html += `<div class="pa-hub"><div class="pa-main">`;
+
   // ── Version tabs (only once there's more than one round) ──
   if (scriptVersions.length > 1) {
     const dotColor = (v) => v.decision === 'approved' ? 'var(--teal)' : v.decision === 'changes' ? '#60a5fa' : '#f5a524';
@@ -3206,13 +3824,15 @@ function renderScriptModal() {
     html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — the writer hasn't sent a version.</div></div>`;
   }
 
-  // ── Reviewer decision (Joe) — only on the latest version while it's with him ──
-  if (reviewer && s.status === 'sent' && isLatest) {
+  // ── Reviewer decision (Joe) — only on the latest version while it's with him.
+  //    "Needs changes" opens the feedback section; "Done" there records the decision. ──
+  const reviewing = reviewer && s.status === 'sent' && isLatest;
+  if (reviewing && !scChangesOpen) {
     html += `
       <div class="workflow-section" id="sc-reviewer-section">
         <div class="workflow-section-label">Your decision on v${latest.version}</div>
         <div class="reviewer-buttons">
-          <button class="btn-more-changes" id="sc-changes-btn" onclick="scriptDecision('changes')">
+          <button class="btn-more-changes" id="sc-changes-btn" onclick="scOpenChanges()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
             Needs changes
           </button>
@@ -3221,7 +3841,7 @@ function renderScriptModal() {
             Approve script
           </button>
         </div>
-        <div class="reviewer-status">Listen, leave voice notes below on anything to change, then decide. Approving locks the text.</div>
+        <div class="reviewer-status">Listen, then decide. "Needs changes" lets you leave notes for the writer; approving locks the text.</div>
       </div>`;
   }
 
@@ -3266,11 +3886,13 @@ function renderScriptModal() {
       </div>`;
   }
 
-  // ── Feedback ──
+  // ── Feedback — posted notes first (oldest at the top), the composer below.
+  //    While Joe is deciding, it only appears after he clicks "Needs changes". ──
   const canComment = canCommentScript(s);
-  html += `
-    <div class="feedback-section" style="display:block">
+  if (!reviewing || scChangesOpen) html += `
+    <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${canComment ? `
       <div class="comment-composer">
         <textarea id="sc-comment-text" class="comment-input" rows="2" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
@@ -3289,16 +3911,25 @@ function renderScriptModal() {
           </div>
           <button class="btn btn-primary btn-sm" id="sc-comment-send-btn" onclick="submitScriptComment()" style="width:auto;margin-top:0">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            Send
+            ${reviewing ? 'Add more' : 'Send'}
           </button>
         </div>
       </div>` : ''}
-      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
+      ${reviewing ? `
+      <div class="sc-changes-foot">
+        <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="width:auto;margin-top:0" onclick="scCancelChanges()" ${scChangesPosted ? 'hidden' : ''}>Cancel</button>
+        <button class="btn btn-primary btn-sm" id="sc-changes-btn" style="width:auto;margin-top:0" onclick="scriptDecision('changes')">Done</button>
+      </div>` : ''}
     </div>`;
+
+  // Close the script pane; the video pane holds the produced video and its assets
+  html += `</div>${renderSidePanelsHtml(SCRIPT_TAB_KINDS)}</div></div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s)}</div>`;
 
   body.innerHTML = html;
 
   // Wire the player to whatever is showing
+  loadProjectAssets();
+  if (scriptTab === 'video') { loadProjectVideo(); paMountWorkflow(); }
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
 }
 
@@ -3684,8 +4315,8 @@ async function scriptDecision(decision) {
   }).catch(err => console.warn('[notify script decision]', err));
 
   await loadScripts();
-  if (decision === 'approved') { closeScriptModal(); showScriptsPage(document.getElementById('sidebar-scripts-item')); }
-  else openScript(scriptId);
+  if (decision === 'approved') { closeScriptModal(); isReviewerUser() ? showReviewPage(document.getElementById('folder-to-review')) : showScriptsPage(document.getElementById('sidebar-scripts-item')); }
+  else { if (currentPage === 'review') showReviewPage(); openScript(scriptId); }
 }
 
 // ── Feedback ─────────────────────────────────────────────────
@@ -3696,7 +4327,7 @@ async function loadScriptFeedback() {
   let q = sb.from('script_feedback')
     .select('id, user_id, version_id, body, audio_path, image_path, duration_seconds, transcript, created_at, profiles:user_id(full_name)')
     .eq('script_id', currentScriptId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: true });   // oldest at the top, newest just above the composer
   // Feedback is per version; before any version exists, show unscoped notes
   q = scriptViewVersionId ? q.eq('version_id', scriptViewVersionId) : q.is('version_id', null);
   const { data, error } = await q;
@@ -3799,6 +4430,7 @@ async function submitScriptComment() {
 
     resetScriptComposer();
     showToast('Note posted', 'success');
+    if (scChangesOpen) { scChangesPosted = true; document.getElementById('sc-changes-cancel')?.setAttribute('hidden', ''); }
     await loadScriptFeedback();
     // Transcribe in the background — the list refreshes when it lands
     if (audioPath) transcribeScriptFeedback(inserted.id, audioPath);
@@ -3885,4 +4517,544 @@ function subscribeToScriptChanges() {
       }
     })
     .subscribe();
+}
+
+
+// ══════════════════════════════════════════════════════
+// PROJECT ASSETS — the video plus everything that goes with it
+// (finalized audio, Otter recording + transcript, video transcript, other files).
+// Otter panels also show on the Script tab (they arrive at project creation);
+// the Video tab shows the produced video, its details, review feedback and all panels.
+// ══════════════════════════════════════════════════════
+const PROJECT_ASSETS_BUCKET = 'project-assets';
+const PROJ_ASSET_KINDS = {
+  final_audio:      { label: 'Finalized audio',  accept: 'audio/*',                   empty: 'No finalized narration yet.' },
+  original_audio:   { label: 'Otter audio',      accept: 'audio/*,video/*',           empty: "No Otter recording yet — Joe's original recording goes here." },
+  otter_transcript: { label: 'Otter transcript', accept: '.txt,.srt,.vtt,text/plain', empty: 'No Otter transcript yet.' },
+  transcript:       { label: 'Finalized transcript', accept: '.txt,.srt,.vtt,text/plain', empty: 'No finalized transcript yet.' },
+  other:            { label: 'Other assets',     accept: '*/*',                       empty: 'No other files yet.' },
+};
+let projectAssets    = [];   // rows for currentScriptId
+let projectAssetUrls = {};   // storage_path → signed URL
+let projVideoToken   = 0;    // guards a slow playback lookup against a modal switch
+let paPendingFile    = null; // video file picked in the inline upload form
+let paPendingThumb   = null;
+
+const canAddProjectAssets   = (s) => isStaffUser() || isScriptAssignee(s);
+const canDeleteProjectAsset = (a) => isStaffUser() || a.created_by === currentUser?.id;
+const canUploadSlotVideo    = () => currentProfile?.role === 'admin';   // videos RLS: staff only
+const canTranscribe         = () => currentProfile?.role === 'admin';   // transcribe function: admin only
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function paPanelHtml(kind, extraClass = '') {
+  const k = PROJ_ASSET_KINDS[kind];
+  return `
+    <div class="pa-panel ${extraClass}" data-pa-kind="${kind}">
+      <div class="pa-panel-head">
+        <span class="pa-panel-title">${k.label}</span>
+        <span class="pa-panel-actions"></span>
+      </div>
+      <div class="pa-panel-body"><span class="pa-empty">Loading…</span></div>
+    </div>`;
+}
+
+// Side panels: the Script tab has the Otter recording, its transcript and other
+// files; the Video tab adds the finalized audio and finalized transcript.
+const SCRIPT_TAB_KINDS = ['original_audio', 'otter_transcript', 'other'];
+const VIDEO_TAB_KINDS  = ['final_audio', 'transcript', 'original_audio', 'otter_transcript', 'other'];
+function renderSidePanelsHtml(kinds) {
+  return `<div class="pa-side">${kinds.map(kind => paPanelHtml(kind, kind === 'final_audio' ? '' : 'pa-panel-tall')).join('')}</div>`;
+}
+
+// Video tab: video (or the upload form) + details + review workflow, panels beside it
+function renderProjectHubHtml(s) {
+  const v = s.videos;
+  const manager = canManageScripts();
+
+  let main;
+  if (!v) {
+    main = `<div class="pa-video"><div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div></div>`;
+  } else if (!v.storage_key && !v.video_url) {
+    main = canUploadSlotVideo() ? renderVideoUploadFormHtml(v) : `
+      <div class="pa-video"><div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet. Ravi uploads it here once it is produced.</span></div></div>`;
+  } else {
+    main = `
+      <div class="pa-video" id="pa-video"><div class="pa-video-msg">Loading video…</div></div>
+      <div class="pa-details">
+        <div class="pa-details-title">${escapeHtml(v.title)}</div>
+        <div class="pa-details-desc">${v.description ? escapeHtml(v.description) : '<span class="pa-empty">No description yet.</span>'}</div>
+        <div class="pa-details-meta">
+          <div class="modal-meta-item"><strong>${escapeHtml(String(v.status || '—').replace('_', ' '))}</strong>Slot status</div>
+          <div class="modal-meta-item"><strong>${v.video_type ? escapeHtml(v.video_type) : '—'}</strong>Type</div>
+          ${v.duration_seconds ? `<div class="modal-meta-item"><strong>${formatDuration(v.duration_seconds)}</strong>Length</div>` : ''}
+          <a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>
+        </div>
+      </div>
+      <div id="pa-workflow"></div>`;
+  }
+
+  return `
+    <div class="pa-hub">
+      <div class="pa-main">${main}</div>
+      ${renderSidePanelsHtml(VIDEO_TAB_KINDS)}
+    </div>`;
+}
+
+// ── Inline upload (same fields as Manage videos) ─────────────
+function renderVideoUploadFormHtml(v) {
+  return `
+    <div class="pa-upload-form" id="pa-upload-form">
+      <div class="pa-upload-head">
+        <div class="pa-details-title">Upload the produced video</div>
+        <div class="pa-empty">Slot: ${escapeHtml(v.title)}. Saving sends it to Joe's To Review.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Upload video file</label>
+        <input class="form-input" id="pa-v-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="paVideoFileSelected(this.files)">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Wasabi video URL <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional fallback if you already have a URL)</span></label>
+        <input class="form-input" id="pa-v-url" placeholder="https://..." value="${escapeHtmlAttr(v.video_url || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Storage key</label>
+        <input class="form-input" id="pa-v-key" placeholder="videos/uuid/file.mp4" value="${escapeHtmlAttr(v.storage_key || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description (optional)</label>
+        <textarea class="form-input" id="pa-v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical">${escapeHtmlAttr(v.description || '')}</textarea>
+      </div>
+      <div class="upload-progress-wrap hidden" id="pa-up-wrap" aria-live="polite">
+        <div class="upload-progress-label-row"><span id="pa-up-label">Uploading…</span><span id="pa-up-pct">0%</span></div>
+        <div class="upload-progress-track"><div class="upload-progress-bar" id="pa-up-bar"></div></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px">
+        <button class="btn btn-primary" id="pa-v-save" onclick="paSaveVideo()" style="width:auto;margin-top:0">Save video</button>
+      </div>
+    </div>`;
+}
+
+function paVideoFileSelected(files) {
+  paPendingFile = files && files.length ? files[0] : null;
+  paPendingThumb = null;
+  if (paPendingFile) generateThumbnailDataUri(paPendingFile).then(u => { paPendingThumb = u; }).catch(() => { paPendingThumb = null; });
+}
+
+function paSetProgress(pct, label) {
+  const wrap = document.getElementById('pa-up-wrap');
+  if (!wrap) return;
+  wrap.classList.remove('hidden');
+  const p = Math.min(100, Math.max(0, Math.round(pct)));
+  document.getElementById('pa-up-bar').style.width = p + '%';
+  document.getElementById('pa-up-pct').textContent = p + '%';
+  if (label) document.getElementById('pa-up-label').textContent = label;
+}
+
+async function paSaveVideo() {
+  const s = currentScript, v = s?.videos;
+  if (!v || !canUploadSlotVideo()) return;
+  const scriptId = currentScriptId;
+  const btn = document.getElementById('pa-v-save');
+  const patch = {
+    video_source: 'wasabi',
+    video_url:    document.getElementById('pa-v-url').value.trim() || null,
+    storage_key:  document.getElementById('pa-v-key').value.trim() || null,
+    description:  document.getElementById('pa-v-desc').value.trim() || null,
+  };
+  if (paPendingThumb) patch.thumbnail_url = paPendingThumb;
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    if (paPendingFile) {
+      btn.textContent = 'Uploading…';
+      paSetProgress(0, 'Starting…');
+      const result = await uploadToWasabiViaEdgeFunction(paPendingFile, (pct, label) => paSetProgress(pct, label));
+      patch.storage_key = result.storageKey;
+      patch.video_url = result.publicUrl || patch.video_url || null;
+      paPendingFile = null;
+    }
+    if (!patch.storage_key && !patch.video_url) throw new Error('Upload a file or provide a Wasabi video URL/storage key');
+
+    await ensureFreshSession();
+    const { error } = await sb.from('videos').update(patch).eq('id', v.id);
+    if (error) throw error;
+
+    // Into Joe's To Review, like a Manage-videos upload
+    if (v.status === 'empty' || v.status === 'raw') {
+      const { error: promoteErr } = await sb.rpc('set_video_status', { p_video_id: v.id, p_status: 'to_review' });
+      if (promoteErr) showToast('Uploaded, but could not submit for review: ' + promoteErr.message, 'error');
+      else {
+        showToast('Uploaded — sent to Joe for review', 'success');
+        invokeEdge(NOTIFY_FUNCTION, { body: { type: 'video_uploaded', videoId: v.id, videoTitle: v.title } })
+          .catch(err => console.warn('[notify video_uploaded] error:', err));
+      }
+    } else {
+      showToast('Video updated', 'success');
+    }
+    await loadVideos();
+    if (scriptId === currentScriptId) openScript(scriptId);   // re-render with the player + workflow
+  } catch (err) {
+    showToast((paPendingFile ? 'Upload failed: ' : 'Could not save: ') + (err?.message || 'Unknown error'), 'error');
+    document.getElementById('pa-up-wrap')?.classList.add('hidden');
+    if (btn) { btn.disabled = false; btn.textContent = 'Save video'; }
+  }
+}
+
+// ── Video playback on the Video tab ──────────────────────────
+async function loadProjectVideo() {
+  const s = currentScript, v = s?.videos;
+  const box = document.getElementById('pa-video');
+  if (!v || !box) return;
+  const token = ++projVideoToken;
+  try {
+    const url = await resolveWasabiPlaybackUrl(v);
+    if (token !== projVideoToken) return;
+    if (!url) throw new Error('no url');
+    const poster = v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : '';
+    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${url}">Your browser does not support HTML5 video.</video>`;
+  } catch (err) {
+    if (token !== projVideoToken) return;
+    console.warn('[project video]', err);
+    box.innerHTML = `<div class="pa-video-msg">Could not load the video. <a class="sc-link" onclick="loadProjectVideo()">Retry</a></div>`;
+  }
+}
+
+// ── Review workflow: the library modal's feedback + decision sections,
+//    moved into the Video tab while it is open and put back afterwards. ──
+const PA_WORKFLOW_IDS = ['feedback-section', 'reviewer-section', 'editor-section'];
+const paWorkflowMounted = () => !!document.getElementById('pa-workflow')?.querySelector('#feedback-section');
+
+function paMountWorkflow() {
+  const s = currentScript, v = s?.videos;
+  const mount = document.getElementById('pa-workflow');
+  if (!v || !mount) return;
+  const full = allVideos.find(x => x.id === v.id) || v;
+  currentVideoId = v.id;
+  PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el) mount.appendChild(el); });
+
+  const isAdmin = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
+  const fb = document.getElementById('feedback-section');
+  if (isAdmin || isReviewer) { fb.classList.remove('hidden'); loadFeedback(v.id); }
+  else fb.classList.add('hidden');
+
+  const rs = document.getElementById('reviewer-section');
+  if (isReviewer && full.status === 'to_review') { rs.classList.remove('hidden'); updateReviewedBtnState(full); }
+  else rs.classList.add('hidden');
+
+  const es = document.getElementById('editor-section');
+  if (isAdmin && !isReviewer && ['empty', 'raw', 'to_edit', 'completed'].includes(full.status)) { es.classList.remove('hidden'); updateEditorBtnState(full); }
+  else es.classList.add('hidden');
+  vidChangesOpen = false;
+  applyVideoReviewMode(full);
+}
+
+function paUnmountWorkflow() {
+  if (!paWorkflowMounted()) return;
+  const home = document.querySelector('#video-modal .modal-info');
+  PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el && home) home.appendChild(el); });
+  resetComposer();
+  currentVideoId = null;
+}
+
+// ── Assets ───────────────────────────────────────────────────
+async function loadProjectAssets() {
+  const id = currentScriptId;
+  if (!id) return;
+  const { data, error } = await sb.from('project_assets')
+    .select('*, profiles:created_by(full_name)')
+    .eq('script_id', id)
+    .order('created_at', { ascending: false });
+  if (id !== currentScriptId) return;
+  if (error) {
+    console.warn('[project assets] load failed:', error.message);
+    projectAssets = [];
+    renderProjectAssets(error.message);
+    return;
+  }
+  projectAssets = data || [];
+  projectAssetUrls = {};
+  const paths = projectAssets.map(a => a.storage_path).filter(Boolean);
+  if (paths.length) {
+    const { data: signed, error: sErr } = await sb.storage.from(PROJECT_ASSETS_BUCKET).createSignedUrls(paths, 60 * 60);
+    if (id !== currentScriptId) return;
+    if (sErr) console.warn('[project assets] sign failed:', sErr.message);
+    (signed || []).forEach(d => { if (d.signedUrl) projectAssetUrls[d.path] = d.signedUrl; });
+  }
+  renderProjectAssets();
+}
+
+function renderProjectAssets(loadError) {
+  const s = currentScript;
+  if (!s) return;
+  const canAdd = canAddProjectAssets(s);
+  const v = s.videos;
+  const otterAudio = projectAssets.find(a => a.kind === 'original_audio');
+  const hasOtterText = projectAssets.some(a => a.kind === 'otter_transcript');
+
+  document.querySelectorAll('[data-pa-kind]').forEach(panel => {
+    const kind = panel.dataset.paKind, k = PROJ_ASSET_KINDS[kind];
+    const body = panel.querySelector('.pa-panel-body');
+    const actions = panel.querySelector('.pa-panel-actions');
+    if (!k || !body || !actions) return;
+
+    let act = '';
+    if (canAdd) {
+      if (kind === 'transcript' && v?.storage_key && canTranscribe()) act += `<button class="pa-add pa-transcribe-btn" onclick="transcribeProjectVideo(this)">Transcribe video</button>`;
+      if (kind === 'otter_transcript' && otterAudio && !hasOtterText && canTranscribe()) act += `<button class="pa-add pa-transcribe-btn" onclick="transcribeOtterAudio('${otterAudio.id}', this)">Transcribe Otter audio</button>`;
+      if (kind === 'transcript' || kind === 'otter_transcript') act += `<button class="pa-add" onclick="pasteProjectText('${kind}')">Paste</button>`;
+      act += `<button class="pa-add" onclick="pickProjectAsset('${kind}')">+ Upload</button>`;
+    }
+    actions.innerHTML = act;
+
+    if (loadError) { body.innerHTML = `<span class="pa-empty">Could not load (${escapeHtml(loadError)}).</span>`; return; }
+    const items = projectAssets.filter(a => a.kind === kind);
+    // Finalized audio and transcript fill in automatically from the approved script (step 1)
+    const derived = kind === 'final_audio' ? approvedAudioItemHtml(s) : kind === 'transcript' ? approvedTranscriptItemHtml(s) : '';
+    if (!items.length && !derived) { body.innerHTML = `<span class="pa-empty">${k.empty}</span>`; return; }
+    body.innerHTML = derived + items.map(a => projectAssetItemHtml(a)).join('');
+  });
+}
+
+// ── Derived from step 1: the approved script version ─────────
+function approvedScriptVersion(s) {
+  if (s?.status !== 'approved') return null;
+  return scriptVersions.find(v => v.id === s.approved_version_id) || scriptVersions.at(-1) || null;
+}
+
+function approvedPendingNote(s) {
+  const latest = scriptVersions.at(-1);
+  const state = s.status === 'sent' ? `v${latest?.version} is with Joe` : s.status === 'changes' ? `Joe asked for changes on v${latest?.version}` : 'the script is still being written';
+  return `<span class="pa-empty">Fills in automatically once Joe approves the script — ${state}.</span>`;
+}
+
+function approvedAudioItemHtml(s) {
+  const v = approvedScriptVersion(s);
+  if (!v) return approvedPendingNote(s);
+  const withAudio = (v.paragraphs || []).filter(p => p.audio_path).length;
+  if (!withAudio) return `<span class="pa-empty">Approved v${v.version} has no rendered audio yet.</span>`;
+  return `
+    <div class="pa-item pa-derived">
+      <div class="pa-item-row">
+        <span class="pa-item-name">Approved narration · v${v.version}</span>
+        <span class="pa-chip-auto">from script</span>
+      </div>
+      <div class="pa-item-row">
+        <button class="sp-btn primary" style="padding:6px 12px;font-size:12px" onclick="paPlayApproved()"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play all</button>
+        <button class="sp-btn" style="padding:6px 12px;font-size:12px" onclick="spTogglePause()">Pause</button>
+        <button class="sp-btn" style="padding:6px 12px;font-size:12px" onclick="stopScriptPlayer()">Stop</button>
+      </div>
+      <span class="pa-item-meta">${withAudio} paragraph${withAudio !== 1 ? 's' : ''} · preview voice · approved ${s.approved_at ? timeAgo(s.approved_at) : ''}. Upload Joe's recorded narration below to replace it.</span>
+    </div>`;
+}
+
+function approvedTranscriptItemHtml(s) {
+  const v = approvedScriptVersion(s);
+  if (!v) return approvedPendingNote(s);
+  return `
+    <div class="pa-item pa-derived">
+      <div class="pa-item-row">
+        <span class="pa-item-name">Approved script · v${v.version}</span>
+        <span class="pa-chip-auto">from script</span>
+        <button class="pa-del" onclick="copyProjectText('approved', this)">Copy</button>
+      </div>
+      <div class="pa-transcript" id="pa-text-approved">${escapeHtml(v.body || '')}</div>
+      <span class="pa-item-meta">${v.total_count || (v.paragraphs || []).length} paragraphs · approved ${s.approved_at ? timeAgo(s.approved_at) : ''}</span>
+    </div>`;
+}
+
+async function paPlayApproved() {
+  const v = approvedScriptVersion(currentScript);
+  if (!v) return;
+  stopScriptPlayer();
+  await scriptPlayerLoad(v.paragraphs || []);
+  if (scriptTab === 'video') spPlayAll();
+}
+
+function projectAssetItemHtml(a) {
+  const url = a.storage_path ? projectAssetUrls[a.storage_path] : null;
+  const who = a.profiles ? profileName(a.profiles) : '';
+  const meta = [who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · ');
+  const del = canDeleteProjectAsset(a) ? `<button class="pa-del" title="Remove" onclick="deleteProjectAsset('${a.id}')">✕</button>` : '';
+  const isAudio = (a.mime_type || '').startsWith('audio/') || /\.(mp3|m4a|wav|ogg|webm|aac)$/i.test(a.file_name || '');
+  const isVideo = (a.mime_type || '').startsWith('video/');
+
+  if ((a.kind === 'transcript' || a.kind === 'otter_transcript') && a.body) {
+    return `
+      <div class="pa-item">
+        <div class="pa-item-row">
+          <span class="pa-item-name">${escapeHtml(a.file_name || 'Transcript')}</span>
+          <button class="pa-del" onclick="copyProjectText('${a.id}', this)">Copy</button>${del}
+        </div>
+        <div class="pa-transcript" id="pa-text-${a.id}">${escapeHtml(a.body)}</div>
+        <span class="pa-item-meta">${meta}</span>
+      </div>`;
+  }
+  const name = escapeHtml(a.file_name || 'File');
+  return `
+    <div class="pa-item">
+      <div class="pa-item-row">
+        ${url ? `<a class="pa-item-name" href="${url}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
+              : `<span class="pa-item-name">${name}</span>`}
+        ${del}
+      </div>
+      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${url}"></audio>` : ''}
+      <span class="pa-item-meta">${meta}</span>
+    </div>`;
+}
+
+function copyProjectText(id, btn) {
+  const text = document.getElementById(`pa-text-${id}`)?.textContent || '';
+  navigator.clipboard?.writeText(text).then(() => {
+    const orig = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => showToast('Could not copy', 'error'));
+}
+
+function pickProjectAsset(kind) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = PROJ_ASSET_KINDS[kind]?.accept || '*/*';
+  input.multiple = kind === 'other';
+  input.onchange = () => { [...input.files].forEach(f => uploadProjectAsset(kind, f)); };
+  input.click();
+}
+
+// Uploads into the project. `scriptId` defaults to the open project (project
+// creation passes the new id). `transcribe` runs Whisper on an Otter recording.
+async function uploadProjectAsset(kind, file, scriptId = currentScriptId, { transcribe = false } = {}) {
+  if (!scriptId || !file) return null;
+  const panel = scriptId === currentScriptId ? document.querySelector(`[data-pa-kind="${kind}"] .pa-panel-body`) : null;
+  const status = document.createElement('div');
+  status.className = 'pa-item pa-uploading';
+  status.textContent = `Uploading ${file.name}…`;
+  panel?.prepend(status);
+
+  await ensureFreshSession();
+  let inserted = null;
+  try {
+    const safe = file.name.replace(/[^\w.\-]+/g, '_').slice(-80);
+    const path = `${scriptId}/${kind}/${Date.now()}-${safe}`;
+    const { error: upErr } = await sb.storage.from(PROJECT_ASSETS_BUCKET)
+      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+    if (upErr) throw upErr;
+
+    // A small text file is also stored as text so it can be read in place
+    let text = null;
+    if ((kind === 'transcript' || kind === 'otter_transcript') && file.size < 512 * 1024) {
+      try { text = (await file.text()).trim() || null; } catch (_) { /* keep the file only */ }
+    }
+
+    const { data, error: insErr } = await sb.from('project_assets').insert({
+      script_id: scriptId, kind, storage_path: path, file_name: file.name,
+      mime_type: file.type || null, size_bytes: file.size, body: text, created_by: currentUser.id,
+    }).select('id').single();
+    if (insErr) throw insErr;
+    inserted = data;
+    showToast(`${PROJ_ASSET_KINDS[kind].label}: ${file.name} added`, 'success');
+  } catch (err) {
+    console.error('[project assets] upload failed:', err);
+    showToast('Upload failed: ' + (err?.message || 'unknown error'), 'error');
+  } finally {
+    status.remove();
+    if (scriptId === currentScriptId) loadProjectAssets();
+  }
+
+  if (inserted && transcribe && canTranscribe()) {
+    await transcribeAudioFileToAsset(file, scriptId, 'otter_transcript', `Otter transcript — ${file.name}`);
+  }
+  return inserted;
+}
+
+async function pasteProjectText(kind) {
+  const text = prompt(`Paste the ${PROJ_ASSET_KINDS[kind].label.toLowerCase()} text:`);
+  if (text == null || !text.trim()) return;
+  const { error } = await sb.from('project_assets').insert({
+    script_id: currentScriptId, kind, body: text.trim(),
+    file_name: `Pasted ${PROJ_ASSET_KINDS[kind].label.toLowerCase()}`, created_by: currentUser.id,
+  });
+  if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
+  loadProjectAssets();
+}
+
+// Whisper on an audio/video file (audio extracted in the browser), saved as a text asset
+async function transcribeAudioFileToAsset(file, scriptId, kind, name) {
+  const wav = await extractAudioToWav(file);
+  if (wav.size > 25 * 1024 * 1024) throw new Error('Audio is over 25MB — the recording is too long to transcribe in one go (max ~13 min).');
+  const form = new FormData();
+  form.append('file', wav, 'audio.wav');
+  const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: form });
+  const detail = error ? await parseFunctionError(error) : (data?.error || null);
+  if (detail) throw new Error(detail);
+  const text = (data?.text || '').trim();
+  if (!text) throw new Error('empty transcript');
+  const { error: insErr } = await sb.from('project_assets').insert({
+    script_id: scriptId, kind, body: text, file_name: name, created_by: currentUser.id,
+  });
+  if (insErr) throw insErr;
+  if (scriptId === currentScriptId) loadProjectAssets();
+  return text;
+}
+
+async function transcribeOtterAudio(assetId, btn) {
+  const a = projectAssets.find(x => x.id === assetId);
+  const url = a?.storage_path ? projectAssetUrls[a.storage_path] : null;
+  if (!url) { showToast('Otter audio is not available to transcribe', 'error'); return; }
+  const scriptId = currentScriptId;
+  if (btn) { btn.disabled = true; btn.textContent = 'Transcribing…'; }
+  try {
+    const blob = await fetch(url).then(r => { if (!r.ok) throw new Error('download failed'); return r.blob(); });
+    const file = new File([blob], a.file_name || 'otter-audio', { type: a.mime_type || blob.type });
+    await transcribeAudioFileToAsset(file, scriptId, 'otter_transcript', `Otter transcript — ${a.file_name || 'recording'}`);
+    showToast('Otter transcript saved', 'success');
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Transcribe Otter audio'; }
+  }
+}
+
+// Whisper on the slot's stored video, saved as a transcript asset
+async function transcribeProjectVideo(btn) {
+  const s = currentScript, v = s?.videos;
+  if (!v?.storage_key) { showToast('No stored video to transcribe', 'error'); return; }
+  const scriptId = currentScriptId;
+  if (btn) { btn.disabled = true; btn.textContent = 'Transcribing…'; }
+  try {
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { storageKey: v.storage_key } });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) {
+      throw new Error(/25\s*MB|too large|over OpenAI/i.test(detail)
+        ? 'Video is over 25MB — transcribe it from the library (it can extract the audio there), then paste or upload the text here.'
+        : detail);
+    }
+    const text = (data?.text || '').trim();
+    if (!text) throw new Error('empty transcript');
+    if (scriptId !== currentScriptId) return;
+    const { error: insErr } = await sb.from('project_assets').insert({
+      script_id: scriptId, kind: 'transcript', body: text,
+      file_name: `Transcript of ${v.title}`, created_by: currentUser.id,
+    });
+    if (insErr) throw insErr;
+    showToast('Transcript saved', 'success');
+    loadProjectAssets();
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Transcribe video'; }
+  }
+}
+
+async function deleteProjectAsset(id) {
+  const a = projectAssets.find(x => x.id === id);
+  if (!a) return;
+  if (!confirm(`Remove "${a.file_name || 'this item'}" from the project?`)) return;
+  const { error } = await sb.from('project_assets').delete().eq('id', id);
+  if (error) { showToast('Could not remove: ' + error.message, 'error'); return; }
+  if (a.storage_path) await sb.storage.from(PROJECT_ASSETS_BUCKET).remove([a.storage_path]).catch(() => {});
+  loadProjectAssets();
 }

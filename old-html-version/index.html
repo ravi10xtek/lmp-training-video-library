@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=20260917h">
 </head>
 <body>
 
@@ -140,19 +140,6 @@
         </div>
       </div>
 
-      <div class="sidebar-divider"></div>
-
-      <div class="sidebar-section">
-        <div class="sidebar-section-label">Status</div>
-        <div class="sidebar-item all" onclick="filterStatus('published', this)">
-          <div class="sidebar-dot" style="background:var(--teal)"></div>
-          Published
-        </div>
-        <div class="sidebar-item all" onclick="filterStatus('empty', this)">
-          <div class="sidebar-dot" style="background:var(--muted)"></div>
-          Empty slots
-        </div>
-      </div>
 
       <!-- Sign out (mobile only) -->
       <div class="sidebar-signout-wrap">
@@ -169,7 +156,7 @@
           <div class="sidebar-section-label">Projects</div>
           <div class="sidebar-item all" id="sidebar-scripts-item" onclick="showScriptsPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-            Scripts
+            Video projects
             <span class="sidebar-count" id="count-scripts">—</span>
           </div>
         </div>
@@ -181,7 +168,7 @@
         <div class="sidebar-section">
           <div class="sidebar-section-label">Admin</div>
           <!-- Joe (reviewer) only -->
-          <div class="sidebar-item all hidden" id="folder-to-review" onclick="filterStatus('to_review', this)">
+          <div class="sidebar-item all hidden" id="folder-to-review" onclick="showReviewPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
             To Review
             <span class="sidebar-count" id="count-to-review">0</span>
@@ -197,7 +184,7 @@
             Completed Videos
             <span class="sidebar-count" id="count-completed">0</span>
           </div>
-          <div class="sidebar-item all" onclick="showAdmin()">
+          <div class="sidebar-item all hidden" id="sidebar-manage-item" onclick="showManageVideosPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
             Manage videos
           </div>
@@ -255,6 +242,8 @@
           <h3>Feedback &amp; comments</h3>
         </div>
 
+        <div class="feedback-list" id="feedback-list"></div>
+
         <!-- Comment composer: text + optional audio + optional image -->
         <div class="comment-composer">
           <textarea id="comment-text" class="comment-input" rows="2"
@@ -289,15 +278,13 @@
             </button>
           </div>
         </div>
-
-        <div class="feedback-list" id="feedback-list"></div>
       </div>
 
       <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
       <div class="workflow-section hidden" id="reviewer-section">
         <div class="workflow-section-label">Review decision</div>
         <div class="reviewer-buttons">
-          <button class="btn-more-changes" id="send-back-btn" onclick="sendBackForEdits()">
+          <button class="btn-more-changes" id="send-back-btn" onclick="openVideoChanges()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
             Send back for edits
           </button>
@@ -305,6 +292,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             Mark as Complete
           </button>
+        </div>
+        <div class="sc-changes-foot hidden" id="video-changes-foot">
+          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="width:auto;margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
+          <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="sendBackForEdits()">Done</button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
       </div>
@@ -336,7 +327,7 @@
 <div class="modal-overlay" id="admin-modal" onclick="closeAdminModal(event)">
   <div class="modal" style="max-width:600px">
     <button class="modal-close" onclick="document.getElementById('admin-modal').classList.remove('open')">✕</button>
-    <div class="modal-info">
+    <div class="modal-info" id="video-form">
       <h3 style="font-family:var(--font-head);font-size:18px;margin-bottom:20px;color:var(--white)" id="admin-modal-title">Add video</h3>
 
       <div class="form-group">
@@ -373,7 +364,7 @@
             <option value="DEEP-DIVE">DEEP-DIVE</option>
           </select>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="v-status-group">
           <label class="form-label">Status</label>
           <select class="form-select" id="v-status">
             <option value="empty">Empty slot</option>
@@ -419,7 +410,7 @@
 
       <div class="admin-btn-row" style="display:flex; gap:12px; margin-top:24px; padding-top:24px; border-top:var(--glass-border)">
         <button class="btn btn-danger hidden" id="delete-video-btn" onclick="deleteVideo()" style="margin-right:auto">Delete Video</button>
-        <button class="btn btn-ghost" onclick="document.getElementById('admin-modal').classList.remove('open')">Cancel</button>
+        <button class="btn btn-ghost" onclick="closeVideoForm()">Cancel</button>
         <button class="btn btn-primary" id="save-video-btn" onclick="saveVideo()" style="margin-top:0; width:auto">Save video</button>
       </div>
     </div>
@@ -574,7 +565,7 @@
      Body is rendered by renderScriptModal() — it depends on role + status.
 ══════════════════════════ -->
 <div class="modal-overlay" id="script-modal" onclick="closeScriptModal(event)">
-  <div class="modal" style="max-width:860px">
+  <div class="modal" style="max-width:1040px">
     <button class="modal-close" onclick="closeScriptModal()">✕</button>
     <div class="modal-info" id="script-modal-body"></div>
   </div>
@@ -587,7 +578,7 @@
   <div class="modal" style="max-width:520px">
     <button class="modal-close" onclick="closeScriptNewModal()">✕</button>
     <div class="modal-info">
-      <h3 style="font-family:var(--font-head);font-size:18px;font-weight:700;color:var(--white);margin-bottom:6px">New script</h3>
+      <h3 style="font-family:var(--font-head);font-size:18px;font-weight:700;color:var(--white);margin-bottom:6px">New project</h3>
       <p style="color:var(--muted);font-size:13px;margin-bottom:24px">Pick the video slot this script is for, assign a writer, and the project starts. Joe approves the narration before the video is produced.</p>
 
       <div class="form-row">
@@ -618,6 +609,11 @@
         <input class="form-input" id="sc-new-title" placeholder="Filled from the slot — edit if you like">
       </div>
 
+      <div class="form-group">
+        <label class="form-label">Otter recording <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional — Joe's original audio; transcribed automatically)</span></label>
+        <input class="form-input" id="sc-new-otter" type="file" accept="audio/*,video/*">
+      </div>
+
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Content writer</label>
@@ -631,7 +627,7 @@
 
       <div style="display:flex;gap:12px;margin-top:24px">
         <button class="btn btn-ghost" onclick="closeScriptNewModal()" style="flex:1">Cancel</button>
-        <button class="btn btn-primary" id="sc-new-create-btn" onclick="createScript()" style="flex:2;margin-top:0">Create script</button>
+        <button class="btn btn-primary" id="sc-new-create-btn" onclick="createScript()" style="flex:2;margin-top:0">Create project</button>
       </div>
     </div>
   </div>
@@ -640,6 +636,10 @@
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=20260910c"></script>
+<script>
+  // Local dev only: load env.local.js (dev Supabase project) if present.
+  if (['localhost', '127.0.0.1'].includes(location.hostname)) document.write('<script src="env.local.js"><\/script>');
+</script>
+<script src="app.js?v=20260917h"></script>
 </body>
 </html>

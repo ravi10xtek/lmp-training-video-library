@@ -27,7 +27,11 @@ begin
   );
   return new;
 end;
-$$ language plpgsql security definer;
+$$ language plpgsql security definer
+   -- The trigger runs as supabase_auth_admin, whose search_path does not
+   -- include public, so an unqualified "profiles" fails and Auth returns
+   -- "Database error creating new user" (500) on every signup.
+   set search_path = public;
 
 create trigger on_auth_user_created
   after insert on auth.users

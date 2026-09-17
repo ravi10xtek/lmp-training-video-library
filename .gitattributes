@@ -1,0 +1,13 @@
+# The repo is stored with LF. Without this, a Windows checkout rewrites every
+# file to CRLF and the whole tree shows as modified.
+* text=auto eol=lf
+
+# Binary — never touch these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.mp3  binary
+*.mp4  binary
+*.webm binary
