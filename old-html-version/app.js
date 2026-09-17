@@ -2979,7 +2979,7 @@ if ('serviceWorker' in navigator) {
 const SCRIPT_TTS_FUNCTION = 'script-tts';
 const SCRIPT_AUDIO_BUCKET = 'script-audio';
 // PostgREST needs the FK name to embed profiles twice (writer + editor)
-const SCRIPT_SELECT = `*, videos(title, status), categories(name, slug), subcategories(name),
+const SCRIPT_SELECT = `*, videos(id, title, status, thumbnail_url, storage_key, video_url, description, duration_seconds), categories(name, slug), subcategories(name),
   writer:profiles!scripts_writer_id_fkey(full_name), editor:profiles!scripts_editor_id_fkey(full_name)`;
 
 const SCRIPT_STATUS_META = {
@@ -3029,6 +3029,7 @@ let allProfiles = [];
 let currentScriptId = null;
 let currentScript = null;         // scripts row (+ embeds)
 let scriptVersions = [];          // ascending by version
+let scriptTab = 'script';         // which step tab the project modal shows
 let scriptViewVersionId = null;   // version shown in player + feedback
 let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
 let scriptSending = false;
@@ -3136,67 +3137,221 @@ async function showScriptsPage(sidebarEl) {
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
+  if (currentPage !== 'projects') return;
+  if (canManageScripts() && !allProfiles.length) await loadProfiles();
+  if (currentPage !== 'projects') return;
 
-  const mine   = allScripts.filter(scriptNeedsMe);
-  const others = allScripts.filter(s => !scriptNeedsMe(s));
+  const count = (fn) => allScripts.filter(fn).length;
+  const group = (s) => projGroup(s);
+  const statsHtml = [
+    ['Total projects',   allScripts.length,                                   ''],
+    ['Needs attention',  count(s => group(s) === 'attention'),                'pj-amber'],
+    ['In progress',      count(s => group(s) === 'progress'),                 'pj-blue'],
+    ['Ready to publish', count(s => group(s) === 'ready'),                    'pj-green'],
+    ['Published',        count(s => group(s) === 'done'),                     ''],
+  ].map(([label, n, cls]) => `<div class="pj-stat"><div class="pj-stat-n">${n}</div><div class="pj-stat-l ${cls}">${label}</div></div>`).join('');
 
-  let html = `
-    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+  const opt = (list, sel) => list.map(([v, l]) => `<option value="${escapeHtmlAttr(v)}" ${v === sel ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
+  const f = projFilters;
+  const peopleOf = (idKey, objKey) => [...new Map(allScripts.filter(s => s[idKey]).map(s => [s[idKey], profileName(s[objKey] || {})])).entries()];
+
+  main.innerHTML = `
+    <div class="page-header pj-header">
       <div>
-        <div class="page-title">Projects</div>
-        <div class="page-sub">${allScripts.length} project${allScripts.length !== 1 ? 's' : ''}${mine.length ? ` · <span style="color:#f5a524">${mine.length} waiting on you</span>` : ''}</div>
+        <div class="page-title">Video Projects</div>
+        <div class="page-sub">create andpublish training videos.</div>
       </div>
       ${canManageScripts() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        New project
+        New video project
       </button>` : ''}
-    </div>`;
+    </div>
+    <div class="pj-stats">${statsHtml}</div>
+    <div class="pj-toolbar">
+      <div class="pj-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <input id="pj-q" placeholder="Search projects…" value="${escapeHtmlAttr(f.q)}" oninput="projSetFilter('q', this.value)">
+      </div>
+      <select class="pj-select" onchange="projSetFilter('cat', this.value)">
+        <option value="">Category</option>${opt(allCategories.map(c => [c.id, c.name]), f.cat)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('stage', this.value)">
+        <option value="">Stage</option>${opt(Object.entries(PROJ_STAGES).map(([k, v]) => [k, k === 'review' ? 'Review (script)' : k === 'vreview' ? 'Review (video)' : v.label]), f.stage)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('writer', this.value)">
+        <option value="">Writer</option>${opt(peopleOf('writer_id', 'writer'), f.writer)}
+      </select>
+      <select class="pj-select" onchange="projSetFilter('editor', this.value)">
+        <option value="">Editor</option>${opt(peopleOf('editor_id', 'editor'), f.editor)}
+      </select>
+      <div class="pj-viewtoggle">
+        <button class="${projView === 'list' ? 'active' : ''}" onclick="projSetView('list')">☰ List</button>
+        <button class="${projView === 'board' ? 'active' : ''}" onclick="projSetView('board')">▦ Board</button>
+      </div>
+    </div>
+    <div id="pj-body"></div>`;
+  renderProjectsBody();
+}
 
-  if (!allScripts.length) {
-    html += `<div style="text-align:center;padding:60px 20px;color:var(--muted)">
-      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.3;margin-bottom:16px"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>
-      <div style="font-size:15px">No projects yet.</div>
-      <div style="font-size:13px;margin-top:6px">${canManageScripts() ? 'Click <strong>New project</strong> to start the first one.' : 'Nothing has been assigned to you yet.'}</div>
-    </div>`;
-    main.innerHTML = html;
+// ── Video Projects view (list / board) ───────────────────────
+// Stages derived from the script status + the linked video slot's status.
+const PROJ_STAGES = {
+  script:    { label: 'Script',    step: 1, cls: 'st-amber'  },
+  review:    { label: 'Review',    step: 2, cls: 'st-blue'   },
+  video:     { label: 'Video',     step: 3, cls: 'st-purple' },
+  vreview:   { label: 'Review',    step: 4, cls: 'st-blue'   },
+  completed: { label: 'Completed', step: 5, cls: 'st-green'  },
+  published: { label: 'Published', step: 6, cls: 'st-teal'   },
+};
+const PROJ_STEPS = 6;
+const PROJ_GROUPS = [
+  { key: 'attention', label: 'Needs your attention', dot: '#f5a524' },
+  { key: 'progress',  label: 'In progress',          dot: '#3b82f6' },
+  { key: 'ready',     label: 'Ready to publish',     dot: '#22c55e' },
+  { key: 'done',      label: 'Published',            dot: 'var(--muted)' },
+];
+const PROJ_GROUP_LIMIT = 5;
+let projFilters  = { q: '', cat: '', stage: '', writer: '', editor: '' };
+let projView     = 'list';
+let projExpanded = new Set();
+
+function projStage(s) {
+  if (s.status === 'draft' || s.status === 'changes' || !s.status) return 'script';
+  if (s.status === 'sent') return 'review';
+  const vs = s.videos?.status || 'empty';
+  if (vs === 'to_review') return 'vreview';
+  if (vs === 'completed') return 'completed';
+  if (vs === 'published') return 'published';
+  return 'video'; // empty / raw / to_edit — the video is being made or fixed
+}
+
+function projGroup(s) {
+  const st = projStage(s);
+  if (st === 'published') return 'done';
+  if (scriptNeedsMe(s)) return 'attention';
+  if (st === 'completed') return 'ready';
+  return 'progress';
+}
+
+
+// Who the project is sitting with right now, by stage:
+// script → writer, video → editor, either review → client (reviewer),
+// completed / published → admin.
+function projCurrentPerson(s) {
+  const byRole = (fn, fallback) => { const p = allProfiles.find(fn); return p ? profileName(p) : fallback; };
+  switch (projStage(s)) {
+    case 'script':  return s.writer ? profileName(s.writer) : 'Writer';
+    case 'video':   return s.editor ? profileName(s.editor) : 'Editor';
+    case 'review':
+    case 'vreview': return byRole(p => p.is_reviewer, 'Client');
+    default:        return byRole(p => p.role === 'admin' && !p.is_reviewer, 'Admin');
+  }
+}
+
+function projAvatar(name) {
+  if (!name || name === '—') return '<span class="pj-muted">—</span>';
+  const palette = ['#f97316', '#3b82f6', '#a855f7', '#22c55e', '#ec4899', '#eab308', '#14b8a6'];
+  let h = 0; for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return `<span class="pj-person"><span class="pj-avatar" style="background:${palette[h % palette.length]}">${escapeHtml(name[0].toUpperCase())}</span>${escapeHtml(name)}</span>`;
+}
+
+function projSetFilter(key, val) { projFilters[key] = val; renderProjectsBody(); }
+function projSetView(v) { projView = v; showScriptsPage(document.getElementById('sidebar-scripts-item')); }
+function projToggleGroup(key) { projExpanded.has(key) ? projExpanded.delete(key) : projExpanded.add(key); renderProjectsBody(); }
+
+function projFiltered() {
+  const f = projFilters, q = f.q.trim().toLowerCase();
+  return allScripts.filter(s =>
+    (!q || [s.title, s.videos?.title, s.categories?.name, s.subcategories?.name].some(x => (x || '').toLowerCase().includes(q))) &&
+    (!f.cat || s.category_id === f.cat) &&
+    (!f.stage || projStage(s) === f.stage) &&
+    (!f.writer || s.writer_id === f.writer) &&
+    (!f.editor || s.editor_id === f.editor));
+}
+
+function renderProjectsBody() {
+  const body = document.getElementById('pj-body');
+  if (!body) return;
+  const list = projFiltered();
+
+  if (!allScripts.length || !list.length) {
+    body.innerHTML = `<div class="pj-empty">${!allScripts.length
+      ? (canManageScripts() ? 'No projects yet. Click <strong>New video project</strong> to start the first one.' : 'Nothing has been assigned to you yet.')
+      : 'No projects match these filters.'}</div>`;
     return;
   }
 
-  const card = (s) => {
-    const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
-    const ver  = s.current_version ? `v${s.current_version}` : 'not sent';
-    const where = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
-    return `
-      <div class="script-card ${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
-        <div class="card-tags" style="margin-bottom:0">
-          <span class="card-tag sc-status-${s.status}">Script: ${meta.label}</span>
-          <span class="card-tag sc-version">${ver}</span>
-        </div>
-        <div class="script-card-title">${escapeHtml(s.title)}</div>
-        ${projectStageHtml(s)}
-        <div class="script-card-meta">
-          ${where ? `<span>${escapeHtml(where)}</span>` : ''}
-          ${!s.videos?.title
-              ? '<span style="color:#f5a524">No slot linked</span>'
-              : s.videos.title === s.title ? ''
-              : `<span>Slot: <strong>${escapeHtml(s.videos.title)}</strong></span>`}
-        </div>
-        <div class="script-card-meta">
-          <span>Writer: <strong>${s.writer ? escapeHtml(profileName(s.writer)) : '—'}</strong></span>
-          <span>Editor: <strong>${s.editor ? escapeHtml(profileName(s.editor)) : '—'}</strong></span>
-          <span>· ${timeAgo(s.updated_at || s.created_at)}</span>
-        </div>
+  if (projView === 'board') {
+    body.innerHTML = `<div class="pj-board">${Object.entries(PROJ_STAGES).map(([k, st]) => {
+      const items = list.filter(s => projStage(s) === k);
+      return `<div class="pj-col">
+        <div class="pj-col-head"><span class="pj-stage ${st.cls}">${st.label}</span><span class="pj-muted">${items.length}</span></div>
+        ${items.map(s => `<div class="pj-card" onclick="openScript('${s.id}')">
+          <div class="pj-title">${escapeHtml(s.title)}</div>
+          <div class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › '))}</div>
+          <div class="pj-card-foot">${projAvatar(projCurrentPerson(s))}<span class="pj-muted">${timeAgo(s.updated_at || s.created_at)}</span></div>
+        </div>`).join('') || '<div class="pj-muted" style="padding:8px">—</div>'}
       </div>`;
-  };
-
-  if (mine.length) {
-    html += `<div class="script-section-label">Waiting on you</div><div class="script-grid" style="margin-bottom:28px">${mine.map(card).join('')}</div>`;
-    // Only label the second group when there is one — an "Everything else"
-    // heading over empty space reads as a section that failed to load.
-    if (others.length) html += `<div class="script-section-label">Everything else</div>`;
+    }).join('')}</div>`;
+    return;
   }
-  if (others.length) html += `<div class="script-grid">${others.map(card).join('')}</div>`;
-  main.innerHTML = html;
+
+  body.innerHTML = PROJ_GROUPS.map(g => {
+    const items = list.filter(s => projGroup(s) === g.key);
+    if (!items.length) return '';
+    const expanded = projExpanded.has(g.key);
+    const shown = expanded ? items : items.slice(0, PROJ_GROUP_LIMIT);
+    const more = items.length - shown.length;
+    return `
+      <div class="pj-group">
+        <div class="pj-group-head">
+          <span class="pj-group-dot" style="background:${g.dot}"></span>
+          <span class="pj-group-label">${g.label} (${items.length})</span>
+          ${items.length > PROJ_GROUP_LIMIT ? `<a class="pj-link" onclick="projToggleGroup('${g.key}')">${expanded ? 'Show less' : 'View all'}</a>` : ''}
+        </div>
+        <div class="pj-table-wrap"><table class="pj-table">
+          <thead><tr><th>Project</th><th>Category</th><th>Stage</th><th>Progress</th><th>Writer</th><th>Editor</th><th>Updated</th></tr></thead>
+          <tbody>${shown.map(projRow).join('')}</tbody>
+        </table></div>
+        ${more > 0 ? `<a class="pj-link pj-more" onclick="projToggleGroup('${g.key}')">Show ${more} more project${more !== 1 ? 's' : ''}</a>` : ''}
+      </div>`;
+  }).join('');
+  projStartMarquees(body);
+}
+
+// Names wider than the fixed column slide back and forth instead of wrapping.
+function projStartMarquees(root) {
+  root.querySelectorAll('.pj-marquee').forEach(box => {
+    const inner = box.firstElementChild;
+    const overflow = inner.scrollWidth - box.clientWidth;
+    box.classList.toggle('sliding', overflow > 0);
+    if (overflow > 0) {
+      inner.style.setProperty('--pj-shift', `-${overflow + 8}px`);
+      inner.style.animationDuration = `${Math.max(4, overflow / 20 + 3)}s`;
+    }
+  });
+}
+
+function projRow(s) {
+  const stKey = projStage(s), st = PROJ_STAGES[stKey];
+  const dotColor = { 'st-amber': '#f5a524', 'st-blue': '#3b82f6', 'st-purple': '#a855f7', 'st-green': '#22c55e', 'st-teal': 'var(--teal)' }[st.cls];
+  const dots = Array.from({ length: PROJ_STEPS }, (_, k) => k + 1).map(i => `<span class="pj-dot" style="${i <= st.step ? `background:${dotColor}` : ''}"></span>`).join('');
+  const thumb = s.videos?.thumbnail_url
+    ? `<img src="${escapeHtmlAttr(s.videos.thumbnail_url)}" alt="" loading="lazy">`
+    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="5" width="15" height="14" rx="2"/><path d="m17 10 5-3v10l-5-3"/></svg>`;
+  return `
+    <tr class="${scriptNeedsMe(s) ? 'needs-me' : ''}" onclick="openScript('${s.id}')">
+      <td><div class="pj-proj"><div class="pj-thumb">${thumb}</div><div>
+        <div class="pj-marquee"><span class="pj-title">${escapeHtml(s.title)}</span></div>
+        <div class="pj-marquee"><span class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ') || '—')}</span></div>
+      </div></div></td>
+      <td>${s.categories?.name ? `<span class="pj-chip">${escapeHtml(s.categories.name)}</span>` : '<span class="pj-muted">—</span>'}</td>
+      <td><span class="pj-stage ${st.cls}">${st.label}</span></td>
+      <td><div class="pj-dots">${dots}</div></td>
+      <td>${projAvatar(s.writer ? profileName(s.writer) : '—')}</td>
+      <td>${projAvatar(s.editor ? profileName(s.editor) : '—')}</td>
+      <td class="pj-muted">${timeAgo(s.updated_at || s.created_at)}</td>
+    </tr>`;
 }
 
 // ── New project (starts with its script) ─────────────────────
@@ -3327,6 +3482,7 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
+  if (id !== currentScriptId) scriptTab = 'script';
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
@@ -3353,7 +3509,21 @@ function closeScriptModal(e) {
   resetScriptComposer();
   document.getElementById('script-modal').classList.remove('open');
   currentScriptId = null; currentScript = null;
+  projectAssets = []; projectAssetUrls = {}; projVideoToken++;
+  scriptTab = 'script';
   scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
+}
+
+function setScriptTab(tab) {
+  if (tab === scriptTab) return;
+  scriptTab = tab;
+  stopScriptPlayer();
+  // Back on the script tab, the player should follow the version being viewed again
+  if (tab === 'script') scriptPlayerLoad(scriptDraftPreview || viewedVersion()?.paragraphs || []);
+  document.getElementById('sc-pane-script')?.toggleAttribute('hidden', tab === 'video');
+  document.getElementById('sc-pane-video')?.toggleAttribute('hidden', tab !== 'video');
+  document.querySelectorAll('.sc-step').forEach((b, i) => b.classList.toggle('active', (i === 1) === (tab === 'video')));
+  if (tab === 'video') { loadProjectVideo(); loadProjectAssets(); }
 }
 
 function viewedVersion() {
@@ -3415,6 +3585,14 @@ function renderScriptModal() {
           : `<span class="sc-team-name">${person(s.editor)}${s.editor_id === currentUser?.id ? ' (you)' : ''}</span>`}
       </div>
     </div>`;
+
+  // ── Step tabs: 1 Script (narration + approval), 2 Video (the produced video + assets) ──
+  html += `
+    <div class="sc-steps">
+      <button class="sc-step ${scriptTab === 'script' ? 'active' : ''}" onclick="setScriptTab('script')"><span class="sc-step-n">1</span>Script</button>
+      <button class="sc-step ${scriptTab === 'video' ? 'active' : ''}" onclick="setScriptTab('video')"><span class="sc-step-n">2</span>Video</button>
+    </div>
+    <div id="sc-pane-script" ${scriptTab === 'video' ? 'hidden' : ''}>`;
 
   // ── Version tabs (only once there's more than one round) ──
   if (scriptVersions.length > 1) {
@@ -3531,9 +3709,13 @@ function renderScriptModal() {
       <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
     </div>`;
 
+  // Close the script pane; the video pane holds the produced video and its assets
+  html += `</div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s)}</div>`;
+
   body.innerHTML = html;
 
   // Wire the player to whatever is showing
+  if (scriptTab === 'video') { loadProjectVideo(); loadProjectAssets(); }
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
 }
 
@@ -4120,4 +4302,333 @@ function subscribeToScriptChanges() {
       }
     })
     .subscribe();
+}
+
+// ══════════════════════════════════════════════════════
+// PROJECT ASSETS — the video plus everything that goes with it
+// (finalized audio, original audio, transcript, other files).
+// Shown at the top of the project modal beside the slot's video.
+// ══════════════════════════════════════════════════════
+const PROJECT_ASSETS_BUCKET = 'project-assets';
+const PROJ_ASSET_KINDS = {
+  final_audio:    { label: 'Finalized audio', accept: 'audio/*',                    empty: 'No finalized narration yet.' },
+  original_audio: { label: 'Original audio',  accept: 'audio/*,video/*',            empty: 'No original recording yet.' },
+  transcript:     { label: 'Transcript',      accept: '.txt,.srt,.vtt,text/plain',  empty: 'No transcript yet.' },
+  other:          { label: 'Other assets',    accept: '*/*',                        empty: 'No other files yet.' },
+};
+let projectAssets    = [];   // rows for currentScriptId
+let projectAssetUrls = {};   // storage_path → signed URL
+let projVideoToken   = 0;    // guards a slow playback lookup against a modal switch
+
+const canAddProjectAssets   = (s) => isStaffUser() || isScriptAssignee(s);
+const canDeleteProjectAsset = (a) => isStaffUser() || a.created_by === currentUser?.id;
+
+function formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+// The hub's skeleton — panels fill in once the assets and playback URL load.
+function renderProjectHubHtml(s) {
+  const v = s.videos;
+  const manager = canManageScripts();
+  const panels = Object.entries(PROJ_ASSET_KINDS).map(([kind, k]) => `
+    <div class="pa-panel ${kind === 'transcript' || kind === 'other' ? 'pa-panel-tall' : ''}" id="pa-panel-${kind}">
+      <div class="pa-panel-head">
+        <span class="pa-panel-title">${k.label}</span>
+        <span class="pa-panel-actions" id="pa-actions-${kind}"></span>
+      </div>
+      <div class="pa-panel-body" id="pa-body-${kind}"><span class="pa-empty">Loading…</span></div>
+    </div>`).join('');
+
+  const videoInner = v
+    ? `<div class="pa-video-msg">Loading video…</div>`
+    : `<div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div>`;
+
+  return `
+    <div class="pa-hub">
+      <div class="pa-main">
+        <div class="pa-video" id="pa-video">${videoInner}</div>
+        ${v ? `<div class="pa-video-foot">
+          <span class="pa-video-title">${escapeHtml(v.title)}</span>
+          <span class="pa-item-meta">${v.status ? `Slot status: ${escapeHtml(String(v.status).replace('_', ' '))}` : ''}${v.duration_seconds ? ` · ${formatDuration(v.duration_seconds)}` : ''}</span>
+          ${v.storage_key || v.video_url ? `<a class="sc-link" onclick="openVideo('${v.id}')">Open in library</a>` : ''}
+        </div>` : ''}
+      </div>
+      <div class="pa-side">${panels}</div>
+    </div>`;
+}
+
+async function loadProjectVideo() {
+  const s = currentScript, v = s?.videos;
+  const box = document.getElementById('pa-video');
+  if (!v || !box) return;
+  const token = ++projVideoToken;
+  if (!v.storage_key && !v.video_url) {
+    const hint = (s.editor_id === currentUser?.id || isStaffUser()) ? ' Upload it from the library once it is produced.' : '';
+    box.innerHTML = `<div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet.${hint}</span></div>`;
+    return;
+  }
+  try {
+    const url = await resolveWasabiPlaybackUrl(v);
+    if (token !== projVideoToken) return;
+    if (!url) throw new Error('no url');
+    const poster = v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : '';
+    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${url}">Your browser does not support HTML5 video.</video>`;
+  } catch (err) {
+    if (token !== projVideoToken) return;
+    console.warn('[project video]', err);
+    box.innerHTML = `<div class="pa-video-msg">Could not load the video. <a class="sc-link" onclick="loadProjectVideo()">Retry</a></div>`;
+  }
+}
+
+async function loadProjectAssets() {
+  const id = currentScriptId;
+  if (!id) return;
+  const { data, error } = await sb.from('project_assets')
+    .select('*, profiles:created_by(full_name)')
+    .eq('script_id', id)
+    .order('created_at', { ascending: false });
+  if (id !== currentScriptId) return;
+  if (error) {
+    console.warn('[project assets] load failed:', error.message);
+    projectAssets = [];
+    renderProjectAssets(error.message);
+    return;
+  }
+  projectAssets = data || [];
+  projectAssetUrls = {};
+  const paths = projectAssets.map(a => a.storage_path).filter(Boolean);
+  if (paths.length) {
+    const { data: signed, error: sErr } = await sb.storage.from(PROJECT_ASSETS_BUCKET).createSignedUrls(paths, 60 * 60);
+    if (id !== currentScriptId) return;
+    if (sErr) console.warn('[project assets] sign failed:', sErr.message);
+    (signed || []).forEach(d => { if (d.signedUrl) projectAssetUrls[d.path] = d.signedUrl; });
+  }
+  renderProjectAssets();
+}
+
+function renderProjectAssets(loadError) {
+  const s = currentScript;
+  if (!s) return;
+  const canAdd = canAddProjectAssets(s);
+  const v = s.videos;
+
+  Object.entries(PROJ_ASSET_KINDS).forEach(([kind, k]) => {
+    const body = document.getElementById(`pa-body-${kind}`);
+    const actions = document.getElementById(`pa-actions-${kind}`);
+    if (!body || !actions) return;
+
+    let act = '';
+    if (canAdd) {
+      if (kind === 'transcript') {
+        if (v?.storage_key && isStaffUser()) act += `<button class="pa-add" id="pa-transcribe-btn" onclick="transcribeProjectVideo()">Transcribe video</button>`;
+        act += `<button class="pa-add" onclick="pasteProjectTranscript()">Paste</button>`;
+      }
+      act += `<button class="pa-add" onclick="pickProjectAsset('${kind}')">+ Upload</button>`;
+    }
+    actions.innerHTML = act;
+
+    if (loadError) { body.innerHTML = `<span class="pa-empty">Could not load (${escapeHtml(loadError)}).</span>`; return; }
+    const items = projectAssets.filter(a => a.kind === kind);
+    // Finalized audio and transcript fill in automatically from the approved script (step 1)
+    const derived = kind === 'final_audio' ? approvedAudioItemHtml(s) : kind === 'transcript' ? approvedTranscriptItemHtml(s) : '';
+    if (!items.length && !derived) { body.innerHTML = `<span class="pa-empty">${k.empty}</span>`; return; }
+    body.innerHTML = derived + items.map(a => projectAssetItemHtml(a)).join('');
+  });
+}
+
+// ── Derived from step 1: the approved script version ─────────
+function approvedScriptVersion(s) {
+  if (s?.status !== 'approved') return null;
+  return scriptVersions.find(v => v.id === s.approved_version_id) || scriptVersions.at(-1) || null;
+}
+
+function approvedPendingNote(s) {
+  const latest = scriptVersions.at(-1);
+  const state = s.status === 'sent' ? `v${latest?.version} is with Joe` : s.status === 'changes' ? `Joe asked for changes on v${latest?.version}` : 'the script is still being written';
+  return `<span class="pa-empty">Fills in automatically once Joe approves the script — ${state}.</span>`;
+}
+
+function approvedAudioItemHtml(s) {
+  const v = approvedScriptVersion(s);
+  if (!v) return approvedPendingNote(s);
+  const withAudio = (v.paragraphs || []).filter(p => p.audio_path).length;
+  if (!withAudio) return `<span class="pa-empty">Approved v${v.version} has no rendered audio yet.</span>`;
+  return `
+    <div class="pa-item pa-derived">
+      <div class="pa-item-row">
+        <span class="pa-item-name">Approved narration · v${v.version}</span>
+        <span class="pa-chip-auto">from script</span>
+      </div>
+      <div class="pa-item-row">
+        <button class="sp-btn primary" style="padding:6px 12px;font-size:12px" onclick="paPlayApproved()"><svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg> Play all</button>
+        <button class="sp-btn" style="padding:6px 12px;font-size:12px" onclick="spTogglePause()">Pause</button>
+        <button class="sp-btn" style="padding:6px 12px;font-size:12px" onclick="stopScriptPlayer()">Stop</button>
+      </div>
+      <span class="pa-item-meta">${withAudio} paragraph${withAudio !== 1 ? 's' : ''} · preview voice · approved ${s.approved_at ? timeAgo(s.approved_at) : ''}. Upload Joe's recorded narration below to replace it.</span>
+    </div>`;
+}
+
+function approvedTranscriptItemHtml(s) {
+  const v = approvedScriptVersion(s);
+  if (!v) return approvedPendingNote(s);
+  return `
+    <div class="pa-item pa-derived">
+      <div class="pa-item-row">
+        <span class="pa-item-name">Approved script · v${v.version}</span>
+        <span class="pa-chip-auto">from script</span>
+        <button class="pa-del" onclick="copyProjectText('approved', this)">Copy</button>
+      </div>
+      <div class="pa-transcript" id="pa-text-approved">${escapeHtml(v.body || '')}</div>
+      <span class="pa-item-meta">${v.total_count || (v.paragraphs || []).length} paragraphs · approved ${s.approved_at ? timeAgo(s.approved_at) : ''}</span>
+    </div>`;
+}
+
+async function paPlayApproved() {
+  const v = approvedScriptVersion(currentScript);
+  if (!v) return;
+  stopScriptPlayer();
+  await scriptPlayerLoad(v.paragraphs || []);
+  if (scriptTab === 'video') spPlayAll();
+}
+
+function projectAssetItemHtml(a) {
+  const url = a.storage_path ? projectAssetUrls[a.storage_path] : null;
+  const who = a.profiles ? profileName(a.profiles) : '';
+  const meta = [who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · ');
+  const del = canDeleteProjectAsset(a) ? `<button class="pa-del" title="Remove" onclick="deleteProjectAsset('${a.id}')">✕</button>` : '';
+  const isAudio = (a.mime_type || '').startsWith('audio/') || /\.(mp3|m4a|wav|ogg|webm|aac)$/i.test(a.file_name || '');
+
+  if (a.kind === 'transcript' && a.body) {
+    return `
+      <div class="pa-item">
+        <div class="pa-item-row">
+          <span class="pa-item-name">${escapeHtml(a.file_name || 'Transcript')}</span>
+          <button class="pa-del" onclick="copyProjectText('${a.id}', this)">Copy</button>${del}
+        </div>
+        <div class="pa-transcript" id="pa-text-${a.id}">${escapeHtml(a.body)}</div>
+        <span class="pa-item-meta">${meta}</span>
+      </div>`;
+  }
+  const name = escapeHtml(a.file_name || 'File');
+  return `
+    <div class="pa-item">
+      <div class="pa-item-row">
+        ${url ? `<a class="pa-item-name" href="${url}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
+              : `<span class="pa-item-name">${name}</span>`}
+        ${del}
+      </div>
+      ${url && isAudio ? `<audio controls preload="none" src="${url}"></audio>` : ''}
+      <span class="pa-item-meta">${meta}</span>
+    </div>`;
+}
+
+function copyProjectText(id, btn) {
+  const text = document.getElementById(`pa-text-${id}`)?.textContent || '';
+  navigator.clipboard?.writeText(text).then(() => {
+    const orig = btn.textContent; btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = orig; }, 1500);
+  }).catch(() => showToast('Could not copy', 'error'));
+}
+
+function pickProjectAsset(kind) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = PROJ_ASSET_KINDS[kind]?.accept || '*/*';
+  input.multiple = kind === 'other';
+  input.onchange = () => { [...input.files].forEach(f => uploadProjectAsset(kind, f)); };
+  input.click();
+}
+
+async function uploadProjectAsset(kind, file) {
+  const scriptId = currentScriptId;
+  if (!scriptId || !file) return;
+  const body = document.getElementById(`pa-body-${kind}`);
+  const status = document.createElement('div');
+  status.className = 'pa-item pa-uploading';
+  status.textContent = `Uploading ${file.name}…`;
+  body?.prepend(status);
+
+  await ensureFreshSession();
+  try {
+    const safe = file.name.replace(/[^\w.\-]+/g, '_').slice(-80);
+    const path = `${scriptId}/${kind}/${Date.now()}-${safe}`;
+    const { error: upErr } = await sb.storage.from(PROJECT_ASSETS_BUCKET)
+      .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
+    if (upErr) throw upErr;
+
+    // A small text transcript file is also stored as text so it can be read in place
+    let text = null;
+    if (kind === 'transcript' && file.size < 512 * 1024) {
+      try { text = (await file.text()).trim() || null; } catch (_) { /* keep the file only */ }
+    }
+
+    const { error: insErr } = await sb.from('project_assets').insert({
+      script_id: scriptId, kind, storage_path: path, file_name: file.name,
+      mime_type: file.type || null, size_bytes: file.size, body: text, created_by: currentUser.id,
+    });
+    if (insErr) throw insErr;
+    showToast(`${PROJ_ASSET_KINDS[kind].label}: ${file.name} added`, 'success');
+  } catch (err) {
+    console.error('[project assets] upload failed:', err);
+    showToast('Upload failed: ' + (err?.message || 'unknown error'), 'error');
+  } finally {
+    status.remove();
+    if (scriptId === currentScriptId) loadProjectAssets();
+  }
+}
+
+async function pasteProjectTranscript() {
+  const text = prompt('Paste the transcript text:');
+  if (text == null || !text.trim()) return;
+  const { error } = await sb.from('project_assets').insert({
+    script_id: currentScriptId, kind: 'transcript', body: text.trim(),
+    file_name: 'Pasted transcript', created_by: currentUser.id,
+  });
+  if (error) { showToast('Could not save transcript: ' + error.message, 'error'); return; }
+  loadProjectAssets();
+}
+
+// Whisper on the slot's stored video, saved as a transcript asset
+async function transcribeProjectVideo() {
+  const s = currentScript, v = s?.videos;
+  if (!v?.storage_key) { showToast('No stored video to transcribe', 'error'); return; }
+  const scriptId = currentScriptId;
+  const btn = document.getElementById('pa-transcribe-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Transcribing…'; }
+  try {
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { storageKey: v.storage_key } });
+    const detail = error ? await parseFunctionError(error) : (data?.error || null);
+    if (detail) {
+      throw new Error(/25\s*MB|too large|over OpenAI/i.test(detail)
+        ? 'Video is over 25MB — transcribe it from the library (it can extract the audio there), then paste or upload the text here.'
+        : detail);
+    }
+    const text = (data?.text || '').trim();
+    if (!text) throw new Error('empty transcript');
+    if (scriptId !== currentScriptId) return;
+    const { error: insErr } = await sb.from('project_assets').insert({
+      script_id: scriptId, kind: 'transcript', body: text,
+      file_name: `Transcript of ${v.title}`, created_by: currentUser.id,
+    });
+    if (insErr) throw insErr;
+    showToast('Transcript saved', 'success');
+    loadProjectAssets();
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Transcribe video'; }
+  }
+}
+
+async function deleteProjectAsset(id) {
+  const a = projectAssets.find(x => x.id === id);
+  if (!a) return;
+  if (!confirm(`Remove "${a.file_name || 'this item'}" from the project?`)) return;
+  const { error } = await sb.from('project_assets').delete().eq('id', id);
+  if (error) { showToast('Could not remove: ' + error.message, 'error'); return; }
+  if (a.storage_path) await sb.storage.from(PROJECT_ASSETS_BUCKET).remove([a.storage_path]).catch(() => {});
+  loadProjectAssets();
 }
