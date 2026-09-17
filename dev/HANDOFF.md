@@ -50,8 +50,9 @@ Gaps noted:
 - [x] Test accounts created (password = `DEV_USER_PASSWORD` in `dev/.env.dev`)
 - [x] Local app confirmed to use the dev project
 - [ ] User login not yet confirmed by the user
-- [ ] **Edge Functions not deployed to dev.** "Preview failed: Failed to send a request to the Edge Function" is expected until they are
-- [ ] Secrets not set in dev (OpenAI, Wasabi, VAPID)
+- [x] Edge Functions deployed to dev: `script-tts`, `transcribe`, `notify-review`, and (2026-09-17) `wasabi-upload-init`, `wasabi-transfer`, `wasabi-playback-url`
+- [x] `OPENAI_API_KEY` secret set in dev
+- [ ] **Wasabi secrets not set in dev** (`WASABI_REGION`, `WASABI_BUCKET`, `WASABI_ACCESS_KEY_ID`, `WASABI_SECRET_ACCESS_KEY`, optional `WASABI_ENDPOINT`) — video upload and playback fail with a 500 from the `wasabi-*` functions until they are. VAPID keys for push also unset.
 - [ ] Nothing committed
 
 | Account | Role |

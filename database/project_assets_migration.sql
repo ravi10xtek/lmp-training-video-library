@@ -1,6 +1,6 @@
 -- ══════════════════════════════════════════════════════════════
 -- PROJECT ASSETS — everything that belongs to a video project
--- (finalized audio, original audio, transcript, other files)
+-- (finalized audio, Otter audio + transcript, video transcript, other files)
 -- shown in the project modal beside the slot's video.
 --
 -- Files live in the private `project-assets` bucket under
@@ -12,7 +12,7 @@ begin;
 create table if not exists project_assets (
   id           uuid primary key default gen_random_uuid(),
   script_id    uuid not null references scripts(id) on delete cascade,
-  kind         text not null check (kind in ('final_audio','original_audio','transcript','other')),
+  kind         text not null check (kind in ('final_audio','original_audio','otter_transcript','transcript','other')),
   storage_path text,                       -- object key in `project-assets` (null for text transcripts)
   file_name    text,
   mime_type    text,

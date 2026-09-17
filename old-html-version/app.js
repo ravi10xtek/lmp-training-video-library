@@ -72,6 +72,7 @@ let editingVideoId = null;
 let pendingWasabiFile = null;
 let pendingThumbnail = null;
 let currentVideoId = null;
+let vidChangesOpen = false;   // Joe clicked "Send back for edits": video feedback is showing
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStream = null;
@@ -160,7 +161,7 @@ async function initApp(user) {
     badge.textContent = 'Admin';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
-    document.getElementById('sidebar-manage-item').classList.remove('hidden');
+    if (!profile?.is_reviewer) document.getElementById('sidebar-manage-item').classList.remove('hidden');
   }
   if (profile?.is_reviewer) {
     badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
@@ -227,6 +228,7 @@ async function loadVideos() {
   allVideos = data || [];
 
   updateCounts();
+  if (currentPage === 'review') { showReviewPage(); return; }
   renderVideos();
 }
 
@@ -250,7 +252,7 @@ function updateCounts() {
 
   // Role-specific workflow folders
   const setCount = (id, n) => { const el = document.getElementById(id); if (el) el.textContent = n; };
-  setCount('count-to-review', allVideos.filter(v => v.status === 'to_review').length);
+  setCount('count-to-review', reviewQueueCount());
   setCount('count-to-edit',   allVideos.filter(v => v.status === 'to_edit').length);
   setCount('count-completed', allVideos.filter(v => v.status === 'completed').length);
 
@@ -287,6 +289,77 @@ function filterCategory(slug, el) {
 function filterSubcat(slug) {
   currentSubcatFilter = slug;
   renderVideos();
+}
+
+// ══════════════════════════════════════════════════════
+// TO REVIEW — the client's one page: scripts waiting for a decision and
+// videos waiting for review, as simple cards that work on a phone.
+// ══════════════════════════════════════════════════════
+const reviewQueueCount = () =>
+  allVideos.filter(v => v.status === 'to_review').length +
+  (isReviewerUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
+
+async function showReviewPage(sidebarEl) {
+  if (!isReviewerUser()) return;
+  currentPage = 'review';
+  currentStatus = null;
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('folder-to-review'))?.classList.add('active');
+  if (typeof closeSidebar === 'function') closeSidebar();
+
+  const main = document.getElementById('main-content');
+  if (!allScripts.length) { main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading…</div>'; await loadScripts(); }
+  if (currentPage !== 'review') return;
+
+  const byTime = (a, b) => new Date(a.updated_at || a.created_at) - new Date(b.updated_at || b.created_at);
+  const scripts = allScripts.filter(s => s.status === 'sent').sort(byTime);
+  const videos = allVideos.filter(v => v.status === 'to_review').sort(byTime);
+  const projectOf = (v) => allScripts.find(s => s.video_id === v.id);
+  const where = (x) => [x.categories?.name, x.subcategories?.name].filter(Boolean).join(' › ');
+
+  const scriptCard = (s) => `
+    <div class="rv-card" onclick="openScript('${s.id}')">
+      <div class="rv-card-ico">${PJ_STAGE_ICONS.script}</div>
+      <div class="rv-card-body">
+        <div class="rv-card-title">${escapeHtml(s.title)}</div>
+        <div class="rv-card-sub">${escapeHtml(where(s) || 'Script')} · v${s.current_version || 1} · sent ${timeAgo(s.updated_at || s.created_at)}</div>
+      </div>
+      <div class="rv-card-cta">Listen &amp; decide ›</div>
+    </div>`;
+  const videoCard = (v) => {
+    const p = projectOf(v);
+    const open = p ? `openScriptTab('${p.id}', 'video')` : `openVideo('${v.id}')`;
+    return `
+    <div class="rv-card" onclick="${open}">
+      <div class="rv-card-ico rv-thumb">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : PJ_STAGE_ICONS.video}</div>
+      <div class="rv-card-body">
+        <div class="rv-card-title">${escapeHtml(v.title)}</div>
+        <div class="rv-card-sub">${escapeHtml(where(v) || 'Video')}${(v.review_round || 1) > 1 ? ` · revision ${v.review_round}` : ''} · ${timeAgo(v.updated_at || v.created_at)}</div>
+      </div>
+      <div class="rv-card-cta">Watch &amp; decide ›</div>
+    </div>`;
+  };
+
+  const total = scripts.length + videos.length;
+  main.innerHTML = `
+    <div class="page-header">
+      <div class="page-title">To Review</div>
+      <div class="page-sub">${total ? `${total} item${total !== 1 ? 's' : ''} waiting for you` : 'Nothing waiting for you right now'}</div>
+    </div>
+    <div class="rv-section">
+      <div class="rv-section-head">${PJ_STAGE_ICONS.script} Scripts <span class="pj-muted">${scripts.length}</span></div>
+      ${scripts.length ? scripts.map(scriptCard).join('') : '<div class="rv-empty">No scripts waiting. You get a notification when a writer sends one.</div>'}
+    </div>
+    <div class="rv-section">
+      <div class="rv-section-head">${PJ_STAGE_ICONS.video} Videos <span class="pj-muted">${videos.length}</span></div>
+      ${videos.length ? videos.map(videoCard).join('') : '<div class="rv-empty">No videos waiting. Approved scripts come back here once the video is produced.</div>'}
+    </div>`;
+}
+
+// Open a project straight on a given tab (the review page opens videos on the Video tab)
+async function openScriptTab(id, tab) {
+  await openScript(id);
+  if (currentScriptId === id && tab === 'video') setScriptTab('video');
 }
 
 function filterStatus(status, el) {
@@ -587,6 +660,7 @@ async function openVideo(id) {
   currentVideoId = v.id;
   const isAdmin = currentProfile?.role === 'admin';
   const isReviewer = currentProfile?.is_reviewer === true;
+  vidChangesOpen = false;
   const feedbackSection = document.getElementById('feedback-section');
   if (isAdmin || isReviewer) {
     feedbackSection.classList.remove('hidden');
@@ -594,6 +668,7 @@ async function openVideo(id) {
   } else {
     feedbackSection.classList.add('hidden');
   }
+  applyVideoReviewMode(v);
 
   // Transcription — admin only. Shown for every video: Wasabi-backed videos
   // transcribe server-side; embedded/linked videos fall back to a local file pick.
@@ -638,6 +713,13 @@ async function openVideo(id) {
 }
 
 function closeVideoModal() {
+  if (paWorkflowMounted()) {
+    // Ran from the project modal's Video tab: keep it open and refresh the slot state
+    resetComposer();
+    const id = currentScriptId;
+    setTimeout(() => { if (id && id === currentScriptId) openScript(id); }, 0);
+    return;
+  }
   document.getElementById('video-modal').classList.remove('open');
   document.getElementById('video-player').innerHTML = '';
   resetComposer();
@@ -660,7 +742,7 @@ async function loadFeedback(videoId) {
     .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: true });   // oldest at the top, newest just above the composer
 
   if (error) {
     list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
@@ -668,7 +750,7 @@ async function loadFeedback(videoId) {
   }
 
   if (!data || data.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one above.</div>';
+    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one below.</div>';
     return;
   }
 
@@ -991,6 +1073,7 @@ async function submitComment() {
 
     resetComposer();
     showToast('Comment posted', 'success');
+    if (vidChangesOpen) { vidChangesPostedThisRound = true; document.getElementById('video-changes-cancel')?.classList.add('hidden'); }
     loadFeedback(currentVideoId);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
@@ -1864,6 +1947,7 @@ function notifClick(videoId, scriptId) {
   if (!videoId && !scriptId) return;
   document.getElementById('notif-panel').classList.add('hidden');
   notifPanelOpen = false;
+  if (isReviewerUser() && currentPage !== 'review') showReviewPage(document.getElementById('folder-to-review'));
   if (scriptId) { openScript(scriptId); return; }
   const v = allVideos.find(x => x.id === videoId);
   if (v && (v.video_url || v.storage_key)) openVideo(videoId);
@@ -1877,6 +1961,44 @@ const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill
 const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Complete';
 
 // Joe sends the video back to Ravi's TO EDIT folder with his feedback.
+// While Joe is deciding on a video, the feedback section stays hidden until he
+// clicks "Send back for edits"; then the decision buttons give way to the notes
+// and a Done button that records the decision.
+function applyVideoReviewMode(v) {
+  const deciding = currentProfile?.is_reviewer === true && v?.status === 'to_review';
+  const fb = document.getElementById('feedback-section');
+  const buttons = document.querySelector('#reviewer-section .reviewer-buttons');
+  const foot = document.getElementById('video-changes-foot');
+  const status = document.getElementById('reviewer-status');
+  const send = document.getElementById('comment-send-btn');
+  if (!deciding) {
+    foot?.classList.add('hidden'); buttons?.classList.remove('hidden');
+    if (send) send.innerHTML = COMMENT_SEND_HTML;
+    return;
+  }
+  fb?.classList.toggle('hidden', !vidChangesOpen);
+  buttons?.classList.toggle('hidden', vidChangesOpen);
+  foot?.classList.toggle('hidden', !vidChangesOpen);
+  document.getElementById('video-changes-cancel')?.classList.toggle('hidden', vidChangesOpen && vidChangesPostedThisRound);
+  if (send) send.innerHTML = vidChangesOpen ? COMMENT_SEND_HTML.replace('Send', 'Add more') : COMMENT_SEND_HTML;
+  if (status && vidChangesOpen) setStatusText(status, 'Leave your notes for Ravi, then click Done to send the video back.');
+}
+const COMMENT_SEND_HTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Send';
+let vidChangesPostedThisRound = false;
+function openVideoChanges() {
+  vidChangesOpen = true; vidChangesPostedThisRound = false;
+  const v = allVideos.find(x => x.id === currentVideoId);
+  applyVideoReviewMode(v);
+  document.getElementById('feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function cancelVideoChanges() {
+  vidChangesOpen = false;
+  resetComposer();
+  const v = allVideos.find(x => x.id === currentVideoId);
+  applyVideoReviewMode(v);
+  updateReviewedBtnState(v);
+}
+
 async function sendBackForEdits() {
   await reviewerDecision({
     status: 'to_edit',
@@ -3030,6 +3152,8 @@ let currentScriptId = null;
 let currentScript = null;         // scripts row (+ embeds)
 let scriptVersions = [];          // ascending by version
 let scriptTab = 'script';         // which step tab the project modal shows
+let scChangesOpen = false;        // reviewer clicked "Needs changes": feedback section is showing
+let scChangesPosted = false;      // …and has posted at least one note (Cancel goes away)
 let scriptViewVersionId = null;   // version shown in player + feedback
 let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
 let scriptSending = false;
@@ -3064,7 +3188,7 @@ async function loadScripts() {
   allScripts = data || [];
 
   // Sidebar entry + bell for anyone who has a project, not just staff
-  const hasScripts = isStaffUser() || allScripts.length > 0;
+  const hasScripts = !isReviewerUser() && (isStaffUser() || allScripts.length > 0);
   document.getElementById('sidebar-scripts')?.classList.toggle('hidden', !hasScripts);
   if (hasScripts) document.getElementById('notif-wrap')?.classList.remove('hidden');
   updateScriptsCount();
@@ -3087,6 +3211,8 @@ function scriptNeedsMe(s) {
 }
 
 function updateScriptsCount() {
+  const rc = document.getElementById('count-to-review');
+  if (rc) rc.textContent = reviewQueueCount();
   const el = document.getElementById('count-scripts');
   if (!el) return;
   // Every other sidebar badge counts the things behind it, so this one does
@@ -3129,6 +3255,7 @@ function renderModalScriptLink(videoId) {
 
 // ── Projects page (a project = one video: script, then video) ─
 async function showScriptsPage(sidebarEl) {
+  projGroupView = null;   // a fresh visit starts at the overview
   currentPage = 'projects';
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
@@ -3197,23 +3324,30 @@ async function showScriptsPage(sidebarEl) {
 // Stages derived from the script status + the linked video slot's status.
 const PROJ_STAGES = {
   script:    { label: 'Script',    step: 1, cls: 'st-amber'  },
-  review:    { label: 'Review',    step: 2, cls: 'st-blue'   },
+  review:    { label: 'Review',    step: 2, cls: 'st-blue', icon: 'script' },
   video:     { label: 'Video',     step: 3, cls: 'st-purple' },
-  vreview:   { label: 'Review',    step: 4, cls: 'st-blue'   },
+  vreview:   { label: 'Review',    step: 4, cls: 'st-blue', icon: 'video' },
   completed: { label: 'Completed', step: 5, cls: 'st-green'  },
   published: { label: 'Published', step: 6, cls: 'st-teal'   },
 };
 const PROJ_STEPS = 6;
+// Which review a "Review" badge means: the script (paper) or the video (camera)
+const PJ_STAGE_ICONS = {
+  script: '<svg class="pj-stage-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
+  video:  '<svg class="pj-stage-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="m16 10 6-3v10l-6-3"/></svg>',
+};
+const projStageBadge = (st) => `<span class="pj-stage ${st.cls}" title="${st.icon === 'script' ? 'Script review (with Joe)' : st.icon === 'video' ? 'Video review (with Joe)' : st.label}">${PJ_STAGE_ICONS[st.icon] || ''}${st.label}</span>`;
 const PROJ_GROUPS = [
   { key: 'attention', label: 'Needs your attention', dot: '#f5a524' },
   { key: 'progress',  label: 'In progress',          dot: '#3b82f6' },
   { key: 'ready',     label: 'Ready to publish',     dot: '#22c55e' },
   { key: 'done',      label: 'Published',            dot: 'var(--muted)' },
 ];
-const PROJ_GROUP_LIMIT = 5;
+const PROJ_GROUP_LIMIT = 4;
+let projPage = {};                // group key → current page (0-based) when not expanded
 let projFilters  = { q: '', cat: '', stage: '', writer: '', editor: '' };
 let projView     = 'list';
-let projExpanded = new Set();
+let projGroupView = null;         // group key when "View all" opened a single group as its own view
 
 function projStage(s) {
   if (s.status === 'draft' || s.status === 'changes' || !s.status) return 'script';
@@ -3257,7 +3391,10 @@ function projAvatar(name) {
 
 function projSetFilter(key, val) { projFilters[key] = val; renderProjectsBody(); }
 function projSetView(v) { projView = v; showScriptsPage(document.getElementById('sidebar-scripts-item')); }
-function projToggleGroup(key) { projExpanded.has(key) ? projExpanded.delete(key) : projExpanded.add(key); renderProjectsBody(); }
+// "View all" opens the group as its own view; the back link returns to the overview
+function projOpenGroup(key) { projGroupView = key; renderProjectsBody(); document.getElementById('main-content')?.scrollTo?.(0, 0); window.scrollTo(0, 0); }
+function projCloseGroup() { projGroupView = null; renderProjectsBody(); }
+function projSetPage(key, page) { projPage[key] = Math.max(0, page); renderProjectsBody(); }
 
 function projFiltered() {
   const f = projFilters, q = f.q.trim().toLowerCase();
@@ -3285,7 +3422,7 @@ function renderProjectsBody() {
     body.innerHTML = `<div class="pj-board">${Object.entries(PROJ_STAGES).map(([k, st]) => {
       const items = list.filter(s => projStage(s) === k);
       return `<div class="pj-col">
-        <div class="pj-col-head"><span class="pj-stage ${st.cls}">${st.label}</span><span class="pj-muted">${items.length}</span></div>
+        <div class="pj-col-head">${projStageBadge(st)}<span class="pj-muted">${items.length}</span></div>
         ${items.map(s => `<div class="pj-card" onclick="openScript('${s.id}')">
           <div class="pj-title">${escapeHtml(s.title)}</div>
           <div class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › '))}</div>
@@ -3296,24 +3433,48 @@ function renderProjectsBody() {
     return;
   }
 
+  const table = (rows) => `<div class="pj-table-wrap"><table class="pj-table">
+          <thead><tr><th>Project</th><th>Category</th><th>Stage</th><th>Progress</th><th>Writer</th><th>Editor</th><th>Updated</th></tr></thead>
+          <tbody>${rows.map(projRow).join('')}</tbody>
+        </table></div>`;
+
+  // Single-group view (opened by "View all"): every row, no paging
+  const gv = PROJ_GROUPS.find(g => g.key === projGroupView);
+  if (gv) {
+    const items = list.filter(s => projGroup(s) === gv.key);
+    body.innerHTML = `
+      <div class="pj-group">
+        <div class="pj-group-head">
+          <a class="pj-link pj-back" onclick="projCloseGroup()">‹ All projects</a>
+          <span class="pj-group-dot" style="background:${gv.dot}"></span>
+          <span class="pj-group-label">${gv.label} (${items.length})</span>
+        </div>
+        ${items.length ? table(items) : '<div class="pj-empty">No projects here match these filters.</div>'}
+      </div>`;
+    projStartMarquees(body);
+    return;
+  }
+
   body.innerHTML = PROJ_GROUPS.map(g => {
     const items = list.filter(s => projGroup(s) === g.key);
     if (!items.length) return '';
-    const expanded = projExpanded.has(g.key);
-    const shown = expanded ? items : items.slice(0, PROJ_GROUP_LIMIT);
-    const more = items.length - shown.length;
+    const pages = Math.max(1, Math.ceil(items.length / PROJ_GROUP_LIMIT));
+    const page = Math.min(projPage[g.key] || 0, pages - 1);
+    const shown = items.slice(page * PROJ_GROUP_LIMIT, (page + 1) * PROJ_GROUP_LIMIT);
+    const from = page * PROJ_GROUP_LIMIT + 1, to = page * PROJ_GROUP_LIMIT + shown.length;
     return `
       <div class="pj-group">
         <div class="pj-group-head">
           <span class="pj-group-dot" style="background:${g.dot}"></span>
           <span class="pj-group-label">${g.label} (${items.length})</span>
-          ${items.length > PROJ_GROUP_LIMIT ? `<a class="pj-link" onclick="projToggleGroup('${g.key}')">${expanded ? 'Show less' : 'View all'}</a>` : ''}
+          ${items.length > PROJ_GROUP_LIMIT ? `<a class="pj-link" onclick="projOpenGroup('${g.key}')">View all ›</a>` : ''}
         </div>
-        <div class="pj-table-wrap"><table class="pj-table">
-          <thead><tr><th>Project</th><th>Category</th><th>Stage</th><th>Progress</th><th>Writer</th><th>Editor</th><th>Updated</th></tr></thead>
-          <tbody>${shown.map(projRow).join('')}</tbody>
-        </table></div>
-        ${more > 0 ? `<a class="pj-link pj-more" onclick="projToggleGroup('${g.key}')">Show ${more} more project${more !== 1 ? 's' : ''}</a>` : ''}
+        ${table(shown)}
+        ${pages > 1 ? `<div class="pj-pager">
+          <button class="pj-pager-btn" onclick="projSetPage('${g.key}', ${page - 1})" ${page === 0 ? 'disabled' : ''} aria-label="Previous page">‹</button>
+          <span class="pj-muted">${from}–${to} of ${items.length}</span>
+          <button class="pj-pager-btn" onclick="projSetPage('${g.key}', ${page + 1})" ${page >= pages - 1 ? 'disabled' : ''} aria-label="Next page">›</button>
+        </div>` : ''}
       </div>`;
   }).join('');
   projStartMarquees(body);
@@ -3346,7 +3507,7 @@ function projRow(s) {
         <div class="pj-marquee"><span class="pj-sub">${escapeHtml([s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ') || '—')}</span></div>
       </div></div></td>
       <td>${s.categories?.name ? `<span class="pj-chip">${escapeHtml(s.categories.name)}</span>` : '<span class="pj-muted">—</span>'}</td>
-      <td><span class="pj-stage ${st.cls}">${st.label}</span></td>
+      <td>${projStageBadge(st)}</td>
       <td><div class="pj-dots">${dots}</div></td>
       <td>${projAvatar(s.writer ? profileName(s.writer) : '—')}</td>
       <td>${projAvatar(s.editor ? profileName(s.editor) : '—')}</td>
@@ -3374,6 +3535,7 @@ async function openScriptNewModal() {
   document.getElementById('sc-new-video').innerHTML  = '<option value="">Pick a sub-category first…</option>';
   document.getElementById('sc-new-title').value = '';
   document.getElementById('sc-new-title').dataset.auto = '';
+  const otterIn = document.getElementById('sc-new-otter'); if (otterIn) otterIn.value = '';
   document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id);
   document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true });
   document.getElementById('script-new-modal').classList.add('open');
@@ -3442,8 +3604,14 @@ async function createScript() {
   btn.disabled = false; btn.textContent = 'Create project';
   if (error) { showToast('Could not create: ' + error.message, 'error'); return; }
 
+  const otterFile = document.getElementById('sc-new-otter')?.files?.[0] || null;
   closeScriptNewModal();
   showToast('Project started', 'success');
+  if (otterFile) {
+    showToast(`Uploading Otter recording${canTranscribe() ? ' and transcribing' : ''}…`, 'info');
+    uploadProjectAsset('original_audio', otterFile, data.id, { transcribe: true })
+      .catch(err => showToast('Otter recording: ' + (err?.message || 'failed'), 'error'));
+  }
   notifyAssigned(data.id, title, 'writer', writerId);
   if (editorId) notifyAssigned(data.id, title, 'editor', editorId);
 
@@ -3482,7 +3650,7 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
-  if (id !== currentScriptId) scriptTab = 'script';
+  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false; }
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
@@ -3505,12 +3673,13 @@ async function openScript(id, versionId = null) {
 
 function closeScriptModal(e) {
   if (e && e.target !== document.getElementById('script-modal')) return;
+  paUnmountWorkflow();
   stopScriptPlayer();
   resetScriptComposer();
   document.getElementById('script-modal').classList.remove('open');
   currentScriptId = null; currentScript = null;
   projectAssets = []; projectAssetUrls = {}; projVideoToken++;
-  scriptTab = 'script';
+  scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false;
   scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
 }
 
@@ -3523,7 +3692,21 @@ function setScriptTab(tab) {
   document.getElementById('sc-pane-script')?.toggleAttribute('hidden', tab === 'video');
   document.getElementById('sc-pane-video')?.toggleAttribute('hidden', tab !== 'video');
   document.querySelectorAll('.sc-step').forEach((b, i) => b.classList.toggle('active', (i === 1) === (tab === 'video')));
-  if (tab === 'video') { loadProjectVideo(); loadProjectAssets(); }
+  if (tab === 'video') { loadProjectVideo(); loadProjectAssets(); paMountWorkflow(); }
+  else paUnmountWorkflow();
+}
+
+// Joe clicked "Needs changes": show the feedback section in its place
+function scOpenChanges() {
+  scChangesOpen = true; scChangesPosted = false;
+  renderScriptModal();
+  loadScriptFeedback();
+  document.getElementById('sc-feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+}
+function scCancelChanges() {
+  scChangesOpen = false; scChangesPosted = false;
+  resetScriptComposer();
+  renderScriptModal();
 }
 
 function viewedVersion() {
@@ -3536,6 +3719,28 @@ function selectScriptVersion(versionId) {
   scriptDraftPreview = null;
   renderScriptModal();
   loadScriptFeedback();
+}
+
+// Two chips: where the script stands and where the video stands, each with a
+// tick once Joe has approved it.
+const TICK_SVG = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+function projStatusChipsHtml(s, latest) {
+  const meta = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
+  const scriptApproved = s.status === 'approved';
+  const scriptText = scriptApproved
+    ? `Script approved${latest ? ` · v${latest.version} locked` : ''}`
+    : `Script: ${meta.label}${latest ? ` · v${latest.version}` : ' · not sent yet'}`;
+  const vs = s.videos?.status || null;
+  const videoApproved = vs === 'completed' || vs === 'published';
+  const videoText = !s.videos ? 'Video: no slot' :
+    videoApproved ? (vs === 'published' ? 'Video approved · published' : 'Video approved') :
+    vs === 'to_review' ? 'Video: with Joe' :
+    vs === 'to_edit'   ? 'Video: changes requested' :
+    (s.videos.storage_key || s.videos.video_url) ? 'Video: uploaded' : 'Video: not made yet';
+  const videoCls = videoApproved ? 'sc-status-approved' : vs === 'to_review' ? 'sc-status-sent' : vs === 'to_edit' ? 'sc-status-changes' : 'sc-status-draft';
+  return `
+      <span class="card-tag sc-status-${s.status} sc-chip">${scriptApproved ? TICK_SVG : ''}${scriptText}</span>
+      <span class="card-tag ${videoCls} sc-chip">${videoApproved ? TICK_SVG : ''}${videoText}</span>`;
 }
 
 function renderScriptModal() {
@@ -3555,8 +3760,7 @@ function renderScriptModal() {
   // ── Header ──
   let html = `
     <div class="card-tags" style="margin-bottom:0">
-      <span class="card-tag sc-status-${s.status}">${meta.label}</span>
-      ${latest ? `<span class="card-tag sc-version">v${latest.version}${s.status === 'approved' ? ' · locked' : ''}</span>` : '<span class="card-tag sc-version">not sent yet</span>'}
+      ${projStatusChipsHtml(s, latest)}
     </div>
     <div class="sc-title">${escapeHtml(s.title)}${manager ? ` <a class="sc-link" style="font-size:12px;font-weight:400" onclick="renameScript()">rename</a>` : ''}</div>
     <div class="sc-sub">
@@ -3593,6 +3797,7 @@ function renderScriptModal() {
       <button class="sc-step ${scriptTab === 'video' ? 'active' : ''}" onclick="setScriptTab('video')"><span class="sc-step-n">2</span>Video</button>
     </div>
     <div id="sc-pane-script" ${scriptTab === 'video' ? 'hidden' : ''}>`;
+  html += `<div class="pa-hub"><div class="pa-main">`;
 
   // ── Version tabs (only once there's more than one round) ──
   if (scriptVersions.length > 1) {
@@ -3619,13 +3824,15 @@ function renderScriptModal() {
     html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — the writer hasn't sent a version.</div></div>`;
   }
 
-  // ── Reviewer decision (Joe) — only on the latest version while it's with him ──
-  if (reviewer && s.status === 'sent' && isLatest) {
+  // ── Reviewer decision (Joe) — only on the latest version while it's with him.
+  //    "Needs changes" opens the feedback section; "Done" there records the decision. ──
+  const reviewing = reviewer && s.status === 'sent' && isLatest;
+  if (reviewing && !scChangesOpen) {
     html += `
       <div class="workflow-section" id="sc-reviewer-section">
         <div class="workflow-section-label">Your decision on v${latest.version}</div>
         <div class="reviewer-buttons">
-          <button class="btn-more-changes" id="sc-changes-btn" onclick="scriptDecision('changes')">
+          <button class="btn-more-changes" id="sc-changes-btn" onclick="scOpenChanges()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
             Needs changes
           </button>
@@ -3634,7 +3841,7 @@ function renderScriptModal() {
             Approve script
           </button>
         </div>
-        <div class="reviewer-status">Listen, leave voice notes below on anything to change, then decide. Approving locks the text.</div>
+        <div class="reviewer-status">Listen, then decide. "Needs changes" lets you leave notes for the writer; approving locks the text.</div>
       </div>`;
   }
 
@@ -3679,11 +3886,13 @@ function renderScriptModal() {
       </div>`;
   }
 
-  // ── Feedback ──
+  // ── Feedback — posted notes first (oldest at the top), the composer below.
+  //    While Joe is deciding, it only appears after he clicks "Needs changes". ──
   const canComment = canCommentScript(s);
-  html += `
-    <div class="feedback-section" style="display:block">
+  if (!reviewing || scChangesOpen) html += `
+    <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${canComment ? `
       <div class="comment-composer">
         <textarea id="sc-comment-text" class="comment-input" rows="2" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
@@ -3702,20 +3911,25 @@ function renderScriptModal() {
           </div>
           <button class="btn btn-primary btn-sm" id="sc-comment-send-btn" onclick="submitScriptComment()" style="width:auto;margin-top:0">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            Send
+            ${reviewing ? 'Add more' : 'Send'}
           </button>
         </div>
       </div>` : ''}
-      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
+      ${reviewing ? `
+      <div class="sc-changes-foot">
+        <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="width:auto;margin-top:0" onclick="scCancelChanges()" ${scChangesPosted ? 'hidden' : ''}>Cancel</button>
+        <button class="btn btn-primary btn-sm" id="sc-changes-btn" style="width:auto;margin-top:0" onclick="scriptDecision('changes')">Done</button>
+      </div>` : ''}
     </div>`;
 
   // Close the script pane; the video pane holds the produced video and its assets
-  html += `</div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s)}</div>`;
+  html += `</div>${renderSidePanelsHtml(SCRIPT_TAB_KINDS)}</div></div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s)}</div>`;
 
   body.innerHTML = html;
 
   // Wire the player to whatever is showing
-  if (scriptTab === 'video') { loadProjectVideo(); loadProjectAssets(); }
+  loadProjectAssets();
+  if (scriptTab === 'video') { loadProjectVideo(); paMountWorkflow(); }
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
 }
 
@@ -4101,8 +4315,8 @@ async function scriptDecision(decision) {
   }).catch(err => console.warn('[notify script decision]', err));
 
   await loadScripts();
-  if (decision === 'approved') { closeScriptModal(); showScriptsPage(document.getElementById('sidebar-scripts-item')); }
-  else openScript(scriptId);
+  if (decision === 'approved') { closeScriptModal(); isReviewerUser() ? showReviewPage(document.getElementById('folder-to-review')) : showScriptsPage(document.getElementById('sidebar-scripts-item')); }
+  else { if (currentPage === 'review') showReviewPage(); openScript(scriptId); }
 }
 
 // ── Feedback ─────────────────────────────────────────────────
@@ -4113,7 +4327,7 @@ async function loadScriptFeedback() {
   let q = sb.from('script_feedback')
     .select('id, user_id, version_id, body, audio_path, image_path, duration_seconds, transcript, created_at, profiles:user_id(full_name)')
     .eq('script_id', currentScriptId)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: true });   // oldest at the top, newest just above the composer
   // Feedback is per version; before any version exists, show unscoped notes
   q = scriptViewVersionId ? q.eq('version_id', scriptViewVersionId) : q.is('version_id', null);
   const { data, error } = await q;
@@ -4216,6 +4430,7 @@ async function submitScriptComment() {
 
     resetScriptComposer();
     showToast('Note posted', 'success');
+    if (scChangesOpen) { scChangesPosted = true; document.getElementById('sc-changes-cancel')?.setAttribute('hidden', ''); }
     await loadScriptFeedback();
     // Transcribe in the background — the list refreshes when it lands
     if (audioPath) transcribeScriptFeedback(inserted.id, audioPath);
@@ -4304,24 +4519,31 @@ function subscribeToScriptChanges() {
     .subscribe();
 }
 
+
 // ══════════════════════════════════════════════════════
 // PROJECT ASSETS — the video plus everything that goes with it
-// (finalized audio, original audio, transcript, other files).
-// Shown at the top of the project modal beside the slot's video.
+// (finalized audio, Otter recording + transcript, video transcript, other files).
+// Otter panels also show on the Script tab (they arrive at project creation);
+// the Video tab shows the produced video, its details, review feedback and all panels.
 // ══════════════════════════════════════════════════════
 const PROJECT_ASSETS_BUCKET = 'project-assets';
 const PROJ_ASSET_KINDS = {
-  final_audio:    { label: 'Finalized audio', accept: 'audio/*',                    empty: 'No finalized narration yet.' },
-  original_audio: { label: 'Original audio',  accept: 'audio/*,video/*',            empty: 'No original recording yet.' },
-  transcript:     { label: 'Transcript',      accept: '.txt,.srt,.vtt,text/plain',  empty: 'No transcript yet.' },
-  other:          { label: 'Other assets',    accept: '*/*',                        empty: 'No other files yet.' },
+  final_audio:      { label: 'Finalized audio',  accept: 'audio/*',                   empty: 'No finalized narration yet.' },
+  original_audio:   { label: 'Otter audio',      accept: 'audio/*,video/*',           empty: "No Otter recording yet — Joe's original recording goes here." },
+  otter_transcript: { label: 'Otter transcript', accept: '.txt,.srt,.vtt,text/plain', empty: 'No Otter transcript yet.' },
+  transcript:       { label: 'Finalized transcript', accept: '.txt,.srt,.vtt,text/plain', empty: 'No finalized transcript yet.' },
+  other:            { label: 'Other assets',     accept: '*/*',                       empty: 'No other files yet.' },
 };
 let projectAssets    = [];   // rows for currentScriptId
 let projectAssetUrls = {};   // storage_path → signed URL
 let projVideoToken   = 0;    // guards a slow playback lookup against a modal switch
+let paPendingFile    = null; // video file picked in the inline upload form
+let paPendingThumb   = null;
 
 const canAddProjectAssets   = (s) => isStaffUser() || isScriptAssignee(s);
 const canDeleteProjectAsset = (a) => isStaffUser() || a.created_by === currentUser?.id;
+const canUploadSlotVideo    = () => currentProfile?.role === 'admin';   // videos RLS: staff only
+const canTranscribe         = () => currentProfile?.role === 'admin';   // transcribe function: admin only
 
 function formatBytes(n) {
   if (!n && n !== 0) return '';
@@ -4331,47 +4553,166 @@ function formatBytes(n) {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-// The hub's skeleton — panels fill in once the assets and playback URL load.
-function renderProjectHubHtml(s) {
-  const v = s.videos;
-  const manager = canManageScripts();
-  const panels = Object.entries(PROJ_ASSET_KINDS).map(([kind, k]) => `
-    <div class="pa-panel ${kind === 'transcript' || kind === 'other' ? 'pa-panel-tall' : ''}" id="pa-panel-${kind}">
+function paPanelHtml(kind, extraClass = '') {
+  const k = PROJ_ASSET_KINDS[kind];
+  return `
+    <div class="pa-panel ${extraClass}" data-pa-kind="${kind}">
       <div class="pa-panel-head">
         <span class="pa-panel-title">${k.label}</span>
-        <span class="pa-panel-actions" id="pa-actions-${kind}"></span>
+        <span class="pa-panel-actions"></span>
       </div>
-      <div class="pa-panel-body" id="pa-body-${kind}"><span class="pa-empty">Loading…</span></div>
-    </div>`).join('');
-
-  const videoInner = v
-    ? `<div class="pa-video-msg">Loading video…</div>`
-    : `<div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div>`;
-
-  return `
-    <div class="pa-hub">
-      <div class="pa-main">
-        <div class="pa-video" id="pa-video">${videoInner}</div>
-        ${v ? `<div class="pa-video-foot">
-          <span class="pa-video-title">${escapeHtml(v.title)}</span>
-          <span class="pa-item-meta">${v.status ? `Slot status: ${escapeHtml(String(v.status).replace('_', ' '))}` : ''}${v.duration_seconds ? ` · ${formatDuration(v.duration_seconds)}` : ''}</span>
-          ${v.storage_key || v.video_url ? `<a class="sc-link" onclick="openVideo('${v.id}')">Open in library</a>` : ''}
-        </div>` : ''}
-      </div>
-      <div class="pa-side">${panels}</div>
+      <div class="pa-panel-body"><span class="pa-empty">Loading…</span></div>
     </div>`;
 }
 
+// Side panels: the Script tab has the Otter recording, its transcript and other
+// files; the Video tab adds the finalized audio and finalized transcript.
+const SCRIPT_TAB_KINDS = ['original_audio', 'otter_transcript', 'other'];
+const VIDEO_TAB_KINDS  = ['final_audio', 'transcript', 'original_audio', 'otter_transcript', 'other'];
+function renderSidePanelsHtml(kinds) {
+  return `<div class="pa-side">${kinds.map(kind => paPanelHtml(kind, kind === 'final_audio' ? '' : 'pa-panel-tall')).join('')}</div>`;
+}
+
+// Video tab: video (or the upload form) + details + review workflow, panels beside it
+function renderProjectHubHtml(s) {
+  const v = s.videos;
+  const manager = canManageScripts();
+
+  let main;
+  if (!v) {
+    main = `<div class="pa-video"><div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div></div>`;
+  } else if (!v.storage_key && !v.video_url) {
+    main = canUploadSlotVideo() ? renderVideoUploadFormHtml(v) : `
+      <div class="pa-video"><div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet. Ravi uploads it here once it is produced.</span></div></div>`;
+  } else {
+    main = `
+      <div class="pa-video" id="pa-video"><div class="pa-video-msg">Loading video…</div></div>
+      <div class="pa-details">
+        <div class="pa-details-title">${escapeHtml(v.title)}</div>
+        <div class="pa-details-desc">${v.description ? escapeHtml(v.description) : '<span class="pa-empty">No description yet.</span>'}</div>
+        <div class="pa-details-meta">
+          <div class="modal-meta-item"><strong>${escapeHtml(String(v.status || '—').replace('_', ' '))}</strong>Slot status</div>
+          <div class="modal-meta-item"><strong>${v.video_type ? escapeHtml(v.video_type) : '—'}</strong>Type</div>
+          ${v.duration_seconds ? `<div class="modal-meta-item"><strong>${formatDuration(v.duration_seconds)}</strong>Length</div>` : ''}
+          <a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>
+        </div>
+      </div>
+      <div id="pa-workflow"></div>`;
+  }
+
+  return `
+    <div class="pa-hub">
+      <div class="pa-main">${main}</div>
+      ${renderSidePanelsHtml(VIDEO_TAB_KINDS)}
+    </div>`;
+}
+
+// ── Inline upload (same fields as Manage videos) ─────────────
+function renderVideoUploadFormHtml(v) {
+  return `
+    <div class="pa-upload-form" id="pa-upload-form">
+      <div class="pa-upload-head">
+        <div class="pa-details-title">Upload the produced video</div>
+        <div class="pa-empty">Slot: ${escapeHtml(v.title)}. Saving sends it to Joe's To Review.</div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Upload video file</label>
+        <input class="form-input" id="pa-v-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="paVideoFileSelected(this.files)">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Wasabi video URL <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional fallback if you already have a URL)</span></label>
+        <input class="form-input" id="pa-v-url" placeholder="https://..." value="${escapeHtmlAttr(v.video_url || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Storage key</label>
+        <input class="form-input" id="pa-v-key" placeholder="videos/uuid/file.mp4" value="${escapeHtmlAttr(v.storage_key || '')}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Description (optional)</label>
+        <textarea class="form-input" id="pa-v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical">${escapeHtmlAttr(v.description || '')}</textarea>
+      </div>
+      <div class="upload-progress-wrap hidden" id="pa-up-wrap" aria-live="polite">
+        <div class="upload-progress-label-row"><span id="pa-up-label">Uploading…</span><span id="pa-up-pct">0%</span></div>
+        <div class="upload-progress-track"><div class="upload-progress-bar" id="pa-up-bar"></div></div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px">
+        <button class="btn btn-primary" id="pa-v-save" onclick="paSaveVideo()" style="width:auto;margin-top:0">Save video</button>
+      </div>
+    </div>`;
+}
+
+function paVideoFileSelected(files) {
+  paPendingFile = files && files.length ? files[0] : null;
+  paPendingThumb = null;
+  if (paPendingFile) generateThumbnailDataUri(paPendingFile).then(u => { paPendingThumb = u; }).catch(() => { paPendingThumb = null; });
+}
+
+function paSetProgress(pct, label) {
+  const wrap = document.getElementById('pa-up-wrap');
+  if (!wrap) return;
+  wrap.classList.remove('hidden');
+  const p = Math.min(100, Math.max(0, Math.round(pct)));
+  document.getElementById('pa-up-bar').style.width = p + '%';
+  document.getElementById('pa-up-pct').textContent = p + '%';
+  if (label) document.getElementById('pa-up-label').textContent = label;
+}
+
+async function paSaveVideo() {
+  const s = currentScript, v = s?.videos;
+  if (!v || !canUploadSlotVideo()) return;
+  const scriptId = currentScriptId;
+  const btn = document.getElementById('pa-v-save');
+  const patch = {
+    video_source: 'wasabi',
+    video_url:    document.getElementById('pa-v-url').value.trim() || null,
+    storage_key:  document.getElementById('pa-v-key').value.trim() || null,
+    description:  document.getElementById('pa-v-desc').value.trim() || null,
+  };
+  if (paPendingThumb) patch.thumbnail_url = paPendingThumb;
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    if (paPendingFile) {
+      btn.textContent = 'Uploading…';
+      paSetProgress(0, 'Starting…');
+      const result = await uploadToWasabiViaEdgeFunction(paPendingFile, (pct, label) => paSetProgress(pct, label));
+      patch.storage_key = result.storageKey;
+      patch.video_url = result.publicUrl || patch.video_url || null;
+      paPendingFile = null;
+    }
+    if (!patch.storage_key && !patch.video_url) throw new Error('Upload a file or provide a Wasabi video URL/storage key');
+
+    await ensureFreshSession();
+    const { error } = await sb.from('videos').update(patch).eq('id', v.id);
+    if (error) throw error;
+
+    // Into Joe's To Review, like a Manage-videos upload
+    if (v.status === 'empty' || v.status === 'raw') {
+      const { error: promoteErr } = await sb.rpc('set_video_status', { p_video_id: v.id, p_status: 'to_review' });
+      if (promoteErr) showToast('Uploaded, but could not submit for review: ' + promoteErr.message, 'error');
+      else {
+        showToast('Uploaded — sent to Joe for review', 'success');
+        invokeEdge(NOTIFY_FUNCTION, { body: { type: 'video_uploaded', videoId: v.id, videoTitle: v.title } })
+          .catch(err => console.warn('[notify video_uploaded] error:', err));
+      }
+    } else {
+      showToast('Video updated', 'success');
+    }
+    await loadVideos();
+    if (scriptId === currentScriptId) openScript(scriptId);   // re-render with the player + workflow
+  } catch (err) {
+    showToast((paPendingFile ? 'Upload failed: ' : 'Could not save: ') + (err?.message || 'Unknown error'), 'error');
+    document.getElementById('pa-up-wrap')?.classList.add('hidden');
+    if (btn) { btn.disabled = false; btn.textContent = 'Save video'; }
+  }
+}
+
+// ── Video playback on the Video tab ──────────────────────────
 async function loadProjectVideo() {
   const s = currentScript, v = s?.videos;
   const box = document.getElementById('pa-video');
   if (!v || !box) return;
   const token = ++projVideoToken;
-  if (!v.storage_key && !v.video_url) {
-    const hint = (s.editor_id === currentUser?.id || isStaffUser()) ? ' Upload it from the library once it is produced.' : '';
-    box.innerHTML = `<div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet.${hint}</span></div>`;
-    return;
-  }
   try {
     const url = await resolveWasabiPlaybackUrl(v);
     if (token !== projVideoToken) return;
@@ -4385,6 +4726,45 @@ async function loadProjectVideo() {
   }
 }
 
+// ── Review workflow: the library modal's feedback + decision sections,
+//    moved into the Video tab while it is open and put back afterwards. ──
+const PA_WORKFLOW_IDS = ['feedback-section', 'reviewer-section', 'editor-section'];
+const paWorkflowMounted = () => !!document.getElementById('pa-workflow')?.querySelector('#feedback-section');
+
+function paMountWorkflow() {
+  const s = currentScript, v = s?.videos;
+  const mount = document.getElementById('pa-workflow');
+  if (!v || !mount) return;
+  const full = allVideos.find(x => x.id === v.id) || v;
+  currentVideoId = v.id;
+  PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el) mount.appendChild(el); });
+
+  const isAdmin = currentProfile?.role === 'admin';
+  const isReviewer = currentProfile?.is_reviewer === true;
+  const fb = document.getElementById('feedback-section');
+  if (isAdmin || isReviewer) { fb.classList.remove('hidden'); loadFeedback(v.id); }
+  else fb.classList.add('hidden');
+
+  const rs = document.getElementById('reviewer-section');
+  if (isReviewer && full.status === 'to_review') { rs.classList.remove('hidden'); updateReviewedBtnState(full); }
+  else rs.classList.add('hidden');
+
+  const es = document.getElementById('editor-section');
+  if (isAdmin && !isReviewer && ['empty', 'raw', 'to_edit', 'completed'].includes(full.status)) { es.classList.remove('hidden'); updateEditorBtnState(full); }
+  else es.classList.add('hidden');
+  vidChangesOpen = false;
+  applyVideoReviewMode(full);
+}
+
+function paUnmountWorkflow() {
+  if (!paWorkflowMounted()) return;
+  const home = document.querySelector('#video-modal .modal-info');
+  PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el && home) home.appendChild(el); });
+  resetComposer();
+  currentVideoId = null;
+}
+
+// ── Assets ───────────────────────────────────────────────────
 async function loadProjectAssets() {
   const id = currentScriptId;
   if (!id) return;
@@ -4416,18 +4796,20 @@ function renderProjectAssets(loadError) {
   if (!s) return;
   const canAdd = canAddProjectAssets(s);
   const v = s.videos;
+  const otterAudio = projectAssets.find(a => a.kind === 'original_audio');
+  const hasOtterText = projectAssets.some(a => a.kind === 'otter_transcript');
 
-  Object.entries(PROJ_ASSET_KINDS).forEach(([kind, k]) => {
-    const body = document.getElementById(`pa-body-${kind}`);
-    const actions = document.getElementById(`pa-actions-${kind}`);
-    if (!body || !actions) return;
+  document.querySelectorAll('[data-pa-kind]').forEach(panel => {
+    const kind = panel.dataset.paKind, k = PROJ_ASSET_KINDS[kind];
+    const body = panel.querySelector('.pa-panel-body');
+    const actions = panel.querySelector('.pa-panel-actions');
+    if (!k || !body || !actions) return;
 
     let act = '';
     if (canAdd) {
-      if (kind === 'transcript') {
-        if (v?.storage_key && isStaffUser()) act += `<button class="pa-add" id="pa-transcribe-btn" onclick="transcribeProjectVideo()">Transcribe video</button>`;
-        act += `<button class="pa-add" onclick="pasteProjectTranscript()">Paste</button>`;
-      }
+      if (kind === 'transcript' && v?.storage_key && canTranscribe()) act += `<button class="pa-add pa-transcribe-btn" onclick="transcribeProjectVideo(this)">Transcribe video</button>`;
+      if (kind === 'otter_transcript' && otterAudio && !hasOtterText && canTranscribe()) act += `<button class="pa-add pa-transcribe-btn" onclick="transcribeOtterAudio('${otterAudio.id}', this)">Transcribe Otter audio</button>`;
+      if (kind === 'transcript' || kind === 'otter_transcript') act += `<button class="pa-add" onclick="pasteProjectText('${kind}')">Paste</button>`;
       act += `<button class="pa-add" onclick="pickProjectAsset('${kind}')">+ Upload</button>`;
     }
     actions.innerHTML = act;
@@ -4502,8 +4884,9 @@ function projectAssetItemHtml(a) {
   const meta = [who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · ');
   const del = canDeleteProjectAsset(a) ? `<button class="pa-del" title="Remove" onclick="deleteProjectAsset('${a.id}')">✕</button>` : '';
   const isAudio = (a.mime_type || '').startsWith('audio/') || /\.(mp3|m4a|wav|ogg|webm|aac)$/i.test(a.file_name || '');
+  const isVideo = (a.mime_type || '').startsWith('video/');
 
-  if (a.kind === 'transcript' && a.body) {
+  if ((a.kind === 'transcript' || a.kind === 'otter_transcript') && a.body) {
     return `
       <div class="pa-item">
         <div class="pa-item-row">
@@ -4522,7 +4905,7 @@ function projectAssetItemHtml(a) {
               : `<span class="pa-item-name">${name}</span>`}
         ${del}
       </div>
-      ${url && isAudio ? `<audio controls preload="none" src="${url}"></audio>` : ''}
+      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${url}"></audio>` : ''}
       <span class="pa-item-meta">${meta}</span>
     </div>`;
 }
@@ -4543,16 +4926,18 @@ function pickProjectAsset(kind) {
   input.click();
 }
 
-async function uploadProjectAsset(kind, file) {
-  const scriptId = currentScriptId;
-  if (!scriptId || !file) return;
-  const body = document.getElementById(`pa-body-${kind}`);
+// Uploads into the project. `scriptId` defaults to the open project (project
+// creation passes the new id). `transcribe` runs Whisper on an Otter recording.
+async function uploadProjectAsset(kind, file, scriptId = currentScriptId, { transcribe = false } = {}) {
+  if (!scriptId || !file) return null;
+  const panel = scriptId === currentScriptId ? document.querySelector(`[data-pa-kind="${kind}"] .pa-panel-body`) : null;
   const status = document.createElement('div');
   status.className = 'pa-item pa-uploading';
   status.textContent = `Uploading ${file.name}…`;
-  body?.prepend(status);
+  panel?.prepend(status);
 
   await ensureFreshSession();
+  let inserted = null;
   try {
     const safe = file.name.replace(/[^\w.\-]+/g, '_').slice(-80);
     const path = `${scriptId}/${kind}/${Date.now()}-${safe}`;
@@ -4560,17 +4945,18 @@ async function uploadProjectAsset(kind, file) {
       .upload(path, file, { contentType: file.type || 'application/octet-stream', upsert: false });
     if (upErr) throw upErr;
 
-    // A small text transcript file is also stored as text so it can be read in place
+    // A small text file is also stored as text so it can be read in place
     let text = null;
-    if (kind === 'transcript' && file.size < 512 * 1024) {
+    if ((kind === 'transcript' || kind === 'otter_transcript') && file.size < 512 * 1024) {
       try { text = (await file.text()).trim() || null; } catch (_) { /* keep the file only */ }
     }
 
-    const { error: insErr } = await sb.from('project_assets').insert({
+    const { data, error: insErr } = await sb.from('project_assets').insert({
       script_id: scriptId, kind, storage_path: path, file_name: file.name,
       mime_type: file.type || null, size_bytes: file.size, body: text, created_by: currentUser.id,
-    });
+    }).select('id').single();
     if (insErr) throw insErr;
+    inserted = data;
     showToast(`${PROJ_ASSET_KINDS[kind].label}: ${file.name} added`, 'success');
   } catch (err) {
     console.error('[project assets] upload failed:', err);
@@ -4579,25 +4965,65 @@ async function uploadProjectAsset(kind, file) {
     status.remove();
     if (scriptId === currentScriptId) loadProjectAssets();
   }
+
+  if (inserted && transcribe && canTranscribe()) {
+    await transcribeAudioFileToAsset(file, scriptId, 'otter_transcript', `Otter transcript — ${file.name}`);
+  }
+  return inserted;
 }
 
-async function pasteProjectTranscript() {
-  const text = prompt('Paste the transcript text:');
+async function pasteProjectText(kind) {
+  const text = prompt(`Paste the ${PROJ_ASSET_KINDS[kind].label.toLowerCase()} text:`);
   if (text == null || !text.trim()) return;
   const { error } = await sb.from('project_assets').insert({
-    script_id: currentScriptId, kind: 'transcript', body: text.trim(),
-    file_name: 'Pasted transcript', created_by: currentUser.id,
+    script_id: currentScriptId, kind, body: text.trim(),
+    file_name: `Pasted ${PROJ_ASSET_KINDS[kind].label.toLowerCase()}`, created_by: currentUser.id,
   });
-  if (error) { showToast('Could not save transcript: ' + error.message, 'error'); return; }
+  if (error) { showToast('Could not save: ' + error.message, 'error'); return; }
   loadProjectAssets();
 }
 
+// Whisper on an audio/video file (audio extracted in the browser), saved as a text asset
+async function transcribeAudioFileToAsset(file, scriptId, kind, name) {
+  const wav = await extractAudioToWav(file);
+  if (wav.size > 25 * 1024 * 1024) throw new Error('Audio is over 25MB — the recording is too long to transcribe in one go (max ~13 min).');
+  const form = new FormData();
+  form.append('file', wav, 'audio.wav');
+  const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: form });
+  const detail = error ? await parseFunctionError(error) : (data?.error || null);
+  if (detail) throw new Error(detail);
+  const text = (data?.text || '').trim();
+  if (!text) throw new Error('empty transcript');
+  const { error: insErr } = await sb.from('project_assets').insert({
+    script_id: scriptId, kind, body: text, file_name: name, created_by: currentUser.id,
+  });
+  if (insErr) throw insErr;
+  if (scriptId === currentScriptId) loadProjectAssets();
+  return text;
+}
+
+async function transcribeOtterAudio(assetId, btn) {
+  const a = projectAssets.find(x => x.id === assetId);
+  const url = a?.storage_path ? projectAssetUrls[a.storage_path] : null;
+  if (!url) { showToast('Otter audio is not available to transcribe', 'error'); return; }
+  const scriptId = currentScriptId;
+  if (btn) { btn.disabled = true; btn.textContent = 'Transcribing…'; }
+  try {
+    const blob = await fetch(url).then(r => { if (!r.ok) throw new Error('download failed'); return r.blob(); });
+    const file = new File([blob], a.file_name || 'otter-audio', { type: a.mime_type || blob.type });
+    await transcribeAudioFileToAsset(file, scriptId, 'otter_transcript', `Otter transcript — ${a.file_name || 'recording'}`);
+    showToast('Otter transcript saved', 'success');
+  } catch (err) {
+    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Transcribe Otter audio'; }
+  }
+}
+
 // Whisper on the slot's stored video, saved as a transcript asset
-async function transcribeProjectVideo() {
+async function transcribeProjectVideo(btn) {
   const s = currentScript, v = s?.videos;
   if (!v?.storage_key) { showToast('No stored video to transcribe', 'error'); return; }
   const scriptId = currentScriptId;
-  const btn = document.getElementById('pa-transcribe-btn');
   if (btn) { btn.disabled = true; btn.textContent = 'Transcribing…'; }
   try {
     const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { storageKey: v.storage_key } });

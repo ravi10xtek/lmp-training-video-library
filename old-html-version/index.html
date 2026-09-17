@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260917c">
+<link rel="stylesheet" href="styles.css?v=20260917h">
 </head>
 <body>
 
@@ -168,7 +168,7 @@
         <div class="sidebar-section">
           <div class="sidebar-section-label">Admin</div>
           <!-- Joe (reviewer) only -->
-          <div class="sidebar-item all hidden" id="folder-to-review" onclick="filterStatus('to_review', this)">
+          <div class="sidebar-item all hidden" id="folder-to-review" onclick="showReviewPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
             To Review
             <span class="sidebar-count" id="count-to-review">0</span>
@@ -242,6 +242,8 @@
           <h3>Feedback &amp; comments</h3>
         </div>
 
+        <div class="feedback-list" id="feedback-list"></div>
+
         <!-- Comment composer: text + optional audio + optional image -->
         <div class="comment-composer">
           <textarea id="comment-text" class="comment-input" rows="2"
@@ -276,15 +278,13 @@
             </button>
           </div>
         </div>
-
-        <div class="feedback-list" id="feedback-list"></div>
       </div>
 
       <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
       <div class="workflow-section hidden" id="reviewer-section">
         <div class="workflow-section-label">Review decision</div>
         <div class="reviewer-buttons">
-          <button class="btn-more-changes" id="send-back-btn" onclick="sendBackForEdits()">
+          <button class="btn-more-changes" id="send-back-btn" onclick="openVideoChanges()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
             Send back for edits
           </button>
@@ -292,6 +292,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             Mark as Complete
           </button>
+        </div>
+        <div class="sc-changes-foot hidden" id="video-changes-foot">
+          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="width:auto;margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
+          <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="sendBackForEdits()">Done</button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
       </div>
@@ -605,6 +609,11 @@
         <input class="form-input" id="sc-new-title" placeholder="Filled from the slot — edit if you like">
       </div>
 
+      <div class="form-group">
+        <label class="form-label">Otter recording <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional — Joe's original audio; transcribed automatically)</span></label>
+        <input class="form-input" id="sc-new-otter" type="file" accept="audio/*,video/*">
+      </div>
+
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Content writer</label>
@@ -631,6 +640,6 @@
   // Local dev only: load env.local.js (dev Supabase project) if present.
   if (['localhost', '127.0.0.1'].includes(location.hostname)) document.write('<script src="env.local.js"><\/script>');
 </script>
-<script src="app.js?v=20260917c"></script>
+<script src="app.js?v=20260917h"></script>
 </body>
 </html>
