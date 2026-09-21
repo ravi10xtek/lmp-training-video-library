@@ -3188,7 +3188,7 @@ async function loadScripts() {
   allScripts = data || [];
 
   // Sidebar entry + bell for anyone who has a project, not just staff
-  const hasScripts = !isReviewerUser() && (isStaffUser() || allScripts.length > 0);
+  const hasScripts = isStaffUser() || allScripts.length > 0;
   document.getElementById('sidebar-scripts')?.classList.toggle('hidden', !hasScripts);
   if (hasScripts) document.getElementById('notif-wrap')?.classList.remove('hidden');
   updateScriptsCount();
@@ -3286,7 +3286,7 @@ async function showScriptsPage(sidebarEl) {
     <div class="page-header pj-header">
       <div>
         <div class="page-title">Video Projects</div>
-        <div class="page-sub">create andpublish training videos.</div>
+        <div class="page-sub">Create and publish training videos.</div>
       </div>
       ${canManageScripts() ? `<button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openScriptNewModal()">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -3650,7 +3650,7 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
-  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false; }
+  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false; projectAssetsFor = null; }
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
@@ -3678,7 +3678,7 @@ function closeScriptModal(e) {
   resetScriptComposer();
   document.getElementById('script-modal').classList.remove('open');
   currentScriptId = null; currentScript = null;
-  projectAssets = []; projectAssetUrls = {}; projVideoToken++;
+  projectAssets = []; projectAssetUrls = {}; projectAssetsFor = null; projVideoToken++;
   scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false;
   scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
 }
@@ -3692,7 +3692,7 @@ function setScriptTab(tab) {
   document.getElementById('sc-pane-script')?.toggleAttribute('hidden', tab === 'video');
   document.getElementById('sc-pane-video')?.toggleAttribute('hidden', tab !== 'video');
   document.querySelectorAll('.sc-step').forEach((b, i) => b.classList.toggle('active', (i === 1) === (tab === 'video')));
-  if (tab === 'video') { loadProjectVideo(); loadProjectAssets(); paMountWorkflow(); }
+  if (tab === 'video') { loadProjectVideo(); showProjectAssets(); paMountWorkflow(); }
   else paUnmountWorkflow();
 }
 
@@ -3756,6 +3756,10 @@ function renderScriptModal() {
   const writer   = canWriteScript(s);
   const reviewer = isReviewerUser();
   const where    = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
+  // Opened from the client's To Review page: a minimal view with no team, no asset
+  // panels, no step tabs — just the stage under review (script until approved, then video).
+  const client   = reviewer && currentPage === 'review';
+  if (client) scriptTab = s.status === 'approved' ? 'video' : 'script';
 
   // ── Header ──
   let html = `
@@ -3774,7 +3778,7 @@ function renderScriptModal() {
 
   // ── Project team ──
   const person = (p) => p ? escapeHtml(profileName(p)) : '<span style="color:var(--muted)">—</span>';
-  html += `
+  if (!client) html += `
     <div class="sc-team">
       <div class="sc-team-role">
         <span class="sc-team-label">Content writer</span>
@@ -3791,13 +3795,14 @@ function renderScriptModal() {
     </div>`;
 
   // ── Step tabs: 1 Script (narration + approval), 2 Video (the produced video + assets) ──
-  html += `
+  if (!client) html += `
     <div class="sc-steps">
       <button class="sc-step ${scriptTab === 'script' ? 'active' : ''}" onclick="setScriptTab('script')"><span class="sc-step-n">1</span>Script</button>
       <button class="sc-step ${scriptTab === 'video' ? 'active' : ''}" onclick="setScriptTab('video')"><span class="sc-step-n">2</span>Video</button>
-    </div>
+    </div>`;
+  html += `
     <div id="sc-pane-script" ${scriptTab === 'video' ? 'hidden' : ''}>`;
-  html += `<div class="pa-hub"><div class="pa-main">`;
+  html += `<div class="pa-hub${client ? ' pa-hub-solo' : ''}"><div class="pa-main">`;
 
   // ── Version tabs (only once there's more than one round) ──
   if (scriptVersions.length > 1) {
@@ -3923,12 +3928,12 @@ function renderScriptModal() {
     </div>`;
 
   // Close the script pane; the video pane holds the produced video and its assets
-  html += `</div>${renderSidePanelsHtml(SCRIPT_TAB_KINDS)}</div></div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s)}</div>`;
+  html += `</div>${client ? '' : renderSidePanelsHtml(SCRIPT_TAB_KINDS)}</div></div><div id="sc-pane-video" ${scriptTab === 'video' ? '' : 'hidden'}>${renderProjectHubHtml(s, client)}</div>`;
 
   body.innerHTML = html;
 
   // Wire the player to whatever is showing
-  loadProjectAssets();
+  if (!client) showProjectAssets();
   if (scriptTab === 'video') { loadProjectVideo(); paMountWorkflow(); }
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
 }
@@ -4535,6 +4540,7 @@ const PROJ_ASSET_KINDS = {
   other:            { label: 'Other assets',     accept: '*/*',                       empty: 'No other files yet.' },
 };
 let projectAssets    = [];   // rows for currentScriptId
+let projectAssetsFor = null; // script id projectAssets was loaded for (null = not loaded)
 let projectAssetUrls = {};   // storage_path → signed URL
 let projVideoToken   = 0;    // guards a slow playback lookup against a modal switch
 let paPendingFile    = null; // video file picked in the inline upload form
@@ -4574,7 +4580,7 @@ function renderSidePanelsHtml(kinds) {
 }
 
 // Video tab: video (or the upload form) + details + review workflow, panels beside it
-function renderProjectHubHtml(s) {
+function renderProjectHubHtml(s, client = false) {
   const v = s.videos;
   const manager = canManageScripts();
 
@@ -4601,9 +4607,9 @@ function renderProjectHubHtml(s) {
   }
 
   return `
-    <div class="pa-hub">
+    <div class="pa-hub${client ? ' pa-hub-solo' : ''}">
       <div class="pa-main">${main}</div>
-      ${renderSidePanelsHtml(VIDEO_TAB_KINDS)}
+      ${client ? '' : renderSidePanelsHtml(VIDEO_TAB_KINDS)}
     </div>`;
 }
 
@@ -4781,6 +4787,7 @@ async function loadProjectAssets() {
   }
   projectAssets = data || [];
   projectAssetUrls = {};
+  projectAssetsFor = id;
   const paths = projectAssets.map(a => a.storage_path).filter(Boolean);
   if (paths.length) {
     const { data: signed, error: sErr } = await sb.storage.from(PROJECT_ASSETS_BUCKET).createSignedUrls(paths, 60 * 60);
@@ -4789,6 +4796,13 @@ async function loadProjectAssets() {
     (signed || []).forEach(d => { if (d.signedUrl) projectAssetUrls[d.path] = d.signedUrl; });
   }
   renderProjectAssets();
+}
+
+// Fill the side panels: from the cached rows if this script's assets are already
+// loaded (version/tab switches), otherwise fetch them once.
+function showProjectAssets() {
+  if (projectAssetsFor === currentScriptId) renderProjectAssets();
+  else loadProjectAssets();
 }
 
 function renderProjectAssets(loadError) {
