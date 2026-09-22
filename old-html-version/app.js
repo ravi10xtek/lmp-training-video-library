@@ -3868,7 +3868,7 @@ function renderScriptModal() {
     const draftText = s.draft_body ?? latest?.body ?? '';
     const ctx =
       s.status === 'changes' ? `Joe asked for changes on v${latest?.version}. His notes are below — edit and send v${(latest?.version || 0) + 1}.` :
-      s.status === 'sent'    ? `v${latest?.version} is with Joe. You can keep editing; sending again replaces it with v${latest.version + 1}.` :
+      s.status === 'sent'    ? `v${latest?.version} is with Joe. You can keep editing and saving a draft; you can send v${latest.version + 1} once he asks for changes.` :
       latest                 ? `Editing a new draft after v${latest.version}.` :
                                'Write the narration. Blank line between paragraphs; start a line with # for a section heading (it\'s read aloud as "Section: …").';
     html += `
@@ -3882,10 +3882,10 @@ function renderScriptModal() {
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
             Preview audio
           </button>
-          <button class="btn btn-primary btn-sm" id="sc-send-btn" onclick="sendScriptToJoe()">
+          ${s.status === 'sent' ? '' : `<button class="btn btn-primary btn-sm" id="sc-send-btn" onclick="sendScriptToJoe()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
             Send to Joe${latest ? ` as v${latest.version + 1}` : ''}
-          </button>
+          </button>`}
         </div>
         <div class="sc-editor-status" id="sc-editor-status"></div>
       </div>`;
@@ -4192,6 +4192,8 @@ async function previewScriptDraft() {
 
 async function sendScriptToJoe() {
   if (scriptSending) return;
+  // One version in review at a time — the next can only go once Joe asks for changes.
+  if (currentScript?.status === 'sent') { setScriptEditorStatus('This version is still with Joe — wait for his feedback before sending another.', 'err'); return; }
   const text = document.getElementById('sc-body')?.value.trim();
   if (!text) { setScriptEditorStatus('Write something first.', 'err'); return; }
 
