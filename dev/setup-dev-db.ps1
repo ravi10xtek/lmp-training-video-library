@@ -22,7 +22,7 @@ $migrations = @(
   'more_changes_migration', 'phone_number_migration', 'joe_recordings_migration',
   'recordings_thumbnail_migration', 'notifications_type_constraint_fix', 'push_subscriptions_migration',
   'video_feedback_comments_migration', 'joe_recordings_delete_policy', 'workflow_folders_migration',
-  'scripts_migration', 'scripts_assignments_migration', 'project_assets_migration'
+  'scripts_migration', 'scripts_assignments_migration', 'project_assets_migration', 'video_team_visibility_migration'
 )
 
 if (-not $UsersOnly) {

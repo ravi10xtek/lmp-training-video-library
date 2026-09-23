@@ -27,7 +27,7 @@
   /* Text that sits ON the bright teal gradient. White on #00f2fe is 1.4:1 —
      unreadable. This deep navy-teal is ~14:1 against it and still on-brand. */
   --ink:      #03202b;
-  --focus:    #ffd166;
+  --focus:    #03202b;
 
   --radius:   12px;
   --radius-lg: 20px;
@@ -1174,6 +1174,19 @@ img, video, canvas, svg { max-width: 100%; }
   padding: 12px;
   margin-bottom: 18px;
 }
+#sc-feedback-section .comment-composer { margin-top: 18px; }
+/* Recording state (wireframe): mic · status · timer, then Pause/Resume + Stop */
+#sc-composer.recording .comment-input,
+#sc-composer.recording .comment-attachments { display: none; }
+#sc-composer.recording .comment-toolbar { margin-top: 0; padding-top: 0; border-top: none; }
+#sc-composer.recording .comment-tools { flex: 1; gap: 10px; }
+.sc-rec-label { flex: 1; font-size: 14px; color: var(--white); }
+.sc-rec-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.sc-rec-controls.hidden { display: none; }
+.sc-rec-controls .btn { width: 100%; justify-content: center; }
+/* Script "Needs changes" footer: full-width buttons, stacked when two show */
+#sc-changes-foot { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+#sc-changes-foot .btn { width: 100%; justify-content: center; }
 .comment-input {
   width: 100%;
   background: transparent;
@@ -2205,7 +2218,7 @@ img, video, canvas, svg { max-width: 100%; }
   .page-header .btn { width: 100%; justify-content: center; }
 
   /* — REVIEWER BUTTONS — */
-  .reviewer-buttons { flex-direction: column; }
+  .reviewer-buttons { flex-direction: column-reverse; }  /* Approve on top */
   .btn-reviewer, .btn-more-changes { width: 100%; justify-content: center; }
 
   /* — ADMIN BTN ROW — */
@@ -2420,7 +2433,9 @@ img, video, canvas, svg { max-width: 100%; }
 /* — Feedback transcript — */
 .sc-transcript { margin-top: 8px; font-size: 13px; line-height: 1.55; color: rgba(240,244,248,0.9); white-space: pre-wrap; word-break: break-word;
   padding: 10px 12px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; }
-.sc-transcript.pending { color: var(--muted); font-style: italic; }
+.sc-transcript.pending { color: var(--muted); font-style: italic; padding: 0; background: none; border: none; }
+.sc-transcript.pending .fb-transcribe-btn { margin-top: 0; }
+#sc-feedback-list audio { color-scheme: dark; }
 .sc-transcript-label { font-size: 10px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 4px; }
 
 @media (max-width: 768px) {
