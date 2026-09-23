@@ -3146,7 +3146,8 @@ let currentScript = null;         // scripts row (+ embeds)
 let scriptVersions = [];          // ascending by version
 let scriptTab = 'script';         // which step tab the project modal shows
 let scChangesOpen = false;        // reviewer clicked "Needs changes": feedback section is showing
-let scChangesPosted = false;      // …and has posted at least one note (Cancel goes away)
+let scMyNotes = 0;                // notes Joe has posted on the viewed version (Cancel → Add more / Done)
+let scChangesAdding = false;      // …and clicked "Add more" to record another
 let scriptViewVersionId = null;   // version shown in player + feedback
 let scriptDraftPreview = null;    // paragraphs rendered for the unsent draft (not a version)
 let scriptSending = false;
@@ -3648,7 +3649,7 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
-  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false; projectAssetsFor = null; }
+  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesAdding = false; projectAssetsFor = null; }
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
@@ -3677,7 +3678,7 @@ function closeScriptModal(e) {
   document.getElementById('script-modal').classList.remove('open');
   currentScriptId = null; currentScript = null;
   projectAssets = []; projectAssetUrls = {}; projectAssetsFor = null; projVideoToken++;
-  scriptTab = 'script'; scChangesOpen = false; scChangesPosted = false;
+  scriptTab = 'script'; scChangesOpen = false; scChangesAdding = false;
   scriptVersions = []; scriptViewVersionId = null; scriptDraftPreview = null;
 }
 
@@ -3696,16 +3697,44 @@ function setScriptTab(tab) {
 
 // Joe clicked "Needs changes": show the feedback section in its place
 function scOpenChanges() {
-  scChangesOpen = true; scChangesPosted = false;
+  scChangesOpen = true; scChangesAdding = false;
   renderScriptModal();
   loadScriptFeedback();
   document.getElementById('sc-feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 function scCancelChanges() {
-  if (scRecorder && scRecorder.state === 'recording') { showToast('Stop the recording first', 'error'); return; }
-  scChangesOpen = false; scChangesPosted = false;
+  if (scRecorder && scRecorder.state !== 'inactive') { showToast('Stop the recording first', 'error'); return; }
+  scChangesOpen = false; scChangesAdding = false;
   resetScriptComposer();
   renderScriptModal();
+}
+
+function scAddMore() {
+  scChangesAdding = true;
+  scSyncChangesUI();
+  document.getElementById('sc-comment-text')?.focus();
+}
+
+// While Joe is writing "Needs changes" notes there is one main action at a time:
+// Cancel (nothing posted) → Post (a note/recording is ready) → Add more / Done.
+function scSyncChangesUI() {
+  if (!document.getElementById('sc-changes-foot')) return;
+  const recording = !!scRecorder && scRecorder.state !== 'inactive';
+  const draft = !!scAudioBlob || !!document.getElementById('sc-comment-text')?.value.trim();
+  const posted = scMyNotes > 0;
+  const composing = !posted || scChangesAdding || draft || recording;
+  const show = (id, on) => document.getElementById(id)?.classList.toggle('hidden', !on);
+  show('sc-composer', composing);
+  show('sc-changes-cancel', !posted && !draft && !recording);
+  show('sc-comment-send-btn', draft && !recording);
+  show('sc-add-more-btn', posted && !composing);
+  show('sc-changes-btn', posted && !draft && !recording);
+}
+
+// Decided (Done / Approve) versions keep their notes as sent. decision defaults to 'pending'.
+function scVersionLocked() {
+  const d = viewedVersion()?.decision;
+  return d === 'approved' || d === 'changes';
 }
 
 function viewedVersion() {
@@ -3890,15 +3919,16 @@ function renderScriptModal() {
       </div>`;
   }
 
-  // ── Feedback — the composer first, posted notes below (newest at the top).
+  // ── Feedback — posted notes first (newest at the top), the composer below.
   //    While Joe is deciding, it only appears after he clicks "Needs changes". ──
   const canComment = canCommentScript(s);
   if (!reviewing || scChangesOpen) html += `
     <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${canComment ? `
-      <div class="comment-composer">
-        <textarea id="sc-comment-text" class="comment-input" rows="2" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
+      <div class="comment-composer" id="sc-composer">
+        <textarea id="sc-comment-text" class="comment-input" rows="2" oninput="scSyncChangesUI()" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
         <div class="comment-attachments hidden" id="sc-comment-attachments">
           <div class="comment-attach comment-audio-preview" id="sc-comment-audio-preview">
             <audio controls id="sc-comment-audio-player"></audio>
@@ -3911,18 +3941,24 @@ function renderScriptModal() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
             </button>
             <span class="record-timer hidden" id="sc-record-timer">0:00</span>
+            <span class="sc-rec-label hidden" id="sc-rec-label">Recording in progress…</span>
           </div>
-          <button class="btn btn-primary btn-sm" id="sc-comment-send-btn" onclick="submitScriptComment()" style="width:auto;margin-top:0">
+          ${reviewing ? '' : `<button class="btn btn-primary btn-sm" id="sc-comment-send-btn" onclick="submitScriptComment()" style="width:auto;margin-top:0">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-            ${reviewing ? 'Save' : 'Send'}
-          </button>
+            Send
+          </button>`}
         </div>
+      </div>
+      <div class="sc-rec-controls hidden" id="sc-rec-controls">
+        <button class="btn btn-ghost btn-sm" id="sc-pause-btn" style="margin-top:0" onclick="toggleScriptRecordingPause()">Pause</button>
+        <button class="btn btn-danger btn-sm" id="sc-stop-btn" style="margin-top:0" onclick="toggleScriptRecording()">Stop</button>
       </div>` : ''}
-      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${reviewing ? `
-      <div class="sc-changes-foot">
-        <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="width:auto;margin-top:0" onclick="scCancelChanges()" ${scChangesPosted ? 'hidden' : ''}>Cancel</button>
-        <button class="btn btn-primary btn-sm" id="sc-changes-btn" style="width:auto;margin-top:0" onclick="scriptDecision('changes')">Done</button>
+      <div class="sc-changes-foot" id="sc-changes-foot">
+        <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="margin-top:0" onclick="scCancelChanges()">Cancel</button>
+        <button class="btn btn-ghost btn-sm hidden" id="sc-add-more-btn" style="margin-top:0" onclick="scAddMore()">Add more</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-comment-send-btn" style="margin-top:0" onclick="submitScriptComment()">Post</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-changes-btn" style="margin-top:0" onclick="scriptDecision('changes')">Done</button>
       </div>` : ''}
     </div>`;
 
@@ -3935,6 +3971,7 @@ function renderScriptModal() {
   if (!client) showProjectAssets();
   if (scriptTab === 'video') { loadProjectVideo(); paMountWorkflow(); }
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
+  scSyncChangesUI();
 }
 
 // Textarea content must be escaped but keep newlines as-is (escapeHtml turns them into <br>)
@@ -4338,14 +4375,18 @@ async function loadScriptFeedback() {
   q = scriptViewVersionId ? q.eq('version_id', scriptViewVersionId) : q.is('version_id', null);
   const { data, error } = await q;
 
+  scMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
+  scSyncChangesUI();
   if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`; return; }
   if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
 
   const isAdmin = currentProfile?.role === 'admin';
+  // Once Joe has decided on a version (Done / Approve), its notes are locked
+  const locked = scVersionLocked();
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles ? profileName(fb.profiles) : 'Team';
     const when = new Date(fb.created_at).toLocaleString();
-    const canDelete = fb.user_id === currentUser?.id;
+    const canDelete = fb.user_id === currentUser?.id && !locked;
 
     let audioHtml = '';
     if (fb.audio_path) {
@@ -4354,8 +4395,7 @@ async function loadScriptFeedback() {
       if (fb.transcript) {
         audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
       } else if (isAdmin) {
-        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}">
-          <button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', '${fb.audio_path}')">Transcribe</button></div>`;
+        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', '${fb.audio_path}')">Transcribe</button></div>`;
       }
     }
     const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
@@ -4393,6 +4433,7 @@ async function transcribeScriptFeedback(fbId, audioPath) {
 }
 
 async function deleteScriptFeedback(id) {
+  if (scVersionLocked()) { showToast('This feedback has been sent and is locked', 'error'); return; }
   if (!confirm('Delete this note?')) return;
   const { data: row } = await sb.from('script_feedback').select('audio_path, image_path').eq('id', id).single();
   const paths = [row?.audio_path, row?.image_path].filter(Boolean);
@@ -4404,7 +4445,7 @@ async function deleteScriptFeedback(id) {
 
 async function submitScriptComment() {
   if (!canCommentScript(currentScript) || !currentScriptId) return;
-  if (scRecorder && scRecorder.state === 'recording') { showToast('Stop the recording before sending', 'error'); return; }
+  if (scRecorder && scRecorder.state !== 'inactive') { showToast('Stop the recording before sending', 'error'); return; }
 
   const body = document.getElementById('sc-comment-text')?.value.trim() || '';
   if (!body && !scAudioBlob) { showToast('Add a note or a voice note first', 'error'); return; }
@@ -4436,7 +4477,7 @@ async function submitScriptComment() {
 
     resetScriptComposer();
     showToast('Note posted', 'success');
-    if (scChangesOpen) { scChangesPosted = true; document.getElementById('sc-changes-cancel')?.setAttribute('hidden', ''); }
+    scChangesAdding = false;
     await loadScriptFeedback();
   } catch (err) {
     showToast('Could not post: ' + (err?.message || 'Unknown error'), 'error');
@@ -4447,7 +4488,7 @@ async function submitScriptComment() {
 
 // ── Voice-note recorder for the script composer ──────────────
 async function toggleScriptRecording() {
-  if (scRecorder && scRecorder.state === 'recording') { scRecorder.stop(); return; }
+  if (scRecorder && scRecorder.state !== 'inactive') { scRecorder.stop(); return; }
   if (scAudioBlob) { showToast('Remove the current voice note first', 'error'); return; }
   try {
     scStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -4464,18 +4505,47 @@ async function toggleScriptRecording() {
   scRecorder.addEventListener('dataavailable', e => { if (e.data?.size > 0) scChunks.push(e.data); });
   scRecorder.addEventListener('stop', scHandleRecordingStop);
   scRecorder.start();
-  scRecStart = Date.now();
+  scRecStart = Date.now(); scPausedMs = 0; scPauseAt = 0;
+  scSetRecUI('recording');
+  scSyncChangesUI();
 
   const btn = document.getElementById('sc-mic-btn');
   btn?.classList.add('mic-recording');
   const timer = document.getElementById('sc-record-timer');
   if (timer) { timer.classList.remove('hidden'); timer.textContent = '0:00'; }
   scTimerInterval = setInterval(() => {
-    const elapsed = Date.now() - scRecStart;
+    if (scRecorder?.state === 'paused') return;
+    const elapsed = Date.now() - scRecStart - scPausedMs;
     if (elapsed >= MAX_RECORDING_MS) { scRecorder?.stop(); return; }
     const t = Math.floor(elapsed / 1000);
     if (timer) timer.textContent = `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
   }, 250);
+}
+
+let scPausedMs = 0, scPauseAt = 0;
+function toggleScriptRecordingPause() {
+  if (!scRecorder || scRecorder.state === 'inactive') return;
+  if (scRecorder.state === 'paused') {
+    scPausedMs += Date.now() - scPauseAt; scPauseAt = 0;
+    scRecorder.resume();
+  } else {
+    scPauseAt = Date.now();
+    scRecorder.pause();
+  }
+  scSetRecUI(scRecorder.state);
+}
+
+// Recording replaces the text box with a status line; Pause/Resume + Stop sit below
+function scSetRecUI(state) {
+  const on = state === 'recording' || state === 'paused';
+  document.getElementById('sc-composer')?.classList.toggle('recording', on);
+  document.getElementById('sc-rec-controls')?.classList.toggle('hidden', !on);
+  document.getElementById('sc-rec-label')?.classList.toggle('hidden', !on);
+  const label = document.getElementById('sc-rec-label');
+  if (label) label.textContent = state === 'paused' ? 'Recording paused' : 'Recording in progress…';
+  const pause = document.getElementById('sc-pause-btn');
+  if (pause) pause.textContent = state === 'paused' ? 'Resume' : 'Pause';
+  document.getElementById('sc-mic-btn')?.classList.toggle('mic-recording', state === 'recording');
 }
 
 function scStopStream() {
@@ -4484,7 +4554,9 @@ function scStopStream() {
 
 function scHandleRecordingStop() {
   clearInterval(scTimerInterval); scTimerInterval = null;
-  scAudioDuration = Math.max(1, Math.round((Date.now() - scRecStart) / 1000));
+  if (scPauseAt) { scPausedMs += Date.now() - scPauseAt; scPauseAt = 0; }
+  scAudioDuration = Math.max(1, Math.round((Date.now() - scRecStart - scPausedMs) / 1000));
+  scSetRecUI(null);
   document.getElementById('sc-mic-btn')?.classList.remove('mic-recording');
   document.getElementById('sc-record-timer')?.classList.add('hidden');
   scStopStream();
@@ -4493,6 +4565,7 @@ function scHandleRecordingStop() {
   const player = document.getElementById('sc-comment-audio-player');
   if (player) player.src = URL.createObjectURL(scAudioBlob);
   document.getElementById('sc-comment-attachments')?.classList.remove('hidden');
+  scSyncChangesUI();
 }
 
 function clearScriptComposerAudio() {
@@ -4500,10 +4573,11 @@ function clearScriptComposerAudio() {
   const player = document.getElementById('sc-comment-audio-player');
   if (player?.src) { URL.revokeObjectURL(player.src); player.removeAttribute('src'); }
   document.getElementById('sc-comment-attachments')?.classList.add('hidden');
+  scSyncChangesUI();
 }
 
 function resetScriptComposer() {
-  if (scRecorder && scRecorder.state === 'recording') { try { scRecorder.stop(); } catch (_) {} }
+  if (scRecorder && scRecorder.state !== 'inactive') { try { scRecorder.stop(); } catch (_) {} }
   clearInterval(scTimerInterval); scTimerInterval = null;
   scStopStream(); scChunks = [];
   const text = document.getElementById('sc-comment-text');
