@@ -1174,19 +1174,21 @@ img, video, canvas, svg { max-width: 100%; }
   padding: 12px;
   margin-bottom: 18px;
 }
-#sc-feedback-section .comment-composer { margin-top: 18px; }
+#sc-feedback-section .comment-composer, #feedback-section .comment-composer { margin-top: 18px; }
 /* Recording state (wireframe): mic · status · timer, then Pause/Resume + Stop */
-#sc-composer.recording .comment-input,
-#sc-composer.recording .comment-attachments { display: none; }
-#sc-composer.recording .comment-toolbar { margin-top: 0; padding-top: 0; border-top: none; }
-#sc-composer.recording .comment-tools { flex: 1; gap: 10px; }
+#sc-composer.recording .comment-input, #vid-composer.recording .comment-input,
+#sc-composer.recording .comment-attachments, #vid-composer.recording .comment-attachments,
+#vid-composer.recording #comment-image-btn, #vid-composer.recording #comment-send-btn { display: none; }
+#sc-composer.recording .comment-toolbar, #vid-composer.recording .comment-toolbar { margin-top: 0; padding-top: 0; border-top: none; }
+#sc-composer.recording .comment-tools, #vid-composer.recording .comment-tools { flex: 1; gap: 10px; }
 .sc-rec-label { flex: 1; font-size: 14px; color: var(--white); }
 .sc-rec-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
 .sc-rec-controls.hidden { display: none; }
 .sc-rec-controls .btn { width: 100%; justify-content: center; }
 /* Script "Needs changes" footer: full-width buttons, stacked when two show */
-#sc-changes-foot { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
-#sc-changes-foot .btn { width: 100%; justify-content: center; }
+#sc-changes-foot, #video-changes-foot { display: flex; flex-direction: column; gap: 8px; margin-top: 18px; }
+#video-changes-foot.hidden { display: none; }
+#sc-changes-foot .btn, #video-changes-foot .btn { width: 100%; justify-content: center; }
 .comment-input {
   width: 100%;
   background: transparent;

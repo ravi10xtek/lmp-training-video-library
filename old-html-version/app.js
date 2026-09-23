@@ -73,6 +73,9 @@ let pendingWasabiFile = null;
 let pendingThumbnail = null;
 let currentVideoId = null;
 let vidChangesOpen = false;   // Joe clicked "Send back for edits": video feedback is showing
+let vidMyNotes = 0;           // Joe's notes in this review round (Cancel → Add more / Done)
+let vidChangesAdding = false; // …and clicked "Add more"
+let recPausedMs = 0, recPauseAt = 0;
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStream = null;
@@ -745,24 +748,27 @@ async function loadFeedback(videoId) {
     .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
-    .order('created_at', { ascending: false });   // newest at the top, just under the composer
+    .order('created_at', { ascending: false });   // newest at the top
 
+  vidMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
+  vidSyncChangesUI();
   if (error) {
     list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
     return;
   }
 
   if (!data || data.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one above.</div>';
+    list.innerHTML = '<div class="feedback-empty">No comments yet.</div>';
     return;
   }
 
   const isAdmin = currentProfile?.role === 'admin';
 
+  const locked = vidNotesLocked();
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles?.full_name || 'Admin';
     const when = new Date(fb.created_at).toLocaleString();
-    const canDelete = fb.user_id === currentUser?.id;
+    const canDelete = fb.user_id === currentUser?.id && !locked;
 
     let audioHtml = '';
     let transcribeHtml = '';
@@ -819,6 +825,7 @@ function escapeHtml(str) {
 }
 
 async function deleteFeedback(id) {
+  if (vidNotesLocked()) { showToast('This feedback has been sent and is locked', 'error'); return; }
   if (!confirm('Delete this comment?')) return;
   // Look up attached file paths so we can clean up storage too
   const { data: row } = await sb.from('video_feedback')
@@ -836,7 +843,7 @@ async function deleteFeedback(id) {
 }
 
 async function toggleRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     stopRecording();
     return;
   }
@@ -880,7 +887,9 @@ async function startRecording() {
   mediaRecorder.addEventListener('stop', handleRecordingStop);
 
   mediaRecorder.start();
-  recordingStartTime = Date.now();
+  recordingStartTime = Date.now(); recPausedMs = 0; recPauseAt = 0;
+  setRecUI('recording');
+  vidSyncChangesUI();
 
   const btn = document.getElementById('comment-mic-btn');
   btn.classList.add('mic-recording');
@@ -893,9 +902,33 @@ async function startRecording() {
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
+}
+
+function toggleRecordingPause() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if (mediaRecorder.state === 'paused') {
+    recPausedMs += Date.now() - recPauseAt; recPauseAt = 0;
+    mediaRecorder.resume();
+  } else {
+    recPauseAt = Date.now();
+    mediaRecorder.pause();
+  }
+  setRecUI(mediaRecorder.state);
+}
+
+// Recording replaces the text box with a status line; Pause/Resume + Stop sit below
+function setRecUI(state) {
+  const on = state === 'recording' || state === 'paused';
+  document.getElementById('vid-composer')?.classList.toggle('recording', on);
+  document.getElementById('rec-controls')?.classList.toggle('hidden', !on);
+  const label = document.getElementById('rec-label');
+  if (label) { label.classList.toggle('hidden', !on); label.textContent = state === 'paused' ? 'Recording paused' : 'Recording in progress…'; }
+  const pause = document.getElementById('rec-pause-btn');
+  if (pause) pause.textContent = state === 'paused' ? 'Resume' : 'Pause';
+  document.getElementById('comment-mic-btn')?.classList.toggle('mic-recording', state === 'recording');
 }
 
 function stopMicStream() {
@@ -906,7 +939,8 @@ function stopMicStream() {
 }
 
 function updateRecordingTimer() {
-  const elapsed = Date.now() - recordingStartTime;
+  if (mediaRecorder?.state === 'paused') return;
+  const elapsed = Date.now() - recordingStartTime - recPausedMs;
   if (elapsed >= MAX_RECORDING_MS) {
     stopRecording();
     return;
@@ -920,7 +954,9 @@ function updateRecordingTimer() {
 function handleRecordingStop() {
   clearInterval(recordingTimerInterval);
   recordingTimerInterval = null;
-  const durationMs = Date.now() - recordingStartTime;
+  if (recPauseAt) { recPausedMs += Date.now() - recPauseAt; recPauseAt = 0; }
+  const durationMs = Date.now() - recordingStartTime - recPausedMs;
+  setRecUI(null);
   composerAudioDuration = Math.max(1, Math.round(durationMs / 1000));
 
   const btn = document.getElementById('comment-mic-btn');
@@ -938,6 +974,7 @@ function handleRecordingStop() {
   player.src = URL.createObjectURL(composerAudioBlob);
   document.getElementById('comment-audio-preview').classList.remove('hidden');
   document.getElementById('comment-attachments').classList.remove('hidden');
+  vidSyncChangesUI();
 }
 
 // ── Image attachment ──────────────────────────────────────────────
@@ -958,6 +995,7 @@ async function handleComposerImage(event) {
   thumb.src = URL.createObjectURL(composerImageFile);
   document.getElementById('comment-image-preview').classList.remove('hidden');
   document.getElementById('comment-attachments').classList.remove('hidden');
+  vidSyncChangesUI();
 }
 
 // Downscale/compress an image to a JPEG blob (keeps uploads small)
@@ -1004,11 +1042,12 @@ function clearComposerImage() {
 function syncAttachmentsVisibility() {
   const any = composerAudioBlob || composerImageFile;
   document.getElementById('comment-attachments').classList.toggle('hidden', !any);
+  vidSyncChangesUI();
 }
 
 function resetComposer() {
   // Stop any in-progress recording
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     try { mediaRecorder.stop(); } catch (_) {}
   }
   clearInterval(recordingTimerInterval);
@@ -1026,7 +1065,7 @@ async function submitComment() {
   if (currentProfile?.role !== 'admin' || !currentVideoId) return;
 
   // Block submit while still recording
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     showToast('Stop the recording before sending', 'error');
     return;
   }
@@ -1037,7 +1076,7 @@ async function submitComment() {
     return;
   }
 
-  const sendBtn = document.getElementById('comment-send-btn');
+  const sendBtn = document.getElementById(vidChangesOpen ? 'vid-post-btn' : 'comment-send-btn');
   sendBtn.disabled = true;
   const sendHtml = sendBtn.innerHTML;
   sendBtn.textContent = 'Sending…';
@@ -1076,7 +1115,7 @@ async function submitComment() {
 
     resetComposer();
     showToast('Comment posted', 'success');
-    if (vidChangesOpen) { vidChangesPostedThisRound = true; document.getElementById('video-changes-cancel')?.classList.add('hidden'); }
+    vidChangesAdding = false;
     loadFeedback(currentVideoId);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
@@ -1965,26 +2004,51 @@ function applyVideoReviewMode(v) {
   const send = document.getElementById('comment-send-btn');
   if (!deciding) {
     foot?.classList.add('hidden'); buttons?.classList.remove('hidden');
-    if (send) send.innerHTML = COMMENT_SEND_HTML;
+    send?.classList.remove('hidden');
+    document.getElementById('vid-composer')?.classList.remove('hidden');
     return;
   }
   fb?.classList.toggle('hidden', !vidChangesOpen);
   buttons?.classList.toggle('hidden', vidChangesOpen);
   foot?.classList.toggle('hidden', !vidChangesOpen);
-  document.getElementById('video-changes-cancel')?.classList.toggle('hidden', vidChangesOpen && vidChangesPostedThisRound);
-  if (send) send.innerHTML = vidChangesOpen ? COMMENT_SEND_HTML.replace('Send', 'Save') : COMMENT_SEND_HTML;
-  if (status && vidChangesOpen) setStatusText(status, 'Leave your notes for Ravi, then click Done to send the video back.');
+  send?.classList.toggle('hidden', vidChangesOpen);   // Post lives in the footer
+  vidSyncChangesUI();
+  if (status && vidChangesOpen) setStatusText(status, 'Leave your notes for the editor, then click Done to send the video back.');
 }
-const COMMENT_SEND_HTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Send';
-let vidChangesPostedThisRound = false;
+// While Joe is writing "Send back for edits" notes there is one main action at a time:
+// Cancel (nothing posted) → Post (a note/recording is ready) → Add more / Done.
+function vidSyncChangesUI() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!vidChangesOpen || currentProfile?.is_reviewer !== true || v?.status !== 'to_review') return;
+  const recording = !!mediaRecorder && mediaRecorder.state !== 'inactive';
+  const draft = !!composerAudioBlob || !!composerImageFile || !!document.getElementById('comment-text')?.value.trim();
+  const posted = vidMyNotes > 0;
+  const composing = !posted || vidChangesAdding || draft || recording;
+  const show = (id, on) => document.getElementById(id)?.classList.toggle('hidden', !on);
+  show('vid-composer', composing);
+  show('video-changes-cancel', !posted && !draft && !recording);
+  show('vid-post-btn', draft && !recording);
+  show('vid-add-more-btn', posted && !composing);
+  show('vid-done-btn', posted && !draft && !recording);
+}
+function vidAddMore() {
+  vidChangesAdding = true;
+  vidSyncChangesUI();
+  document.getElementById('comment-text')?.focus();
+}
+// Joe's notes are locked once the video leaves his review (Done / Mark as Complete)
+function vidNotesLocked() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  return currentProfile?.is_reviewer === true && v?.status !== 'to_review';
+}
 function openVideoChanges() {
-  vidChangesOpen = true; vidChangesPostedThisRound = false;
+  vidChangesOpen = true; vidChangesAdding = false;
   const v = allVideos.find(x => x.id === currentVideoId);
   applyVideoReviewMode(v);
   document.getElementById('feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 function cancelVideoChanges() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') { showToast('Stop the recording first', 'error'); return; }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') { showToast('Stop the recording first', 'error'); return; }
   vidChangesOpen = false;
   resetComposer();
   const v = allVideos.find(x => x.id === currentVideoId);
@@ -1998,7 +2062,7 @@ async function sendBackForEdits() {
     guardStatus: 'to_review',
     btnId: 'send-back-btn',
     notifyType: 'more_changes_requested',
-    successMsg: 'Sent back for edits — Ravi notified',
+    successMsg: 'Sent back for edits — the editor has been notified',
     errorMsg: 'Could not send back',
   });
 }
@@ -2010,7 +2074,7 @@ async function markComplete() {
     guardStatus: 'to_review',
     btnId: 'mark-complete-btn',
     notifyType: 'round2_reviewed',
-    successMsg: 'Marked complete — moved to Ravi\'s Completed Videos',
+    successMsg: 'Marked complete — moved to Completed Videos',
     errorMsg: 'Could not mark complete',
   });
 }
@@ -3656,6 +3720,8 @@ async function openScript(id, versionId = null) {
     sb.from('script_versions').select('*').eq('script_id', id).order('version'),
   ]);
   if (error || !s) { showToast('Could not open script', 'error'); return; }
+  // A project already in the video stage opens on its Video tab
+  if (id !== currentScriptId && s.status === 'approved') scriptTab = 'video';
 
   currentScript = s;
   currentScriptId = id;
@@ -4662,21 +4728,22 @@ function renderProjectHubHtml(s, client = false) {
     main = `<div class="pa-video"><div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div></div>`;
   } else if (isReviewerUser() && ['empty', 'raw', 'to_edit'].includes(v.status)) {
     // Joe sees the video only once it has been submitted to him
-    main = `<div class="pa-video"><div class="pa-video-msg"><span>${v.status === 'to_edit' ? 'Ravi is making your changes — it comes back to your To Review when ready.' : 'The video is being produced — it comes to your To Review when ready.'}</span></div></div>`;
+    main = `<div class="pa-video"><div class="pa-video-msg"><span>${v.status === 'to_edit' ? 'The editor is making your changes — it comes back to your To Review when ready.' : 'The video is being produced — it comes to your To Review when ready.'}</span></div></div>`;
   } else if (!v.storage_key && !v.video_url) {
     main = canUploadSlotVideo() ? renderVideoUploadFormHtml(v) : `
-      <div class="pa-video"><div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet. Ravi uploads it here once it is produced.</span></div></div>`;
+      <div class="pa-video"><div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet. The editor uploads it here once it is produced.</span></div></div>`;
   } else {
     main = `
       <div class="pa-video" id="pa-video"><div class="pa-video-msg">Loading video…</div></div>
       <div class="pa-details">
         <div class="pa-details-title">${escapeHtml(v.title)}</div>
-        <div class="pa-details-desc">${v.description ? escapeHtml(v.description) : '<span class="pa-empty">No description yet.</span>'}</div>
+        ${v.description ? `<div class="pa-details-desc">${escapeHtml(v.description)}</div>`
+          : client ? '' : '<div class="pa-details-desc"><span class="pa-empty">No description yet.</span></div>'}
         <div class="pa-details-meta">
-          <div class="modal-meta-item"><strong>${escapeHtml(String(v.status || '—').replace('_', ' '))}</strong>Slot status</div>
-          <div class="modal-meta-item"><strong>${v.video_type ? escapeHtml(v.video_type) : '—'}</strong>Type</div>
+          <div class="modal-meta-item"><strong>${escapeHtml(VIDEO_STATUS_LABELS[v.status] || v.status || '—')}</strong>Status</div>
+          ${v.video_type ? `<div class="modal-meta-item"><strong>${escapeHtml(v.video_type)}</strong>Type</div>` : ''}
           ${v.duration_seconds ? `<div class="modal-meta-item"><strong>${formatDuration(v.duration_seconds)}</strong>Length</div>` : ''}
-          <a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>
+          ${client ? '' : `<a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>`}
         </div>
       </div>
       <div id="pa-workflow"></div>`;
