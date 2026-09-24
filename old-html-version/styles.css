@@ -3141,3 +3141,9 @@ a.pa-item-name:hover { color: var(--teal); text-decoration: underline; }
   box-shadow: 0 -12px 24px rgba(5, 11, 20, 0.55);
 }
 .sc-changes-foot.sticky-actions { margin-top: 10px; }
+
+/* Voice-note transcript: first line only (Joe starts with the section number); tap for all */
+.fb-firstline { margin: 4px 0 2px; font-size: 12.5px; line-height: 1.4; color: rgba(240,244,248,0.85);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.fb-firstline.open { white-space: pre-wrap; word-break: break-word; }
+.fb-firstline.pending { color: var(--muted); font-style: italic; cursor: default; }

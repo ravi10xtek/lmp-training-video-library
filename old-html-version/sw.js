@@ -2,7 +2,7 @@
 // Caches the app shell so it loads instantly and passes PWA installability checks.
 // Also handles Web Push notifications.
 
-const CACHE_NAME = 'lmp-training-v28';   // bump with the ?v= in index.html on each release
+const CACHE_NAME = 'lmp-training-v29';   // bump with the ?v= in index.html on each release
 
 // App shell files to cache on install
 const SHELL = [

@@ -789,7 +789,7 @@ async function loadFeedback(videoId, viewRound) {
 
   const { data, error } = await sb
     .from('video_feedback')
-    .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
+    .select('id, user_id, body, audio_path, image_path, duration_seconds, transcript, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
     .order('created_at', { ascending: false });   // newest at the top
@@ -806,8 +806,6 @@ async function loadFeedback(videoId, viewRound) {
     return;
   }
 
-  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
-
   const locked = vidNotesLocked();
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles?.full_name || 'Admin';
@@ -815,25 +813,11 @@ async function loadFeedback(videoId, viewRound) {
     const canDelete = fb.user_id === currentUser?.id && !locked;
 
     let audioHtml = '';
-    let transcribeHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
       if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
-      if (isAdmin) {
-        transcribeHtml = `
-          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', ${jsArg(fb.audio_path)}, this)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
-            Transcribe
-          </button>
-          <div class="transcript-box hidden" id="fb-transcript-${fb.id}">
-            <div class="transcript-toolbar">
-              <span class="transcript-label">Transcript</span>
-              <button class="btn btn-ghost btn-sm" onclick="copyTranscript('fb-transcript-text-${fb.id}', this)">Copy</button>
-            </div>
-            <div class="transcript-text" id="fb-transcript-text-${fb.id}"></div>
-          </div>`;
-      }
     }
+    const lineHtml = fbTranscriptLine(fb, 'video');
 
     let imageHtml = '';
     if (fb.image_path) {
@@ -852,8 +836,8 @@ async function loadFeedback(videoId, viewRound) {
           ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}')">Delete</button>` : ''}
         </div>
         ${bodyHtml}
+        ${lineHtml}
         ${audioHtml}
-        ${transcribeHtml}
         ${imageHtml}
       </div>`;
   }));
@@ -1302,30 +1286,6 @@ function _audioBufferToWav(buffer) {
     off += 2;
   }
   return new Blob([ab], { type: 'audio/wav' });
-}
-
-async function transcribeFeedback(id, audioPath, btn) {
-  const box = document.getElementById('fb-transcript-' + id);
-  if (!box) return;
-  const origHtml = btn.innerHTML;
-  btn.disabled = true;
-  btn.textContent = 'Transcribing…';
-
-  try {
-    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, {
-      body: { audioPath },
-    });
-    const detail = error ? await parseFunctionError(error) : (data?.error || null);
-    if (detail) throw new Error(detail);
-
-    box.querySelector('.transcript-text').textContent = data.text || '(empty transcript)';
-    box.classList.remove('hidden');
-    btn.style.display = 'none';
-  } catch (err) {
-    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
-    btn.disabled = false;
-    btn.innerHTML = origHtml;
-  }
 }
 
 async function copyTranscript(textId, btn) {
@@ -5085,7 +5045,6 @@ async function loadScriptFeedback() {
   if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`; return; }
   if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
 
-  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
   // Once Joe has decided on a version (Done / Approve), its notes are locked
   const locked = scVersionLocked();
   const items = await Promise.all(data.map(async (fb) => {
@@ -5097,11 +5056,7 @@ async function loadScriptFeedback() {
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
       if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
-      if (fb.transcript) {
-        audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
-      } else if (isAdmin) {
-        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', ${jsArg(fb.audio_path)})">Transcribe</button></div>`;
-      }
+      audioHtml = fbTranscriptLine(fb, 'script') + audioHtml;
     }
     const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
 
@@ -5118,23 +5073,43 @@ async function loadScriptFeedback() {
   list.innerHTML = items.join('');
 }
 
-// Whisper via the existing transcribe function (admin-only on the server, so
-// an admin clicks Transcribe). Stored on the row so the writer reads text.
-async function transcribeScriptFeedback(fbId, audioPath) {
-  if (currentProfile?.role !== 'admin') return;
-  const box = document.getElementById(`sc-transcript-${fbId}`);
-  if (box) box.textContent = 'Transcribing…';
+// ── Voice-note transcripts: one line per note ─────────────────
+// Joe opens each recording with the section it's about ("Section 4 …"), so
+// the note shows just the first line of its transcript — tap to see it all.
+// Transcribed server-side right after saving (transcribe fn, feedbackId mode);
+// older notes are filled in when their author or the manager opens them.
+const fbTranscribing = new Set();
+function fbTranscriptLine(fb, kind) {
+  if (!fb.audio_path) return '';
+  const id = `fl-${kind}-${fb.id}`;
+  if (fb.transcript) {
+    return `<div class="fb-firstline" id="${id}" onclick="this.classList.toggle('open')">${escapeHtml(fb.transcript.trim())}</div>`;
+  }
+  if (fb.user_id !== currentUser?.id && currentProfile?.role !== 'admin') return '';
+  queueMicrotask(() => fbTranscribe(fb.id, kind));
+  return `<div class="fb-firstline pending" id="${id}">Transcribing…</div>`;
+}
+async function fbTranscribe(fbId, kind) {
+  const key = kind + fbId;
+  if (fbTranscribing.has(key)) return;
+  fbTranscribing.add(key);
+  let text = null;
   try {
-    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { audioPath } });
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { feedbackId: fbId, kind } });
     const detail = error ? await parseFunctionError(error) : (data?.error || null);
     if (detail) throw new Error(detail);
-    const text = (data.text || '').trim() || '(empty transcript)';
-    await sb.from('script_feedback').update({ transcript: text }).eq('id', fbId);
-    if (currentScriptId) loadScriptFeedback();
+    text = (data?.text || '').trim();
   } catch (err) {
-    console.warn('[script transcript]', err);
-    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', ${jsArg(audioPath)})">retry</a>`;
+    console.warn('[note transcript]', err);
+  } finally {
+    fbTranscribing.delete(key);
   }
+  const el = document.getElementById(`fl-${kind}-${fbId}`);
+  if (!el) return;
+  if (!text) { el.remove(); return; }
+  el.classList.remove('pending');
+  el.textContent = text;
+  el.onclick = () => el.classList.toggle('open');
 }
 
 async function deleteScriptFeedback(id) {
