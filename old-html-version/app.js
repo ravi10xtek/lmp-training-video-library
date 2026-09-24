@@ -156,7 +156,9 @@ async function initApp(user) {
   document.getElementById('app').style.display = 'flex';
 
   // Set user UI
-  const initials = (profile?.full_name || user.email).split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+  // Initials from the words of the name, ignoring punctuation ("Joe (Client)" → "JC")
+  const initials = (profile?.full_name || user.email).split(/[\s@._-]+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, '')[0]).filter(Boolean).join('').toUpperCase().slice(0, 2) || '?';
   document.getElementById('user-avatar').textContent = initials;
   document.getElementById('user-name').textContent = profile?.full_name || user.email;
 
@@ -168,7 +170,7 @@ async function initApp(user) {
     if (!profile?.is_reviewer) document.getElementById('sidebar-manage-item').classList.remove('hidden');
   }
   if (profile?.is_reviewer) {
-    badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
+    badge.textContent = 'Client';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
   }
@@ -188,8 +190,10 @@ async function initApp(user) {
   // Load data — scripts before videos so cards can show their script tag
   await Promise.all([loadCategories(), loadScripts()]);
   await loadVideos();
-  // The client lands on TO REVIEW, not the library dashboard
+  // The client lands on TO REVIEW, not the library dashboard; a writer or
+  // editor lands on their projects (the library is empty until videos publish).
   if (isReviewerUser()) showReviewPage(document.getElementById('folder-to-review'));
+  else if (!isStaffUser() && allScripts.some(isScriptAssignee)) showScriptsPage(document.getElementById('sidebar-scripts-item'));
   await Promise.all([loadNotifications(), loadRecordingsCount()]);
   subscribeToNotifications();
   subscribeToScriptChanges();
@@ -208,7 +212,7 @@ async function loadCategories() {
   const catSel = document.getElementById('v-category');
   catSel.innerHTML = '<option value="">Select category…</option>';
   allCategories.forEach(c => {
-    catSel.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+    catSel.innerHTML += `<option value="${c.id}">${escapeHtml(c.name)}</option>`;
   });
 }
 
@@ -216,7 +220,7 @@ async function loadSubcats(catId) {
   const sel = document.getElementById('v-subcat');
   sel.innerHTML = '<option value="">Select sub-category…</option>';
   allSubcats.filter(s => s.category_id === catId).forEach(s => {
-    sel.innerHTML += `<option value="${s.id}">${s.name}</option>`;
+    sel.innerHTML += `<option value="${s.id}">${escapeHtml(s.name)}</option>`;
   });
 }
 
@@ -447,7 +451,7 @@ function renderVideos() {
     || (currentFilter === 'all' ? 'All Videos'
         : allCategories.find(c => c.slug === currentFilter)?.name || 'Videos');
   html += `<div class="page-header">
-    <div class="page-title">${catLabel}</div>
+    <div class="page-title">${escapeHtml(catLabel)}</div>
     <div class="page-sub">${videos.length} ${currentStatus === 'empty' ? `slot${videos.length !== 1 ? 's' : ''}` : `video${videos.length !== 1 ? 's' : ''}`}${currentSearch ? ` matching "${escapeHtml(currentSearch)}"` : ''}</div>
   </div>`;
 
@@ -459,7 +463,7 @@ function renderVideos() {
       if (subcats.length > 0) {
         html += `<div class="filter-tabs">`;
         subcats.forEach(s => {
-          html += `<button class="filter-tab ${currentSubcatFilter === s.slug ? 'active' : ''}" onclick="filterSubcat('${s.slug}')">${s.name}</button>`;
+          html += `<button class="filter-tab ${currentSubcatFilter === s.slug ? 'active' : ''}" onclick="filterSubcat(${jsArg(s.slug)})">${escapeHtml(s.name)}</button>`;
         });
         html += `</div>`;
       }
@@ -550,7 +554,7 @@ function renderVideoCard(v, isAdmin) {
   const hasPlayableVideo = Boolean(v.video_url || v.storage_key);
 
   const thumb = v.thumbnail_url
-    ? `<img src="${v.thumbnail_url}" alt="" class="card-thumb-img" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block">`
+    ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="" class="card-thumb-img" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block">`
     : `<div class="card-thumb-empty">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         <span>${hasPlayableVideo ? 'Video ready' : 'No video yet'}</span>
@@ -582,13 +586,13 @@ function renderVideoCard(v, isAdmin) {
     </div>
     <div class="card-body">
       <div class="card-tags">
-        ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
+        ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
         ${roundBadge}
         ${isAdmin ? scriptTagHtml(scriptForVideo(v.id)) : ''}
       </div>
-      <div class="card-title">${v.title}</div>
-      <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>
+      <div class="card-title">${escapeHtml(v.title)}</div>
+      <div class="card-sub">${escapeHtml(v.subcategories?.name || v.categories?.name || '')}</div>
       <div class="card-footer">
         <span class="card-status">
           <span class="status-dot" style="background:${statusColor}; box-shadow: 0 0 8px ${statusColor}"></span>
@@ -641,7 +645,7 @@ async function openVideo(id) {
     }
     document.getElementById('video-player').innerHTML = `
       <video controls autoplay playsinline style="width:100%;height:100%;background:black">
-        <source src="${playbackUrl}">
+        <source src="${escapeHtmlAttr(playbackUrl)}">
         Your browser does not support HTML5 video.
       </video>`;
   } catch (err) {
@@ -650,15 +654,15 @@ async function openVideo(id) {
   }
 
   document.getElementById('modal-tags').innerHTML = `
-    ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
-    <span class="card-tag" style="background:rgba(255,255,255,0.08);color:var(--muted)">${v.categories?.name || ''}</span>
-    ${v.subcategories?.name ? `<span class="card-tag" style="background:rgba(255,255,255,0.06);color:var(--muted)">${v.subcategories.name}</span>` : ''}`;
+    ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
+    <span class="card-tag" style="background:rgba(255,255,255,0.08);color:var(--muted)">${escapeHtml(v.categories?.name || '')}</span>
+    ${v.subcategories?.name ? `<span class="card-tag" style="background:rgba(255,255,255,0.06);color:var(--muted)">${escapeHtml(v.subcategories.name)}</span>` : ''}`;
 
   document.getElementById('modal-title').textContent = v.title;
   document.getElementById('modal-desc').textContent = v.description || 'No description provided.';
   document.getElementById('modal-meta').innerHTML = `
-    <div class="modal-meta-item"><strong>${v.video_type || '—'}</strong>Type</div>
-    <div class="modal-meta-item"><strong>${v.subcategories?.name || '—'}</strong>Sub-category</div>`;
+    <div class="modal-meta-item"><strong>${escapeHtml(v.video_type || '—')}</strong>Type</div>
+    <div class="modal-meta-item"><strong>${escapeHtml(v.subcategories?.name || '—')}</strong>Sub-category</div>`;
   renderModalScriptLink(v.id);
 
   modal.classList.add('open');
@@ -757,7 +761,7 @@ async function loadFeedback(videoId, viewRound) {
   vidMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
   vidSyncChangesUI();
   if (error) {
-    list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
+    list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`;
     return;
   }
 
@@ -766,7 +770,7 @@ async function loadFeedback(videoId, viewRound) {
     return;
   }
 
-  const isAdmin = currentProfile?.role === 'admin';
+  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
 
   const locked = vidNotesLocked();
   const items = await Promise.all(data.map(async (fb) => {
@@ -778,10 +782,10 @@ async function loadFeedback(videoId, viewRound) {
     let transcribeHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
-      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
       if (isAdmin) {
         transcribeHtml = `
-          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', '${fb.audio_path}', this)">
+          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', ${jsArg(fb.audio_path)}, this)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
             Transcribe
           </button>
@@ -799,7 +803,7 @@ async function loadFeedback(videoId, viewRound) {
     if (fb.image_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.image_path, 60 * 60);
       if (signed?.signedUrl) {
-        imageHtml = `<a href="${signed.signedUrl}" target="_blank" rel="noopener" class="feedback-image-link"><img class="feedback-image" src="${signed.signedUrl}" alt="attachment"></a>`;
+        imageHtml = `<a href="${escapeHtmlAttr(signed.signedUrl)}" target="_blank" rel="noopener" class="feedback-image-link"><img class="feedback-image" src="${escapeHtmlAttr(signed.signedUrl)}" alt="attachment"></a>`;
       }
     }
 
@@ -808,7 +812,7 @@ async function loadFeedback(videoId, viewRound) {
     return `
       <div class="feedback-item">
         <div class="feedback-item-header">
-          <span><span class="feedback-item-author">${name}</span> · ${when}</span>
+          <span><span class="feedback-item-author">${escapeHtml(name)}</span> · ${when}</span>
           ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}')">Delete</button>` : ''}
         </div>
         ${bodyHtml}
@@ -1692,7 +1696,7 @@ async function renderVideoFormPreview(v) {
     if (token !== videoPreviewToken) return;
     if (!url) throw new Error('no playback url');
     box.innerHTML = `<video controls playsinline preload="metadata"
-      ${v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : ''}><source src="${url}"></video>`;
+      ${v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : ''}><source src="${escapeHtmlAttr(url)}"></video>`;
   } catch (err) {
     if (token !== videoPreviewToken) return;
     console.warn('[drawer preview]', err);
@@ -2323,8 +2327,8 @@ function renderNotifPanel() {
   }
   list.innerHTML = allNotifications.slice(0, 25).map(n => `
     <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
-      <div class="notif-title">${n.title}</div>
-      ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
+      <div class="notif-title">${escapeHtml(n.title)}</div>
+      ${n.message ? `<div class="notif-msg">${escapeHtml(n.message)}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
       ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
     </div>
@@ -3306,7 +3310,7 @@ async function showRecordingsPage(sidebarEl) {
 
     const thumbArea = r.thumbnail_data
       ? `<div class="recording-thumb" style="position:relative">
-           <img src="${r.thumbnail_data}" alt="${label}" style="width:100%;height:100%;object-fit:cover;display:block">
+           <img src="${escapeHtmlAttr(r.thumbnail_data)}" alt="${escapeHtmlAttr(label)}" style="width:100%;height:100%;object-fit:cover;display:block">
            ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
          </div>`
       : `<div class="recording-thumb-icon" style="position:relative">
@@ -3318,9 +3322,9 @@ async function showRecordingsPage(sidebarEl) {
       <div class="recording-card" onclick="openRecordingViewer('${r.id}')">
         ${thumbArea}
         <div class="recording-body">
-          <div class="recording-name">${label}</div>
+          <div class="recording-name">${escapeHtml(label)}</div>
           <div class="recording-meta">
-            <span class="recording-type-badge ${r.type}">${r.type}</span>
+            <span class="recording-type-badge ${escapeHtmlAttr(r.type)}">${escapeHtml(r.type)}</span>
             ${date}
           </div>
         </div>
@@ -3353,25 +3357,25 @@ async function openRecordingViewer(id) {
 
   let playerHtml = '';
   if (r.type === 'photo') {
-    playerHtml = `<img src="${url}" alt="${label}" style="width:100%;display:block;border-radius:var(--radius-lg) var(--radius-lg) 0 0;object-fit:contain;max-height:60vh;background:#000">`;
+    playerHtml = `<img src="${escapeHtmlAttr(url)}" alt="${escapeHtmlAttr(label)}" style="width:100%;display:block;border-radius:var(--radius-lg) var(--radius-lg) 0 0;object-fit:contain;max-height:60vh;background:#000">`;
   } else if (r.type === 'video') {
     playerHtml = `<div class="video-wrapper" style="border-radius:var(--radius-lg) var(--radius-lg) 0 0">
       <video controls autoplay playsinline style="width:100%;height:100%;background:#000">
-        <source src="${url}">
+        <source src="${escapeHtmlAttr(url)}">
       </video>
     </div>`;
   } else {
     playerHtml = `<div style="padding:32px;background:rgba(0,0,0,0.3);border-radius:var(--radius-lg) var(--radius-lg) 0 0;display:flex;align-items:center;justify-content:center">
       <audio controls autoplay style="width:100%;outline:none">
-        <source src="${url}">
+        <source src="${escapeHtmlAttr(url)}">
       </audio>
     </div>`;
   }
 
   document.getElementById('recording-player-wrap').innerHTML = playerHtml;
   document.getElementById('recording-viewer-meta').innerHTML = `
-    <div class="recording-viewer-title">${label}</div>
-    <div class="recording-viewer-sub">${r.type.charAt(0).toUpperCase() + r.type.slice(1)} · ${date}${r.duration_sec ? ' · ' + _fmtDuration(r.duration_sec) : ''}</div>`;
+    <div class="recording-viewer-title">${escapeHtml(label)}</div>
+    <div class="recording-viewer-sub">${escapeHtml(r.type.charAt(0).toUpperCase() + r.type.slice(1))} · ${date}${r.duration_sec ? ' · ' + _fmtDuration(r.duration_sec) : ''}</div>`;
 
   // Only show delete button for own recordings or admins
   const isOwn  = r.created_by === currentUser.id;
@@ -4434,10 +4438,17 @@ function renderScriptModal() {
   scSyncChangesUI();
 }
 
-// Textarea content must be escaped but keep newlines as-is (escapeHtml turns them into <br>)
+// For attribute values and textarea content: escapes quotes too (so a value
+// can't close its attribute) but keeps newlines as-is (escapeHtml turns them into <br>)
 function escapeHtmlAttr(str) {
   return String(str ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// A value passed as a string argument inside an inline handler: onclick="f(${jsArg(x)})"
+function jsArg(v) {
+  return escapeHtmlAttr(JSON.stringify(String(v ?? '')));
 }
 
 function scriptDraftDirty() {
@@ -4899,10 +4910,10 @@ async function loadScriptFeedback() {
 
   scMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
   scSyncChangesUI();
-  if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`; return; }
+  if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`; return; }
   if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
 
-  const isAdmin = currentProfile?.role === 'admin';
+  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
   // Once Joe has decided on a version (Done / Approve), its notes are locked
   const locked = scVersionLocked();
   const items = await Promise.all(data.map(async (fb) => {
@@ -4913,11 +4924,11 @@ async function loadScriptFeedback() {
     let audioHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
-      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
       if (fb.transcript) {
         audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
       } else if (isAdmin) {
-        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', '${fb.audio_path}')">Transcribe</button></div>`;
+        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', ${jsArg(fb.audio_path)})">Transcribe</button></div>`;
       }
     }
     const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
@@ -4950,7 +4961,7 @@ async function transcribeScriptFeedback(fbId, audioPath) {
     if (currentScriptId) loadScriptFeedback();
   } catch (err) {
     console.warn('[script transcript]', err);
-    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', '${audioPath}')">retry</a>`;
+    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', ${jsArg(audioPath)})">retry</a>`;
   }
 }
 
@@ -5313,7 +5324,7 @@ async function loadProjectVideo() {
     if (token !== projVideoToken) return;
     if (!url) throw new Error('no url');
     const poster = v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : '';
-    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${url}">Your browser does not support HTML5 video.</video>`;
+    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${escapeHtmlAttr(url)}">Your browser does not support HTML5 video.</video>`;
   } catch (err) {
     if (token !== projVideoToken) return;
     console.warn('[project video]', err);
@@ -5521,7 +5532,7 @@ async function paPlayApproved() {
 function projectAssetItemHtml(a) {
   const url = a.storage_path ? projectAssetUrls[a.storage_path] : null;
   const who = a.profiles ? profileName(a.profiles) : '';
-  const meta = [who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · ');
+  const meta = escapeHtml([who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · '));
   const del = canDeleteProjectAsset(a) ? `<button class="pa-del" title="Remove" onclick="deleteProjectAsset('${a.id}')">✕</button>` : '';
   const isAudio = (a.mime_type || '').startsWith('audio/') || /\.(mp3|m4a|wav|ogg|webm|aac)$/i.test(a.file_name || '');
   const isVideo = (a.mime_type || '').startsWith('video/');
@@ -5541,11 +5552,11 @@ function projectAssetItemHtml(a) {
   return `
     <div class="pa-item">
       <div class="pa-item-row">
-        ${url ? `<a class="pa-item-name" href="${url}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
+        ${url ? `<a class="pa-item-name" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
               : `<span class="pa-item-name">${name}</span>`}
         ${del}
       </div>
-      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${url}"></audio>` : ''}
+      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${escapeHtmlAttr(url)}"></audio>` : ''}
       <span class="pa-item-meta">${meta}</span>
     </div>`;
 }
