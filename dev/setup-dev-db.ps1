@@ -23,7 +23,7 @@ $migrations = @(
   'recordings_thumbnail_migration', 'notifications_type_constraint_fix', 'push_subscriptions_migration',
   'video_feedback_comments_migration', 'joe_recordings_delete_policy', 'workflow_folders_migration',
   'scripts_migration', 'scripts_assignments_migration', 'project_assets_migration', 'video_team_visibility_migration',
-  'roles_lockdown_migration'
+  'roles_lockdown_migration', 'accounts_migration'
 )
 
 if (-not $UsersOnly) {
@@ -38,12 +38,12 @@ if (-not $UsersOnly) {
 # Test accounts. Roles follow workflow_folders_migration.sql:
 #   reviewer = admin + is_reviewer, editor/manager = admin, writers/editors/staff = worker
 $users = @(
-  @{ email = 'joe@lmp.test';      name = 'Joe (Client)';           role = 'admin';  reviewer = $true  },
-  @{ email = 'reviewer@lmp.test'; name = 'Video Reviewer';         role = 'admin';  reviewer = $true  },
-  @{ email = 'ravi@lmp.test';     name = 'Ravi (Manager/Editor)';  role = 'admin';  reviewer = $false },
-  @{ email = 'writer@lmp.test';   name = 'Script Writer';          role = 'worker'; reviewer = $false },
-  @{ email = 'editor@lmp.test';   name = 'Video Editor';           role = 'worker'; reviewer = $false },
-  @{ email = 'staff@lmp.test';    name = 'Client Staff';           role = 'worker'; reviewer = $false }
+  @{ email = 'joe@lmp.test';      name = 'Joe (Client)';           role = 'admin';  reviewer = $true;  type = 'reviewer' },
+  @{ email = 'reviewer@lmp.test'; name = 'Video Reviewer';         role = 'admin';  reviewer = $true;  type = 'reviewer' },
+  @{ email = 'ravi@lmp.test';     name = 'Ravi (Manager/Editor)';  role = 'admin';  reviewer = $false; type = 'manager' },
+  @{ email = 'writer@lmp.test';   name = 'Script Writer';          role = 'worker'; reviewer = $false; type = 'team' },
+  @{ email = 'editor@lmp.test';   name = 'Video Editor';           role = 'worker'; reviewer = $false; type = 'team' },
+  @{ email = 'staff@lmp.test';    name = 'Client Staff';           role = 'worker'; reviewer = $false; type = 'staff' }
 )
 $headers = @{ apikey = $cfg.DEV_SERVICE_ROLE_KEY; Authorization = "Bearer $($cfg.DEV_SERVICE_ROLE_KEY)" }
 foreach ($u in $users) {
@@ -54,7 +54,7 @@ foreach ($u in $users) {
   } catch {
     if ("$_" -match 'already|registered|exists') { Write-Host "exists  $($u.email)" } else { throw }
   }
-  $sql = "update public.profiles p set role='$($u.role)', is_reviewer=$($u.reviewer.ToString().ToLower()), full_name='$($u.name)' from auth.users a where a.id=p.id and a.email='$($u.email)';"
+  $sql = "update public.profiles p set role='$($u.role)', is_reviewer=$($u.reviewer.ToString().ToLower()), account_type='$($u.type)', full_name='$($u.name)' from auth.users a where a.id=p.id and a.email='$($u.email)';"
   & psql $cfg.DEV_DB_URL -v ON_ERROR_STOP=1 -q -X -c $sql | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "profile update failed for $($u.email)" }
 }

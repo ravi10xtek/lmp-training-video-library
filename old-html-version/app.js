@@ -168,7 +168,10 @@ async function initApp(user) {
     badge.textContent = 'Admin';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
-    if (!profile?.is_reviewer) document.getElementById('sidebar-manage-item').classList.remove('hidden');
+    if (!profile?.is_reviewer) {
+      document.getElementById('sidebar-manage-item').classList.remove('hidden');
+      document.getElementById('sidebar-team-item')?.classList.remove('hidden');
+    }
   }
   if (profile?.is_reviewer) {
     badge.textContent = 'Client';
@@ -3750,7 +3753,7 @@ async function loadScripts() {
 
 async function loadProfiles() {
   if (!canManageScripts()) return;
-  const { data } = await sb.from('profiles').select('id, full_name, role, is_reviewer').order('full_name');
+  const { data } = await sb.from('profiles').select('id, full_name, role, is_reviewer, account_type').order('full_name');
   allProfiles = data || [];
 }
 
@@ -4074,11 +4077,15 @@ function projRow(s) {
 }
 
 // ── New project (starts with its script) ─────────────────────
+// Writers and editors are picked from the "Writer / editor" accounts (and the
+// manager); client reviewers and client staff aren't offered. Whoever is
+// already assigned stays listed so the choice never silently changes.
 function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
   let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
-  allProfiles.forEach(p => {
+  const assignable = (p) => !p.account_type || p.account_type === 'team' || p.account_type === 'manager';
+  allProfiles.filter(p => assignable(p) || p.id === selectedId).forEach(p => {
     const you = p.id === currentUser?.id ? ' (you)' : '';
-    const tag = p.is_reviewer ? ' · reviewer' : p.role === 'admin' ? ' · admin' : '';
+    const tag = p.account_type === 'manager' ? ' · manager' : p.is_reviewer ? ' · reviewer' : p.account_type === 'staff' ? ' · staff' : '';
     html += `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${escapeHtml(profileName(p))}${you}${tag}</option>`;
   });
   return html;
@@ -6019,4 +6026,314 @@ async function deleteProjectAsset(id) {
   if (error) { showToast('Could not remove: ' + error.message, 'error'); return; }
   if (a.storage_path) await sb.storage.from(PROJECT_ASSETS_BUCKET).remove([a.storage_path]).catch(() => {});
   loadProjectAssets();
+}
+
+// ══════════════════════════════════════════════════════
+// TEAM — the manager creates and manages everyone's account
+// (admin-users edge function; the database refuses role changes from anyone else)
+// ══════════════════════════════════════════════════════
+const ADMIN_USERS_FUNCTION = 'admin-users';
+const ACCOUNT_TYPES = {
+  team:     { label: 'Writer / editor', plural: 'Writers & editors', desc: 'Writes scripts or edits videos on the projects you assign them to.' },
+  reviewer: { label: 'Client reviewer', plural: 'Client reviewers',  desc: 'Listens to scripts and watches videos, then approves them or asks for changes.' },
+  staff:    { label: 'Client staff',    plural: 'Client staff',      desc: 'Watches published training videos. Nothing else.' },
+  manager:  { label: 'Manager',         plural: 'Managers',          desc: 'Runs projects: assigns people, uploads and publishes. Full access.' },
+};
+const ACCOUNT_TYPE_ORDER = ['manager', 'reviewer', 'team', 'staff'];
+
+let teamAccounts = [];
+let teamModalState = null;   // { mode: 'add' | 'edit' | 'created', ... }
+
+async function callAdminUsers(body) {
+  await ensureFreshSession();
+  const { data, error } = await invokeEdge(ADMIN_USERS_FUNCTION, { body });
+  if (error) throw new Error(await parseFunctionError(error));
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+// Easy to read aloud or type from a phone: no 0/O, 1/l/I
+function generatePassword(len = 12) {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint32Array(len));
+  return Array.from(bytes, b => chars[b % chars.length]).join('');
+}
+
+function initialsOf(name) {
+  return String(name || '?').split(/[\s@._-]+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, '')[0]).filter(Boolean).join('').toUpperCase().slice(0, 2) || '?';
+}
+
+async function showTeamPage(sidebarEl) {
+  if (!canManageScripts()) return;
+  currentPage = 'team';
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('sidebar-team-item'))?.classList.add('active');
+  closeSidebar?.();
+  const main = document.getElementById('main-content');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading team…</div>';
+  try {
+    teamAccounts = (await callAdminUsers({ action: 'list' })).accounts || [];
+  } catch (err) {
+    if (currentPage !== 'team') return;
+    main.innerHTML = `<div class="empty-state"><h3>Could not load the team</h3><p>${escapeHtml(err.message)}</p>
+      <button class="btn btn-ghost btn-sm" style="width:auto" onclick="showTeamPage()">Try again</button></div>`;
+    return;
+  }
+  if (currentPage !== 'team') return;
+  renderTeamPage();
+}
+
+function renderTeamPage() {
+  const main = document.getElementById('main-content');
+  const count = document.getElementById('count-team');
+  if (count) count.textContent = teamAccounts.filter(a => a.active).length;
+
+  const groups = ACCOUNT_TYPE_ORDER.map(type => {
+    const people = teamAccounts.filter(a => a.account_type === type)
+      .sort((a, b) => (b.active - a.active) || String(a.full_name || a.email).localeCompare(String(b.full_name || b.email)));
+    if (!people.length) return '';
+    return `
+      <section class="team-group">
+        <h2 class="team-group-title">${ACCOUNT_TYPES[type].plural} <span class="team-group-count">${people.length}</span></h2>
+        <div class="team-list">${people.map(teamRowHtml).join('')}</div>
+      </section>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="page-header team-header">
+      <div>
+        <div class="page-title">Team</div>
+        <div class="page-sub">Everyone who can sign in. You create their accounts and share the sign-in details with them.</div>
+      </div>
+      <button class="btn btn-primary btn-sm team-add-btn" onclick="openTeamAdd()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add person
+      </button>
+    </div>
+    ${groups || '<div class="empty-state"><h3>No accounts yet</h3></div>'}`;
+}
+
+function teamRowHtml(a) {
+  const you = a.id === currentUser?.id;
+  const name = a.full_name || a.email || 'Unnamed';
+  const seen = !a.active ? 'Deactivated'
+    : a.last_sign_in_at ? `Active ${timeAgo(a.last_sign_in_at)}` : 'Hasn’t signed in yet';
+  return `
+    <button class="team-row ${a.active ? '' : 'inactive'}" onclick="openTeamEdit('${a.id}')">
+      <span class="team-avatar" aria-hidden="true">${escapeHtml(initialsOf(name))}</span>
+      <span class="team-who">
+        <span class="team-name">${escapeHtml(name)}${you ? ' <span class="team-you">you</span>' : ''}</span>
+        <span class="team-email">${escapeHtml(a.email || '')}</span>
+      </span>
+      <span class="team-seen ${a.active ? '' : 'off'}">${escapeHtml(seen)}</span>
+      <svg class="team-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>`;
+}
+
+// ── Modal ────────────────────────────────────────────────────
+function openTeamModal() {
+  document.getElementById('team-modal').classList.add('open');
+}
+function closeTeamModal(e) {
+  if (e && e.target !== document.getElementById('team-modal')) return;
+  document.getElementById('team-modal').classList.remove('open');
+  teamModalState = null;
+}
+
+function teamTypePickerHtml(selected, { lockedTo } = {}) {
+  return `<div class="team-types" role="radiogroup" aria-label="Account type">${
+    ['team', 'reviewer', 'staff', 'manager'].map(t => `
+      <label class="team-type ${t === selected ? 'on' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}">
+        <input type="radio" name="team-type" value="${t}" ${t === selected ? 'checked' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}
+               onchange="document.querySelectorAll('.team-type').forEach(el => el.classList.toggle('on', el.contains(this)))">
+        <span class="team-type-label">${ACCOUNT_TYPES[t].label}</span>
+        <span class="team-type-desc">${ACCOUNT_TYPES[t].desc}</span>
+      </label>`).join('')}</div>`;
+}
+
+function teamPasswordFieldHtml(value) {
+  return `
+    <div class="team-pass">
+      <input class="form-input" id="team-password" value="${escapeHtmlAttr(value)}" autocomplete="new-password" spellcheck="false">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('team-password').value = generatePassword()">New</button>
+    </div>
+    <div class="team-hint">At least 8 characters. You'll share it with them; they can keep it or you can reset it later.</div>`;
+}
+
+function setTeamStatus(text, cls = '') {
+  const el = document.getElementById('team-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sc-editor-status ' + cls;
+}
+
+function openTeamAdd() {
+  teamModalState = { mode: 'add' };
+  document.getElementById('team-modal-body').innerHTML = `
+    <h3 class="team-modal-title" id="team-modal-title">Add a person</h3>
+    <p class="team-modal-sub">They sign in with this email and password. Nothing is emailed to them — you share the details.</p>
+    <div class="form-group"><label class="form-label" for="team-name">Name</label>
+      <input class="form-input" id="team-name" placeholder="e.g. Nimal Perera" autocomplete="off"></div>
+    <div class="form-group"><label class="form-label" for="team-email">Email</label>
+      <input class="form-input" id="team-email" type="email" inputmode="email" autocomplete="off" placeholder="name@example.com"></div>
+    <div class="form-group"><label class="form-label">What do they do?</label>${teamTypePickerHtml('team')}</div>
+    <div class="form-group"><label class="form-label" for="team-password">Password</label>${teamPasswordFieldHtml(generatePassword())}</div>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-ghost btn-sm" onclick="closeTeamModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="team-save-btn" onclick="submitTeamAdd()">Create account</button>
+    </div>
+    <div class="sc-editor-status" id="team-status" aria-live="polite"></div>`;
+  openTeamModal();
+  setTimeout(() => document.getElementById('team-name')?.focus(), 50);
+}
+
+async function submitTeamAdd() {
+  const full_name = document.getElementById('team-name').value.trim();
+  const email = document.getElementById('team-email').value.trim();
+  const account_type = document.querySelector('input[name="team-type"]:checked')?.value;
+  const password = document.getElementById('team-password').value;
+  if (!full_name) { setTeamStatus('Enter their name.', 'err'); document.getElementById('team-name').focus(); return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { setTeamStatus('Enter a valid email address.', 'err'); document.getElementById('team-email').focus(); return; }
+  if (password.length < 8) { setTeamStatus('The password needs at least 8 characters.', 'err'); return; }
+
+  const btn = document.getElementById('team-save-btn');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  setTeamStatus('');
+  try {
+    await callAdminUsers({ action: 'create', full_name, email, account_type, password });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Create account';
+    return;
+  }
+  showToast(`${full_name}'s account is ready`, 'success');
+  showTeamCredentials({ full_name, email, password, created: true });
+  allProfiles = [];                 // assignment lists reload with the new person
+  if (currentPage === 'team') showTeamPage();
+}
+
+// After creating an account or setting a password: the details to share
+function showTeamCredentials({ full_name, email, password, created }) {
+  teamModalState = { mode: 'created' };
+  const first = escapeHtml(full_name.split(' ')[0]);
+  const text = `Sign in to the LMP Training Library\n${location.origin}\nEmail: ${email}\nPassword: ${password}`;
+  document.getElementById('team-modal-body').innerHTML = `
+    <div class="team-done-ico" aria-hidden="true">✓</div>
+    <h3 class="team-modal-title" id="team-modal-title">${created ? 'Account created' : 'Password changed'}</h3>
+    <p class="team-modal-sub">Send ${first} these sign-in details. This is the only time the password is shown.</p>
+    <pre class="team-creds" id="team-creds">${escapeHtml(text)}</pre>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-ghost btn-sm" id="team-copy-btn">Copy details</button>
+      <button class="btn btn-primary btn-sm" onclick="closeTeamModal()">Done</button>
+    </div>`;
+  document.getElementById('team-copy-btn').onclick = async (e) => {
+    const b = e.currentTarget;
+    try { await navigator.clipboard.writeText(text); b.textContent = 'Copied ✓'; }
+    catch (_) { b.textContent = 'Select and copy above'; }
+    setTimeout(() => { if (document.body.contains(b)) b.textContent = 'Copy details'; }, 2000);
+  };
+  openTeamModal();
+}
+
+function openTeamEdit(id) {
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const you = a.id === currentUser?.id;
+  teamModalState = { mode: 'edit', id };
+  document.getElementById('team-modal-body').innerHTML = `
+    <h3 class="team-modal-title" id="team-modal-title">${escapeHtml(a.full_name || a.email || 'Account')}</h3>
+    <p class="team-modal-sub">${escapeHtml(a.email || '')}${a.active ? '' : ' · <strong style="color:#f87171">Deactivated</strong>'}</p>
+    <div class="form-group"><label class="form-label" for="team-name">Name</label>
+      <input class="form-input" id="team-name" value="${escapeHtmlAttr(a.full_name || '')}"></div>
+    <div class="form-group"><label class="form-label">What do they do?</label>
+      ${teamTypePickerHtml(a.account_type, you ? { lockedTo: 'manager' } : {})}
+      ${you ? '<div class="team-hint">You can’t change your own account type.</div>' : ''}</div>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-primary btn-sm" id="team-save-btn" onclick="submitTeamEdit()">Save changes</button>
+    </div>
+    <div class="sc-editor-status" id="team-status" aria-live="polite"></div>
+
+    <div class="team-section">
+      <div class="form-label">Password</div>
+      <div class="team-hint" style="margin-bottom:8px">Set a new one if they've forgotten it.</div>
+      ${teamPasswordFieldHtml(generatePassword())}
+      <div class="sc-btn-row"><button class="btn btn-ghost btn-sm" id="team-pass-btn" onclick="submitTeamPassword()">Set new password</button></div>
+    </div>
+
+    ${you ? '' : `
+    <div class="team-section">
+      <div class="form-label">${a.active ? 'Deactivate' : 'Reactivate'}</div>
+      <div class="team-hint" style="margin-bottom:8px">${a.active
+        ? 'They can no longer sign in. Their notes and work stay. You can reactivate them any time.'
+        : 'Lets them sign in again with their current password.'}</div>
+      <div class="sc-btn-row"><button class="btn ${a.active ? 'btn-danger' : 'btn-ghost'} btn-sm" id="team-active-btn" onclick="submitTeamActive(${!a.active})">${a.active ? 'Deactivate account' : 'Reactivate account'}</button></div>
+    </div>`}`;
+  openTeamModal();
+}
+
+async function submitTeamEdit() {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const full_name = document.getElementById('team-name').value.trim();
+  const account_type = document.querySelector('input[name="team-type"]:checked')?.value;
+  if (!full_name) { setTeamStatus('Enter their name.', 'err'); return; }
+  const patch = { action: 'update', user_id: id };
+  if (full_name !== (a.full_name || '')) patch.full_name = full_name;
+  if (account_type && account_type !== a.account_type) patch.account_type = account_type;
+  if (Object.keys(patch).length === 2) { setTeamStatus('Nothing changed.'); return; }
+  if (patch.account_type === 'manager' && !confirm(`Make ${full_name} a manager? Managers have full access, including this page.`)) return;
+
+  const btn = document.getElementById('team-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await callAdminUsers(patch);
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Save changes';
+    return;
+  }
+  showToast('Saved', 'success');
+  closeTeamModal();
+  allProfiles = [];
+  showTeamPage();
+}
+
+async function submitTeamPassword() {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  const password = document.getElementById('team-password').value;
+  if (!a) return;
+  if (password.length < 8) { setTeamStatus('The password needs at least 8 characters.', 'err'); return; }
+  const btn = document.getElementById('team-pass-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await callAdminUsers({ action: 'password', user_id: id, password });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Set new password';
+    return;
+  }
+  showTeamCredentials({ full_name: a.full_name || a.email, email: a.email, password, created: false });
+}
+
+async function submitTeamActive(active) {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const name = a.full_name || a.email;
+  if (!active && !confirm(`Deactivate ${name}? They won't be able to sign in.`)) return;
+  const btn = document.getElementById('team-active-btn');
+  btn.disabled = true; btn.textContent = active ? 'Reactivating…' : 'Deactivating…';
+  try {
+    await callAdminUsers({ action: 'active', user_id: id, active });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = active ? 'Reactivate account' : 'Deactivate account';
+    return;
+  }
+  showToast(active ? `${name} can sign in again` : `${name} is deactivated`, 'success');
+  closeTeamModal();
+  showTeamPage();
 }
