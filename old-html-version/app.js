@@ -5593,7 +5593,12 @@ async function paSaveVideo() {
     }
     setPaStatus('Saving…');
     let thumb = paPendingThumb;
-    if (!thumb && file) thumb = await generateThumbnailBlob(file).catch(() => null);
+    // Not ready yet (e.g. the tab was in the background): give it a few seconds,
+    // never hold up the upload for it
+    if (!thumb && file) thumb = await Promise.race([
+      generateThumbnailBlob(file).catch(() => null),
+      new Promise(r => setTimeout(() => r(null), 8000)),
+    ]);
     let thumbUrl = null;
     if (thumb) {
       try { thumbUrl = await uploadVideoThumbnail(v.id, thumb); } catch (e) { console.warn('[thumbnail]', e); }
