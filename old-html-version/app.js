@@ -2646,8 +2646,8 @@ const SEND_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" st
 // resubmission after a "Needs changes" is the next version.
 const videoRound     = (v) => v?.review_round || 1;
 const nextVideoVersion = (v) => v?.status === 'to_edit' ? videoRound(v) + 1 : videoRound(v);
-const SUBMIT_BTN_HTML    = (v) => `${SEND_SVG} Send to Joe as v${nextVideoVersion(v)}`;
-const MARK_DONE_BTN_HTML = (v) => `${SEND_SVG} Send to Joe as v${nextVideoVersion(v)}`;
+const SUBMIT_BTN_HTML    = (v) => `${SEND_SVG} Send for review as v${nextVideoVersion(v)}`;
+const MARK_DONE_BTN_HTML = (v) => `${SEND_SVG} Send for review as v${nextVideoVersion(v)}`;
 const PUBLISH_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg> Publish Video';
 
 function updateEditorBtnState(v) {
@@ -2676,10 +2676,10 @@ function updateEditorBtnState(v) {
   if (labelEl) labelEl.textContent = showSubmit && round === 1 ? 'Video stage' : `Video · v${round}`;
 
   const text =
-    showSubmit   ? `Upload done — send v${nextVideoVersion(v)} to Joe for review` :
-    showMarkDone ? `Joe asked for changes on v${round}. Upload v${round + 1} on the project's Video tab, then send it.` :
-    showPublish  ? `Joe approved v${round} — ready to publish` :
-    v.status === 'to_review' ? `v${round} is with Joe` :
+    showSubmit   ? `Upload done — send v${nextVideoVersion(v)} for review` :
+    showMarkDone ? `Changes were requested on v${round}. Upload v${round + 1} on the project's Video tab, then send it.` :
+    showPublish  ? `v${round} is approved — ready to publish` :
+    v.status === 'to_review' ? `v${round} is in review` :
     v.status === 'published' ? `Published ✓ (approved on v${round})` : '';
   setStatusText(statusEl, text);
 }
@@ -2705,7 +2705,7 @@ async function submitForReview() {
   v.status = 'to_review';
   v.review_round = 1;
   const videoId = currentVideoId, title = v.title;
-  showToast('Sent to Joe as v1 — he has been notified', 'success');
+  showToast('Sent for review as v1 — the reviewers have been notified', 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -2739,7 +2739,7 @@ async function markAsDone() {
   v.status = 'to_review';
   v.review_round = nextRound;
   const videoId = currentVideoId, title = v.title;
-  showToast(`Sent to Joe as v${nextRound} — he has been notified`, 'success');
+  showToast(`Sent for review as v${nextRound} — the reviewers have been notified`, 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -4344,7 +4344,7 @@ function projStatusChipsHtml(s, latest) {
   const vRound = s.videos ? videoRound(allVideos.find(x => x.id === s.videos.id) || s.videos) : 1;
   const videoText = !s.videos ? 'Video: no slot' :
     videoApproved ? (vs === 'published' ? `Video approved · v${vRound} published` : `Video approved · v${vRound}`) :
-    vs === 'to_review' ? `Video: with Joe · v${vRound}` :
+    vs === 'to_review' ? `Video: in review · v${vRound}` :
     vs === 'to_edit'   ? `Video: changes requested on v${vRound}` :
     (s.videos.storage_key || s.videos.video_url) && !isReviewerUser() ? 'Video: uploaded · not sent yet' : 'Video: not made yet';
   const videoCls = videoApproved ? 'sc-status-approved' : vs === 'to_review' ? 'sc-status-sent' : vs === 'to_edit' ? 'sc-status-changes' : 'sc-status-draft';
@@ -5381,11 +5381,11 @@ function paVersionTabsHtml(v, shown) {
       : v.status === 'to_edit' ? 'changes'
       : 'approved';
     const color = outcome === 'approved' ? 'var(--teal)' : outcome === 'changes' ? '#60a5fa' : '#f5a524';
-    const title = outcome === 'approved' ? 'Approved' : outcome === 'changes' ? 'Changes requested' : 'With Joe';
+    const title = outcome === 'approved' ? 'Approved' : outcome === 'changes' ? 'Changes requested' : 'In review';
     tabs.push(`<button class="sc-vtab ${n === shown ? 'active' : ''}" title="v${n} — ${title}" onclick="selectVideoVersion(${n})">v${n}<span class="dot" style="background:${color}"></span></button>`);
   }
   if (!isReviewerUser() && pending && projVideoVersions.some(x => x.version === pending)) {
-    tabs.push(`<button class="sc-vtab sc-vtab-draft ${pending === shown ? 'active' : ''}" title="Uploaded, not sent to Joe yet" onclick="selectVideoVersion(${pending})">v${pending} · draft</button>`);
+    tabs.push(`<button class="sc-vtab sc-vtab-draft ${pending === shown ? 'active' : ''}" title="Uploaded, not sent for review yet" onclick="selectVideoVersion(${pending})">v${pending} · draft</button>`);
   }
   // Like the script: tabs only once there is more than one version to pick from
   return tabs.length > 1 ? `<div class="sc-version-tabs">${tabs.join('')}</div>` : '';
@@ -5395,9 +5395,9 @@ function paPlayerNote(v, n) {
   const row = projVideoVersions.find(x => x.version === n);
   const sent = videoSentRound(v);
   const when = row ? `uploaded ${timeAgo(row.created_at)}` : '';
-  if (n > sent) return row ? `Not sent yet — this is what Joe will see · ${when}` : 'Not uploaded yet';
+  if (n > sent) return row ? `Not sent yet — this is what the reviewers will see · ${when}` : 'Not uploaded yet';
   const outcome = n < sent ? 'Changes requested'
-    : v.status === 'to_review' ? 'With Joe'
+    : v.status === 'to_review' ? 'In review'
     : v.status === 'to_edit' ? 'Changes requested'
     : v.status === 'published' ? 'Approved · published' : 'Approved';
   return [outcome, when].filter(Boolean).join(' · ');
@@ -5487,7 +5487,7 @@ function paApprovedHtml(v) {
   return `
     <div class="sc-locked">
       ${LOCK_SVG}
-      <div class="sc-locked-text"><strong>Approved by Joe</strong> ${v.reviewed_at ? timeAgo(v.reviewed_at) : ''} — v${round} is final.
+      <div class="sc-locked-text"><strong>Approved</strong> ${v.reviewed_at ? timeAgo(v.reviewed_at) : ''} — v${round} is final.
         ${published ? 'It is published in the library.' : canManageScripts() ? 'Publish it to put it in the library for the team.' : 'The manager publishes it to the library.'}</div>
       ${canManageScripts() && !published ? `<div class="sc-btn-row" style="margin-top:0">
         <button class="btn btn-primary btn-sm" id="pa-publish-btn" onclick="paPublish()">${SEND_SVG} Publish</button></div>` : ''}
@@ -5506,15 +5506,15 @@ function paEditorHtml(v) {
     return `
       <div class="sc-editor" id="pa-editor">
         <div class="workflow-section-label">Video</div>
-        <div class="sc-editor-hint">v${round} is with Joe. You'll be notified when he approves it or asks for changes.</div>
+        <div class="sc-editor-hint">v${round} is in review. You'll be notified when it's approved or changes are asked for.</div>
       </div>`;
   }
   const n = pendingVideoVersion(v);
   const uploaded = projVideoVersions.find(x => x.version === n);
   const manager = canManageScripts();
   const ctx = v.status === 'to_edit'
-    ? `Joe asked for changes on v${round}. His notes are below — make them, upload v${n} and send it to him.`
-    : 'Upload the finished video. Joe watches it on his phone, then approves it or asks for changes.';
+    ? `Changes were requested on v${round}. The notes are below — make them, upload v${n} and send it for review.`
+    : 'Upload the finished video. The reviewers watch it, then approve it or ask for changes.';
   return `
     <div class="sc-editor" id="pa-editor">
       <div class="workflow-section-label">Video · v${n}</div>
@@ -5540,11 +5540,11 @@ function paEditorHtml(v) {
       <div class="sc-editor-hint">${escapeHtml(ctx)}</div>
       <div class="sc-btn-row">
         <button class="btn btn-ghost btn-sm" id="pa-v-save" onclick="paSaveVideo()" ${manager ? '' : 'disabled'}>${uploaded ? `Replace v${n}` : `Upload v${n}`}</button>
-        <button class="btn btn-primary btn-sm" id="pa-send-btn" onclick="paSendToJoe()" ${uploaded ? '' : 'disabled'}>${SEND_SVG} Send to Joe as v${n}</button>
+        <button class="btn btn-primary btn-sm" id="pa-send-btn" onclick="paSendToJoe()" ${uploaded ? '' : 'disabled'}>${SEND_SVG} Send for review as v${n}</button>
       </div>
       <div class="sc-editor-status" id="pa-editor-status">${uploaded
         ? `v${n} uploaded ${timeAgo(uploaded.created_at)} — watch it above, then send it.`
-        : `Upload v${n} to send it to Joe.`}</div>
+        : `Upload v${n} to send it for review.`}</div>
     </div>`;
 }
 
@@ -5632,7 +5632,7 @@ async function paSaveVideo() {
     });
     if (error) throw error;
     paPendingFile = null; paPendingThumb = null;
-    showToast(`v${ver} uploaded — watch it, then send it to Joe`, 'success');
+    showToast(`v${ver} uploaded — watch it, then send it for review`, 'success');
     await Promise.all([loadVideos(), loadScripts()]);
     if (scriptId === currentScriptId) { paViewVersion = ver; openScript(scriptId); }
   } catch (err) {
@@ -5661,7 +5661,7 @@ async function paSendToJoe() {
     if (btn) btn.innerHTML = html;
     return;
   }
-  showToast(`v${n} sent — Joe has been notified`, 'success');
+  showToast(`v${n} sent for review — the reviewers have been notified`, 'success');
   invokeEdge(NOTIFY_FUNCTION, { body: { type: 'video_ready', videoId: v.id, videoTitle: v.title } })
     .catch(err => console.warn('[notify video_ready]', err));
   await Promise.all([loadVideos(), loadScripts()]);
