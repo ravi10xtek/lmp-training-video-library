@@ -2285,11 +2285,28 @@ function formatDuration(secs) {
   return s > 0 ? `${m}m ${s}s` : `${m} min`;
 }
 
+const TOAST_MS = 3000;
+let toastTimer = null;
 function showToast(msg, type = 'success') {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = `toast show ${type}`;
-  setTimeout(() => t.classList.remove('show'), 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), TOAST_MS);
+}
+
+// After a reviewer's decision: the window stays up (its button showing the
+// result) while the banner is on screen, then closes back to To Review.
+function closeAfterDecision(btn, doneText) {
+  if (btn) { btn.disabled = true; btn.textContent = doneText; }
+  const scriptId = currentScriptId;
+  setTimeout(() => {
+    if (scriptId && scriptId !== currentScriptId) return;   // they already moved on
+    if (paWorkflowMounted() || currentScriptId) closeScriptModal();
+    else closeVideoModal();
+    if (isReviewerUser()) showReviewPage(document.getElementById('folder-to-review'));
+    else showScriptsPage(document.getElementById('sidebar-scripts-item'));
+  }, TOAST_MS);
 }
 
 // ══════════════════════════════════════════════════════
@@ -2635,8 +2652,8 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
   v.status = status;
   v.reviewed_at = reviewedAt;
   showToast(successMsg, 'success');
-  // The video has left Joe's TO REVIEW folder — close + refresh his list
-  closeVideoModal();
+  // The video has left the TO REVIEW queue: show the result, then close
+  closeAfterDecision(btn, status === 'completed' ? 'Approved ✓' : 'Sent to editor ✓');
   await loadVideos();
 
   invokeEdge(NOTIFY_FUNCTION, {
@@ -5045,8 +5062,7 @@ async function scriptDecision(decision) {
   }).catch(err => console.warn('[notify script decision]', err));
 
   await loadScripts();
-  if (decision === 'approved') { closeScriptModal(); isReviewerUser() ? showReviewPage(document.getElementById('folder-to-review')) : showScriptsPage(document.getElementById('sidebar-scripts-item')); }
-  else { if (currentPage === 'review') showReviewPage(); openScript(scriptId); }
+  closeAfterDecision(btn, decision === 'approved' ? 'Approved ✓' : 'Sent to writer ✓');
 }
 
 // ── Feedback ─────────────────────────────────────────────────
