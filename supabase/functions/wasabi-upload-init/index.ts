@@ -28,6 +28,9 @@ type UploadInitBody = {
   fileName: string;
   fileType?: string;
   fileSize?: number;
+  // The video slot this upload is for. Lets the project's assigned editor
+  // (a plain account) upload; admins and the reviewer may omit it.
+  videoId?: string;
 };
 
 function jsonResponse(status: number, body: Record<string, unknown>) {
@@ -41,7 +44,9 @@ function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-async function requireAdmin(authHeader: string | null) {
+// Admins, the reviewer (Joe's own recordings) and the editor assigned to the
+// project that owns `videoId`.
+async function requireUploader(authHeader: string | null, videoId?: string) {
   if (!authHeader?.startsWith("Bearer ")) {
     throw new Error("Missing bearer token");
   }
@@ -52,19 +57,29 @@ async function requireAdmin(authHeader: string | null) {
   if (userError || !userData.user) {
     throw new Error("Unauthorized");
   }
+  const userId = userData.user.id;
 
   const { data: profile, error: profileError } = await supabase
     .from("profiles")
     .select("id, role, is_reviewer")
-    .eq("id", userData.user.id)
+    .eq("id", userId)
     .single();
+  if (profileError || !profile) throw new Error("Unauthorized");
 
-  // Allow admins AND reviewers (Joe uses this for recording uploads)
-  if (profileError || !profile || (profile.role !== "admin" && !profile.is_reviewer)) {
-    throw new Error("Admin access required");
+  if (profile.role === "admin" || profile.is_reviewer) return { userId };
+
+  if (videoId) {
+    const { data: script } = await supabase
+      .from("scripts")
+      .select("id")
+      .eq("video_id", videoId)
+      .eq("editor_id", userId)
+      .limit(1)
+      .maybeSingle();
+    if (script) return { userId };
   }
 
-  return { userId: userData.user.id };
+  throw new Error("Only an admin or the project's editor can upload this video");
 }
 
 Deno.serve(async (req) => {
@@ -83,8 +98,8 @@ Deno.serve(async (req) => {
       return jsonResponse(500, { error: "Server missing Wasabi or Supabase env configuration" });
     }
 
-    const { userId } = await requireAdmin(req.headers.get("authorization"));
     const body = (await req.json()) as UploadInitBody;
+    const { userId } = await requireUploader(req.headers.get("authorization"), body.videoId);
     const fileName = sanitizeFileName(body.fileName || "video.mp4");
     const fileSize = typeof body.fileSize === "number" ? body.fileSize : 0;
 
@@ -125,8 +140,10 @@ Deno.serve(async (req) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Upload init failed";
-    const status = message.includes("Admin") || message.includes("Unauthorized") || message.includes("token")
+    const status = message.includes("Unauthorized") || message.includes("token")
       ? 401
+      : message.includes("Only an admin")
+      ? 403
       : 500;
     return jsonResponse(status, { error: message });
   }
