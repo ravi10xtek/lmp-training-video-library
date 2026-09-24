@@ -4304,12 +4304,14 @@ function renderScriptModal() {
   if (paragraphs.length) {
     const changed = showingDraft ? 0 : (view?.changed_count || 0);
     const label = showingDraft ? 'Draft preview' : `Version ${view.version}`;
+    const prev = showingDraft ? latest : scriptVersions.find(v => v.version === view.version - 1);
+    const removed = removedParagraphs(prev?.paragraphs, paragraphs);
     const note = showingDraft
       ? 'Not sent yet — this is what Joe will hear.'
       : (view.version > 1
-          ? (changed ? `${changed} of ${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''} changed since v${view.version - 1}` : `No text changes since v${view.version - 1}`)
+          ? changeNote(changed, view.total_count, removed.length, view.version - 1)
           : `${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''}`);
-    html += renderScriptPlayerHtml(paragraphs, { label, note, changed });
+    html += renderScriptPlayerHtml(paragraphs, { label, note, changed, removed });
   } else if (!latest && !writer) {
     html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — the writer hasn't sent a version.</div></div>`;
   }
@@ -4378,7 +4380,8 @@ function renderScriptModal() {
 
   // ── Feedback — posted notes first (newest at the top), the composer below.
   //    While Joe is deciding, it only appears after he clicks "Needs changes". ──
-  const canComment = canCommentScript(s);
+  // Joe comments only while deciding; after "Done" his notes stay, the composer closes
+  const canComment = canCommentScript(s) && !(reviewer && !reviewing);
   if (!reviewing || scChangesOpen) html += `
     <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
@@ -4480,15 +4483,82 @@ async function linkScriptVideo() {
   renderScriptModal(); loadScripts().then(renderVideos);
 }
 
+// ── What changed between two versions ───────────────────────
+// Same splitting rules as the script-tts function (blank-line paragraphs,
+// '#' headings, whitespace ignored), so the writer can tell before paying
+// for a render whether anything changed at all.
+function scriptParagraphs(raw) {
+  return String(raw || '')
+    .replace(/\r\n?/g, '\n')
+    .split(/\n\s*\n/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => {
+      const m = p.match(/^#{1,6}\s*([\s\S]+)$/);
+      if (m) return { text: m[1].replace(/\s+/g, ' ').trim(), heading: true };
+      return { text: p.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, ' ').trim(), heading: false };
+    });
+}
+
+function sameParagraphs(a, b) {
+  return a.length === b.length && a.every((p, i) => p.text === b[i].text && !!p.heading === !!b[i].heading);
+}
+
+// Paragraphs of `prev` that are gone from `paras`, each anchored after the
+// paragraph of `paras` it used to follow (-1 = at the top). Unchanged
+// paragraphs line the two versions up; within each gap between them an old
+// paragraph pairs with a new one as an edit, and only the old ones left over
+// were deleted.
+function removedParagraphs(prev, paras) {
+  if (!prev?.length) return [];
+  const key = (p) => p.hash || `${p.heading ? '#' : ''}${p.text}`;
+  const newKeys = new Set(paras.map(key));
+  const prevKeys = new Set(prev.map(key));
+  const pairs = [];                      // [prevIndex, newIndex], increasing in both
+  let from = 0;
+  paras.forEach((p, i) => {
+    for (let j = from; j < prev.length; j++) {
+      if (key(prev[j]) === key(p)) { pairs.push([j, i]); from = j + 1; break; }
+    }
+  });
+  pairs.push([prev.length, paras.length]);   // sentinel closes the last gap
+
+  const out = [];
+  let pj = -1, pi = -1;
+  for (const [j, i] of pairs) {
+    // Moved paragraphs (still present elsewhere) are neither edits nor removals
+    const oldGap = prev.slice(pj + 1, j).filter(p => !newKeys.has(key(p)));
+    const newGap = paras.slice(pi + 1, i).filter(p => !prevKeys.has(key(p)));
+    oldGap.slice(newGap.length).forEach(p =>
+      out.push({ text: p.text, heading: !!p.heading, after: i - 1 }));
+    pj = j; pi = i;
+  }
+  return out;
+}
+
+function changeNote(changed, total, removed, prevVersion) {
+  const parts = [];
+  if (changed) parts.push(`${changed} of ${total} paragraph${total !== 1 ? 's' : ''} changed`);
+  if (removed) parts.push(`${removed} removed`);
+  return parts.length ? `${parts.join(' · ')} since v${prevVersion}` : `No text changes since v${prevVersion}`;
+}
+
 // ── Player ───────────────────────────────────────────────────
-function renderScriptPlayerHtml(paragraphs, { label, note, changed }) {
+function renderScriptPlayerHtml(paragraphs, { label, note, changed, removed = [] }) {
   const changedIdx = paragraphs.map((p, i) => p.changed ? i : -1).filter(i => i >= 0);
-  const rows = paragraphs.map((p, i) => `
+  const removedRow = (r) => `
+    <div class="sp-para removed ${r.heading ? 'heading' : ''}">
+      <span class="sp-para-num">${r.heading ? '§' : '–'}</span>
+      <span>${escapeHtml(r.text)}</span>
+      <span class="sp-chip removed">Removed</span>
+    </div>`;
+  const removedAfter = (i) => removed.filter(r => r.after === i).map(removedRow).join('');
+  const rows = removedAfter(-1) + paragraphs.map((p, i) => `
     <div class="sp-para ${p.heading ? 'heading' : ''} ${p.changed ? 'changed' : ''} ${p.audio_path ? '' : 'no-audio'}" id="sp-para-${i}" onclick="spPlayFrom(${i})">
       <span class="sp-para-num">${p.heading ? '§' : i + 1}</span>
       <span>${escapeHtml(p.text)}</span>
       ${p.changed ? '<span class="sp-chip changed">Changed</span>' : '<span></span>'}
-    </div>`).join('');
+    </div>` + removedAfter(i)).join('');
 
   return `
     <div class="sp-wrap">
@@ -4691,6 +4761,11 @@ async function sendScriptToJoe() {
   if (!text) { setScriptEditorStatus('Write something first.', 'err'); return; }
 
   const latest = scriptVersions.at(-1) || null;
+  if (latest && sameParagraphs(scriptParagraphs(text), latest.paragraphs || [])) {
+    if (!confirm(`Nothing changed since v${latest.version}. Send it to Joe again anyway?`)) {
+      setScriptEditorStatus('Not sent.'); return;
+    }
+  }
   scriptSending = true;
   scriptEditorBusy(true);
   const sendBtn = document.getElementById('sc-send-btn');
@@ -4705,12 +4780,7 @@ async function sendScriptToJoe() {
     const prevHashes = new Set((latest?.paragraphs || []).map(p => p.hash));
     const paragraphs = r.paragraphs.map(p => ({ ...p, changed: latest ? !prevHashes.has(p.hash) : false }));
     const changedCount = paragraphs.filter(p => p.changed).length;
-
-    if (latest && changedCount === 0 && paragraphs.length === (latest.paragraphs || []).length) {
-      if (!confirm(`Nothing changed since v${latest.version}. Send it to Joe again anyway?`)) {
-        setScriptEditorStatus('Not sent.'); return;
-      }
-    }
+    const removedCount = latest ? removedParagraphs(latest.paragraphs, paragraphs).length : 0;
 
     if (sendBtn) sendBtn.textContent = 'Sending…';
     await ensureFreshSession();
@@ -4721,6 +4791,7 @@ async function sendScriptToJoe() {
       body: text,
       paragraphs,
       changed_count: changedCount,
+      removed_count: removedCount,
       total_count: paragraphs.length,
       created_by: currentUser.id,
     }).select('id').single();
@@ -4777,11 +4848,10 @@ async function scriptDecision(decision) {
   const latest = scriptVersions.at(-1);
   if (!latest || currentScript.status !== 'sent') return;
 
+  // "Done" only appears once Joe has posted a note (scMyNotes), so no extra
+  // round trip is needed before showing that the click registered.
   if (decision === 'changes') {
-    const { count } = await sb.from('script_feedback')
-      .select('id', { count: 'exact', head: true })
-      .eq('version_id', latest.id).eq('user_id', currentUser.id);
-    if (!count && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
+    if (!scMyNotes && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
   } else if (!confirm(`Approve v${latest.version}? The text is locked and the final narration is recorded from it.`)) {
     return;
   }
@@ -4793,17 +4863,12 @@ async function scriptDecision(decision) {
   if (btn) btn.textContent = 'Saving…';
 
   await ensureFreshSession();
-  const now = new Date().toISOString();
-  const { error: vErr } = await sb.from('script_versions')
-    .update({ decision, decided_at: now, decided_by: currentUser.id })
-    .eq('id', latest.id);
-  const scriptPatch = decision === 'approved'
-    ? { status: 'approved', approved_version_id: latest.id, approved_at: now, approved_by: currentUser.id }
-    : { status: 'changes' };
-  const { error: sErr } = vErr ? { error: vErr } : await sb.from('scripts').update(scriptPatch).eq('id', currentScriptId);
+  // One server-side step: checks this version is still with Joe, records the
+  // decision on it and moves the script on.
+  const { error } = await sb.rpc('decide_script', { p_script_id: currentScriptId, p_decision: decision });
 
-  if (vErr || sErr) {
-    showToast('Could not save decision: ' + (vErr || sErr).message, 'error');
+  if (error) {
+    showToast('Could not save decision: ' + error.message, 'error');
     renderScriptModal();
     return;
   }

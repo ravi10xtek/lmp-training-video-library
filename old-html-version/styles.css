@@ -2411,6 +2411,10 @@ img, video, canvas, svg { max-width: 100%; }
 }
 .sp-chip.changed { background: rgba(245,165,36,0.15); color: #f5a524; border: 1px solid rgba(245,165,36,0.35); }
 .sp-chip.playing { background: rgba(0,242,254,0.15); color: var(--teal); border: 1px solid rgba(0,242,254,0.35); }
+.sp-chip.removed { background: rgba(248,113,113,0.12); color: #f87171; border: 1px solid rgba(248,113,113,0.35); }
+.sp-para.removed { cursor: default; border-left-color: #f87171; background: rgba(248,113,113,0.05); color: var(--muted); }
+.sp-para.removed > span:nth-child(2) { text-decoration: line-through; text-decoration-color: rgba(248,113,113,0.6); }
+.sp-para.removed:hover { background: rgba(248,113,113,0.05); }
 
 /* — Editor (Ravi) — */
 .sc-editor { margin-top: 20px; padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.08); }
