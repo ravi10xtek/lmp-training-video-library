@@ -122,7 +122,10 @@ async function handleLogin() {
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
 
   if (error) {
-    err.textContent = error.message;
+    const m = error.message || '';
+    err.textContent = /banned/i.test(m) ? 'This account has been deactivated. Ask your manager to reactivate it.'
+      : /invalid login credentials/i.test(m) ? 'Wrong email or password.'
+      : m;
     err.style.display = 'block';
     btn.disabled = false;
     btn.textContent = 'Sign in';
@@ -6207,7 +6210,7 @@ async function submitTeamAdd() {
     btn.disabled = false; btn.textContent = 'Create account';
     return;
   }
-  showToast(`${full_name}'s account is ready`, 'success');
+  // The credentials screen is the confirmation (a toast would sit on its buttons)
   showTeamCredentials({ full_name, email, password, created: true });
   allProfiles = [];                 // assignment lists reload with the new person
   if (currentPage === 'team') showTeamPage();
