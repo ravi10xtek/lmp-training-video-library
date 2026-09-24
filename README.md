@@ -87,6 +87,30 @@ Changing voice/model invalidates the cache (they're part of the hash).
 
 ---
 
+## Roles and permissions (enforced in the database)
+
+`database/roles_lockdown_migration.sql` moves the role rules out of the UI
+and into Postgres. Run it once per project (after the other migrations),
+then redeploy the edge functions it pairs with:
+
+```bash
+npx supabase functions deploy wasabi-upload-init wasabi-playback-url notify-review --project-ref <ref> --use-api
+```
+
+| Who | How it is recognised | Can |
+|---|---|---|
+| Manager (Ravi) | `role = 'admin'`, not `is_reviewer` | everything |
+| Client (Joe) | `is_reviewer` | read projects, decide on what is sent to him (via `decide_script` / `set_video_status`), leave notes |
+| Writer | `scripts.writer_id` | edit and send the script draft |
+| Editor | `scripts.editor_id` | upload video versions (`record_video_upload`), send them to Joe, read and answer notes |
+| Staff | anyone else | published videos only |
+
+Nobody can change their own `role` / `is_reviewer`, and new signups are
+always `worker`. Every uploaded video file is a row in `video_versions`; a
+video can only go to Joe once the file for that version exists.
+
+---
+
 ## YouTube cleanup SQL
 
 After Wasabi playback is stable, run `database/youtube_cleanup.sql` to clear legacy YouTube fields.
