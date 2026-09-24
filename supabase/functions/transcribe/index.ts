@@ -21,7 +21,10 @@ const FEEDBACK_BUCKET = "video-feedback";
 // OpenAI hard limit for the transcription endpoint
 const MAX_BYTES = 25 * 1024 * 1024;
 
-type Body = { storageKey?: string; audioPath?: string };
+// feedbackId + kind: transcribe a voice note on script/video feedback and save
+// the text on that row. Allowed for the note's author and for admins; the
+// other modes (storageKey, audioPath, file upload) stay admin-only.
+type Body = { storageKey?: string; audioPath?: string; feedbackId?: string; kind?: "script" | "video" };
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
@@ -41,15 +44,33 @@ function mimeFor(name: string): string {
   return "application/octet-stream";
 }
 
-async function requireAdmin(authHeader: string | null) {
+async function requireUser(authHeader: string | null) {
   if (!authHeader?.startsWith("Bearer ")) throw new Error("Unauthorized");
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
   const { data: { user }, error } = await supabase.auth.getUser(authHeader.replace("Bearer ", ""));
   if (error || !user) throw new Error("Unauthorized");
   const { data: profile } = await supabase
     .from("profiles").select("role").eq("id", user.id).single();
-  if (profile?.role !== "admin") throw new Error("Admin access required");
-  return supabase;
+  return { supabase, userId: user.id, isAdmin: profile?.role === "admin" };
+}
+
+async function whisper(bytes: Uint8Array<ArrayBuffer>, filename: string, prompt?: string): Promise<string> {
+  const form = new FormData();
+  form.append("file", new File([bytes], filename, { type: mimeFor(filename) }));
+  form.append("model", "whisper-1");
+  form.append("response_format", "text");
+  if (prompt) form.append("prompt", prompt);
+  const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form,
+  });
+  if (!r.ok) {
+    const detail = await r.text();
+    console.error("[transcribe] OpenAI error:", r.status, detail);
+    throw new Error(`Transcription failed (${r.status}). ${detail.slice(0, 200)}`);
+  }
+  return (await r.text()).trim();
 }
 
 Deno.serve(async (req) => {
@@ -60,9 +81,9 @@ Deno.serve(async (req) => {
     return json(500, { error: "OPENAI_API_KEY is not configured on the server." });
   }
 
-  let supabase;
+  let supabase, userId: string, isAdmin: boolean;
   try {
-    supabase = await requireAdmin(req.headers.get("authorization"));
+    ({ supabase, userId, isAdmin } = await requireUser(req.headers.get("authorization")));
   } catch (e) {
     return json(401, { error: e instanceof Error ? e.message : "Unauthorized" });
   }
@@ -70,6 +91,7 @@ Deno.serve(async (req) => {
   // ── Direct audio upload (browser-extracted audio, bypasses 25MB video) ──
   const contentType = req.headers.get("content-type") || "";
   if (contentType.includes("multipart/form-data")) {
+    if (!isAdmin) return json(403, { error: "Admin access required" });
     try {
       const fd = await req.formData();
       const file = fd.get("file");
@@ -97,12 +119,36 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const { storageKey, audioPath } = (await req.json()) as Body;
+    const { storageKey, audioPath, feedbackId, kind } = (await req.json()) as Body;
+
+    // ── A feedback voice note: transcribe it and store the text on the row ──
+    if (feedbackId) {
+      const table = kind === "video" ? "video_feedback" : "script_feedback";
+      const { data: row } = await supabase.from(table)
+        .select("id, user_id, audio_path, transcript").eq("id", feedbackId).maybeSingle();
+      if (!row) return json(404, { error: "Note not found" });
+      if (row.user_id !== userId && !isAdmin) return json(403, { error: "Not allowed" });
+      if (row.transcript != null) return json(200, { text: row.transcript });
+      if (!row.audio_path) return json(400, { error: "This note has no recording" });
+      const { data: file, error: dlErr } = await supabase.storage.from(FEEDBACK_BUCKET).download(row.audio_path);
+      if (dlErr || !file) return json(404, { error: "Audio not found" });
+      if (file.size > MAX_BYTES) return json(413, { error: "Recording is over OpenAI's 25MB limit." });
+      // Joe opens each note with the section it is about; the hint keeps
+      // that as "Section 4." with digits
+      const text = (await whisper(new Uint8Array(await file.arrayBuffer()),
+        row.audio_path.split("/").pop() || "audio.webm", "Section 4. Paragraph 12. Change the wording here."))
+        || "(no speech)";
+      const { error: upErr } = await supabase.from(table).update({ transcript: text }).eq("id", feedbackId);
+      if (upErr) console.error("[transcribe] save", upErr);
+      return json(200, { text });
+    }
+
+    if (!isAdmin) return json(403, { error: "Admin access required" });
     if (!storageKey && !audioPath) {
       return json(400, { error: "storageKey or audioPath is required" });
     }
 
-    let bytes: Uint8Array;
+    let bytes: Uint8Array<ArrayBuffer>;
     let filename: string;
 
     if (audioPath) {

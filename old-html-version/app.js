@@ -626,7 +626,6 @@ function renderVideoCard(v, isAdmin) {
         ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
         ${roundBadge}
-        ${isAdmin ? scriptTagHtml(scriptForVideo(v.id)) : ''}
       </div>
       <div class="card-title">${escapeHtml(v.title)}</div>
       <div class="card-sub">${escapeHtml(v.subcategories?.name || v.categories?.name || '')}</div>
@@ -790,7 +789,7 @@ async function loadFeedback(videoId, viewRound) {
 
   const { data, error } = await sb
     .from('video_feedback')
-    .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
+    .select('id, user_id, body, audio_path, image_path, duration_seconds, transcript, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
     .order('created_at', { ascending: false });   // newest at the top
@@ -807,8 +806,6 @@ async function loadFeedback(videoId, viewRound) {
     return;
   }
 
-  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
-
   const locked = vidNotesLocked();
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles?.full_name || 'Admin';
@@ -816,25 +813,11 @@ async function loadFeedback(videoId, viewRound) {
     const canDelete = fb.user_id === currentUser?.id && !locked;
 
     let audioHtml = '';
-    let transcribeHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
       if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
-      if (isAdmin) {
-        transcribeHtml = `
-          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', ${jsArg(fb.audio_path)}, this)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
-            Transcribe
-          </button>
-          <div class="transcript-box hidden" id="fb-transcript-${fb.id}">
-            <div class="transcript-toolbar">
-              <span class="transcript-label">Transcript</span>
-              <button class="btn btn-ghost btn-sm" onclick="copyTranscript('fb-transcript-text-${fb.id}', this)">Copy</button>
-            </div>
-            <div class="transcript-text" id="fb-transcript-text-${fb.id}"></div>
-          </div>`;
-      }
     }
+    const lineHtml = fbTranscriptLine(fb, 'video');
 
     let imageHtml = '';
     if (fb.image_path) {
@@ -853,8 +836,8 @@ async function loadFeedback(videoId, viewRound) {
           ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}')">Delete</button>` : ''}
         </div>
         ${bodyHtml}
+        ${lineHtml}
         ${audioHtml}
-        ${transcribeHtml}
         ${imageHtml}
       </div>`;
   }));
@@ -1149,7 +1132,7 @@ async function submitComment() {
       if (error) throw error;
     }
 
-    const { error: insErr } = await sb.from('video_feedback').insert({
+    const { data: inserted, error: insErr } = await sb.from('video_feedback').insert({
       video_id:         currentVideoId,
       user_id:          currentUser.id,
       body:             body || null,
@@ -1157,13 +1140,14 @@ async function submitComment() {
       image_path:       imagePath,
       duration_seconds: composerAudioBlob ? composerAudioDuration : null,
       review_round:     allVideos.find(x => x.id === currentVideoId)?.review_round || 1,
-    });
+    }).select('id').single();
     if (insErr) throw insErr;
+    if (audioPath) fbTranscribe(inserted.id, 'video');   // once, in the background
 
     vidMyNotes++;            // so the footer goes straight to Add more / Done
     vidChangesAdding = false;
     resetComposer();
-    showToast('Comment posted', 'success');
+    showToast('Note saved', 'success');
     loadFeedback(currentVideoId, vidViewRound);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
@@ -1303,30 +1287,6 @@ function _audioBufferToWav(buffer) {
     off += 2;
   }
   return new Blob([ab], { type: 'audio/wav' });
-}
-
-async function transcribeFeedback(id, audioPath, btn) {
-  const box = document.getElementById('fb-transcript-' + id);
-  if (!box) return;
-  const origHtml = btn.innerHTML;
-  btn.disabled = true;
-  btn.textContent = 'Transcribing…';
-
-  try {
-    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, {
-      body: { audioPath },
-    });
-    const detail = error ? await parseFunctionError(error) : (data?.error || null);
-    if (detail) throw new Error(detail);
-
-    box.querySelector('.transcript-text').textContent = data.text || '(empty transcript)';
-    box.classList.remove('hidden');
-    btn.style.display = 'none';
-  } catch (err) {
-    showToast('Transcription failed: ' + (err?.message || 'unknown error'), 'error');
-    btn.disabled = false;
-    btn.innerHTML = origHtml;
-  }
 }
 
 async function copyTranscript(textId, btn) {
@@ -2286,11 +2246,30 @@ function formatDuration(secs) {
   return s > 0 ? `${m}m ${s}s` : `${m} min`;
 }
 
+const TOAST_MS = 3000;
+let toastTimer = null;
 function showToast(msg, type = 'success') {
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.className = `toast show ${type}`;
-  setTimeout(() => t.classList.remove('show'), 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), TOAST_MS);
+}
+
+// After a reviewer's decision: the window stays up (its button showing the
+// result) while the banner is on screen, then closes back to To Review.
+function closeAfterDecision(btn, doneText) {
+  if (btn) { btn.disabled = true; btn.textContent = doneText; }
+  const scriptId = currentScriptId;
+  setTimeout(async () => {
+    if (scriptId && scriptId !== currentScriptId) return;   // they already moved on
+    if (paWorkflowMounted() || currentScriptId) closeScriptModal();
+    else closeVideoModal();
+    // Re-read both lists so what was just decided drops out of To Review
+    await Promise.all([loadScripts(), loadVideos()]);
+    if (isReviewerUser()) showReviewPage(document.getElementById('folder-to-review'));
+    else showScriptsPage(document.getElementById('sidebar-scripts-item'));
+  }, TOAST_MS);
 }
 
 // ══════════════════════════════════════════════════════
@@ -2409,10 +2388,8 @@ function toggleNotifPanel(e) {
   const panel = document.getElementById('notif-panel');
   notifPanelOpen = !notifPanelOpen;
   panel.classList.toggle('hidden', !notifPanelOpen);
-  if (notifPanelOpen) {
-    renderNotifPanel();
-    markAllNotifsRead();
-  }
+  // Opening shows what's new; it doesn't silently mark it all read
+  if (notifPanelOpen) renderNotifPanel();
 }
 
 function renderNotifPanel() {
@@ -2422,11 +2399,11 @@ function renderNotifPanel() {
     return;
   }
   list.innerHTML = allNotifications.slice(0, 25).map(n => `
-    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
+    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="markNotifRead('${n.id}');notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
       <div class="notif-title">${escapeHtml(n.title)}</div>
       ${n.message ? `<div class="notif-msg">${escapeHtml(n.message)}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
-      ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
+      <button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>
     </div>
   `).join('');
 }
@@ -2446,11 +2423,50 @@ async function dismissNotification(id) {
 }
 
 async function markAllNotifsRead() {
-  const unreadIds = allNotifications.filter(n => !n.read).map(n => n.id);
-  if (!unreadIds.length) return;
-  await sb.from('notifications').update({ read: true }).in('id', unreadIds);
-  allNotifications.forEach(n => n.read = true);
+  const btn = document.getElementById('notif-mark-read');
+  if (!allNotifications.some(n => !n.read)) { renderNotifPanel(); return; }
+  const prev = allNotifications.map(n => n.read);
+  allNotifications.forEach(n => n.read = true);   // show it at once, undo if it fails
+  renderNotifPanel();
   renderNotificationBell();
+  if (btn) btn.disabled = true;
+  // Everything of mine that's unread, not only what's loaded in the panel
+  const { error } = await sb.from('notifications').update({ read: true })
+    .eq('user_id', currentUser.id).eq('read', false);
+  if (btn) btn.disabled = false;
+  if (error) {
+    allNotifications.forEach((n, i) => n.read = prev[i]);
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not mark as read: ' + error.message, 'error');
+  }
+}
+
+async function clearAllNotifs() {
+  if (!allNotifications.length) return;
+  if (!confirm('Clear all notifications?')) return;
+  const prev = allNotifications;
+  allNotifications = [];
+  renderNotifPanel();
+  renderNotificationBell();
+  const { error } = await sb.from('notifications').delete().eq('user_id', currentUser.id);
+  if (error) {
+    allNotifications = prev;
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not clear: ' + error.message, 'error');
+  }
+}
+
+// Tapping a notification marks that one read
+function markNotifRead(id) {
+  const n = allNotifications.find(x => x.id === id);
+  if (!n || n.read) return;
+  n.read = true;
+  renderNotificationBell();
+  sb.from('notifications').update({ read: true }).eq('id', id).then(({ error }) => {
+    if (error) console.warn('[notifications] mark read', error.message);
+  });
 }
 
 function notifClick(videoId, scriptId) {
@@ -2517,8 +2533,7 @@ function vidSyncChangesUI() {
 }
 function vidAddMore() {
   vidChangesAdding = true;
-  vidSyncChangesUI();
-  document.getElementById('comment-text')?.focus();
+  vidSyncChangesUI();   // no focus on the text box: it pops the keyboard, and the client records
 }
 // Joe's notes are locked once the video leaves his review (Done / Mark as Complete)
 function vidNotesLocked() {
@@ -2600,8 +2615,8 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
   v.status = status;
   v.reviewed_at = reviewedAt;
   showToast(successMsg, 'success');
-  // The video has left Joe's TO REVIEW folder — close + refresh his list
-  closeVideoModal();
+  // The video has left the TO REVIEW queue: show the result, then close
+  closeAfterDecision(btn, status === 'completed' ? 'Approved ✓' : 'Sent to editor ✓');
   await loadVideos();
 
   invokeEdge(NOTIFY_FUNCTION, {
@@ -2620,7 +2635,7 @@ function updateReviewedBtnState(v) {
   sendBackBtn.disabled = false; sendBackBtn.innerHTML = SEND_BACK_BTN_HTML;
   if (completeBtn) { completeBtn.disabled = false; completeBtn.innerHTML = MARK_COMPLETE_BTN_HTML; }
   const done = document.getElementById('vid-done-btn');
-  if (done) { done.disabled = false; done.textContent = 'Done'; }
+  if (done) { done.disabled = false; done.textContent = 'Send to editor'; }
   const more = document.getElementById('vid-add-more-btn');
   if (more) more.disabled = false;
 
@@ -3616,6 +3631,8 @@ async function downloadRecording() {
   document.addEventListener('click', e => {
     if (!notifPanelOpen) return;
     const wrap = document.getElementById('notif-wrap');
+    // A click that re-drew the list leaves its target detached — that was inside
+    if (!e.target.isConnected) return;
     if (wrap && !wrap.contains(e.target)) {
       document.getElementById('notif-panel').classList.add('hidden');
       notifPanelOpen = false;
@@ -3806,12 +3823,6 @@ function scriptForVideo(videoId) {
 }
 
 // Tag shown on a video card for its linked script
-function scriptTagHtml(s) {
-  if (!s) return '';
-  if (s.status === 'approved') return `<span class="card-tag script-ok">Script ✓ v${s.current_version}</span>`;
-  return `<span class="card-tag script-wip">Script: ${SCRIPT_STATUS_META[s.status]?.label || s.status}</span>`;
-}
-
 function renderModalScriptLink(videoId) {
   const box = document.getElementById('modal-script-link');
   if (!box) return;
@@ -4291,8 +4302,7 @@ function scCancelChanges() {
 
 function scAddMore() {
   scChangesAdding = true;
-  scSyncChangesUI();
-  document.getElementById('sc-comment-text')?.focus();
+  scSyncChangesUI();   // no focus on the text box: it pops the keyboard, and the client records
 }
 
 // While Joe is writing "Needs changes" notes there is one main action at a time:
@@ -4449,7 +4459,7 @@ function renderScriptModal() {
   const reviewing = reviewer && s.status === 'sent' && isLatest;
   if (reviewing && !scChangesOpen) {
     html += `
-      <div class="workflow-section" id="sc-reviewer-section">
+      <div class="workflow-section sticky-actions" id="sc-reviewer-section">
         <div class="workflow-section-label">Your decision on v${latest.version}</div>
         <div class="reviewer-buttons">
           <button class="btn-more-changes" id="sc-changes-btn" onclick="scOpenChanges()">
@@ -4491,7 +4501,7 @@ function renderScriptModal() {
         <div class="workflow-section-label">Script text</div>
         <textarea class="form-input" id="sc-body" placeholder="# Intro&#10;&#10;Hi, I'm Joe, master plumber at Loch Monster Plumbing…&#10;&#10;# Step one&#10;&#10;First thing you do on site is…" oninput="scriptDraftDirty()">${escapeHtmlAttr(draftText)}</textarea>
         <div class="sc-editor-hint">${ctx}<br>Only paragraphs whose text changed get re-rendered — an edit to a few lines costs a few cents.</div>
-        <div class="sc-btn-row">
+        <div class="sc-btn-row sticky-actions">
           <button class="btn btn-ghost btn-sm" id="sc-save-btn" onclick="saveScriptDraft()">Save draft</button>
           <button class="btn btn-ghost btn-sm" id="sc-preview-btn" onclick="previewScriptDraft()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -4513,7 +4523,6 @@ function renderScriptModal() {
   if (!reviewing || scChangesOpen) html += `
     <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
-      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${canComment ? `
       <div class="comment-composer" id="sc-composer">
         <textarea id="sc-comment-text" class="comment-input" rows="2" oninput="scSyncChangesUI()" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
@@ -4539,15 +4548,16 @@ function renderScriptModal() {
       </div>
       <div class="sc-rec-controls hidden" id="sc-rec-controls">
         <button class="btn btn-ghost btn-sm" id="sc-pause-btn" style="margin-top:0" onclick="toggleScriptRecordingPause()">Pause</button>
-        <button class="btn btn-danger btn-sm" id="sc-stop-btn" style="margin-top:0" onclick="toggleScriptRecording()">Stop</button>
+        <button class="btn btn-danger btn-sm" id="sc-stop-btn" style="margin-top:0" onclick="toggleScriptRecording()">Done</button>
       </div>` : ''}
       ${reviewing ? `
-      <div class="sc-changes-foot" id="sc-changes-foot">
+      <div class="sc-changes-foot sticky-actions" id="sc-changes-foot">
         <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="margin-top:0" onclick="scCancelChanges()">Cancel</button>
         <button class="btn btn-ghost btn-sm hidden" id="sc-add-more-btn" style="margin-top:0" onclick="scAddMore()">Add more</button>
-        <button class="btn btn-primary btn-sm hidden" id="sc-comment-send-btn" style="margin-top:0" onclick="submitScriptComment()">Post</button>
-        <button class="btn btn-primary btn-sm hidden" id="sc-changes-btn" style="margin-top:0" onclick="scriptDecision('changes')">Done</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-comment-send-btn" style="margin-top:0" onclick="submitScriptComment()">Save</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-changes-btn" style="margin-top:0" onclick="scriptDecision('changes')">Send to writer</button>
       </div>` : ''}
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
     </div>`;
 
   // Close the script pane; the video pane holds the produced video and its assets
@@ -5015,8 +5025,7 @@ async function scriptDecision(decision) {
   }).catch(err => console.warn('[notify script decision]', err));
 
   await loadScripts();
-  if (decision === 'approved') { closeScriptModal(); isReviewerUser() ? showReviewPage(document.getElementById('folder-to-review')) : showScriptsPage(document.getElementById('sidebar-scripts-item')); }
-  else { if (currentPage === 'review') showReviewPage(); openScript(scriptId); }
+  closeAfterDecision(btn, decision === 'approved' ? 'Approved ✓' : 'Sent to writer ✓');
 }
 
 // ── Feedback ─────────────────────────────────────────────────
@@ -5037,7 +5046,6 @@ async function loadScriptFeedback() {
   if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`; return; }
   if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
 
-  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
   // Once Joe has decided on a version (Done / Approve), its notes are locked
   const locked = scVersionLocked();
   const items = await Promise.all(data.map(async (fb) => {
@@ -5049,11 +5057,7 @@ async function loadScriptFeedback() {
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
       if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
-      if (fb.transcript) {
-        audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
-      } else if (isAdmin) {
-        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', ${jsArg(fb.audio_path)})">Transcribe</button></div>`;
-      }
+      audioHtml = fbTranscriptLine(fb, 'script') + audioHtml;
     }
     const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
 
@@ -5070,23 +5074,58 @@ async function loadScriptFeedback() {
   list.innerHTML = items.join('');
 }
 
-// Whisper via the existing transcribe function (admin-only on the server, so
-// an admin clicks Transcribe). Stored on the row so the writer reads text.
-async function transcribeScriptFeedback(fbId, audioPath) {
-  if (currentProfile?.role !== 'admin') return;
-  const box = document.getElementById(`sc-transcript-${fbId}`);
-  if (box) box.textContent = 'Transcribing…';
+// ── Voice-note transcripts ────────────────────────────────────
+// Transcription costs money (Whisper), so it runs ONCE per note: right after
+// the note is saved. The result — even an empty one — is stored on the row
+// and the server returns the stored text instead of re-billing. Loading a
+// list never transcribes; an older note without a transcript gets a manual
+// Transcribe button for the manager.
+// Joe opens each recording with the section it's about ("Section 4 …"), so
+// his view shows just the first line (tap for all); everyone else sees the
+// full text in a small scrollable box.
+const fbTranscribing = new Set();
+function fbTranscriptHtml(text) {
+  const t = (text || '').trim();
+  if (!t) return '';
+  return isClientUser()
+    ? `<div class="fb-firstline" onclick="this.classList.toggle('open')">${escapeHtml(t)}</div>`
+    : `<div class="fb-transcript-box">${escapeHtml(t)}</div>`;
+}
+function fbTranscriptLine(fb, kind) {
+  if (!fb.audio_path) return '';
+  const id = `fl-${kind}-${fb.id}`;
+  if (fb.transcript != null) return `<div id="${id}">${fbTranscriptHtml(fb.transcript)}</div>`;
+  if (fbTranscribing.has(kind + fb.id)) return `<div id="${id}"><div class="fb-firstline pending">Transcribing…</div></div>`;
+  if (currentProfile?.role === 'admin') {
+    return `<div id="${id}"><button class="fb-transcribe-btn" onclick="fbTranscribe('${fb.id}', '${kind}')">Transcribe</button></div>`;
+  }
+  return '';
+}
+async function fbTranscribe(fbId, kind) {
+  const key = kind + fbId;
+  if (fbTranscribing.has(key)) return;
+  fbTranscribing.add(key);
+  const box = () => document.getElementById(`fl-${kind}-${fbId}`);
+  if (box()) box().innerHTML = '<div class="fb-firstline pending">Transcribing…</div>';
+  let text = null;
   try {
-    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { audioPath } });
+    const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { feedbackId: fbId, kind } });
     const detail = error ? await parseFunctionError(error) : (data?.error || null);
     if (detail) throw new Error(detail);
-    const text = (data.text || '').trim() || '(empty transcript)';
-    await sb.from('script_feedback').update({ transcript: text }).eq('id', fbId);
-    if (currentScriptId) loadScriptFeedback();
+    text = data?.text || '';
   } catch (err) {
-    console.warn('[script transcript]', err);
-    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', ${jsArg(audioPath)})">retry</a>`;
+    console.warn('[note transcript]', err);
+  } finally {
+    fbTranscribing.delete(key);
   }
+  const el = box();
+  if (!el) return;
+  if (text === null) {
+    el.innerHTML = currentProfile?.role === 'admin'
+      ? `<button class="fb-transcribe-btn" onclick="fbTranscribe('${fbId}', '${kind}')">Transcribe</button>` : '';
+    return;
+  }
+  el.innerHTML = fbTranscriptHtml(text);
 }
 
 async function deleteScriptFeedback(id) {
@@ -5131,11 +5170,12 @@ async function submitScriptComment() {
       duration_seconds: scAudioBlob ? scAudioDuration : null,
     }).select('id').single();
     if (insErr) throw insErr;
+    if (audioPath) fbTranscribe(inserted.id, 'script');   // once, in the background
 
     scMyNotes++;             // so the footer goes straight to Add more / Done
     scChangesAdding = false;
     resetScriptComposer();
-    showToast('Note posted', 'success');
+    showToast('Note saved', 'success');
     await loadScriptFeedback();
   } catch (err) {
     showToast('Could not post: ' + (err?.message || 'Unknown error'), 'error');
@@ -5538,7 +5578,7 @@ function paEditorHtml(v) {
         <div class="upload-progress-track"><div class="upload-progress-bar" id="pa-up-bar"></div></div>
       </div>
       <div class="sc-editor-hint">${escapeHtml(ctx)}</div>
-      <div class="sc-btn-row">
+      <div class="sc-btn-row sticky-actions">
         <button class="btn btn-ghost btn-sm" id="pa-v-save" onclick="paSaveVideo()" ${manager ? '' : 'disabled'}>${uploaded ? `Replace v${n}` : `Upload v${n}`}</button>
         <button class="btn btn-primary btn-sm" id="pa-send-btn" onclick="paSendToJoe()" ${uploaded ? '' : 'disabled'}>${SEND_SVG} Send for review as v${n}</button>
       </div>

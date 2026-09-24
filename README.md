@@ -91,11 +91,12 @@ Changing voice/model invalidates the cache (they're part of the hash).
 
 `database/roles_lockdown_migration.sql` moves the role rules out of the UI
 and into Postgres, and `database/accounts_migration.sql` adds the account
-types. Run both once per project (after the other migrations), then deploy
+types, and `database/feedback_transcripts_migration.sql` stores voice-note
+transcripts on video feedback. Run all three once per project (after the other migrations), then deploy
 the edge functions they pair with:
 
 ```bash
-npx supabase functions deploy wasabi-upload-init wasabi-playback-url notify-review admin-users --project-ref <ref> --use-api
+npx supabase functions deploy wasabi-upload-init wasabi-playback-url notify-review admin-users transcribe --project-ref <ref> --use-api
 ```
 
 **Accounts are created by the manager** on the **Team** page (sidebar →
