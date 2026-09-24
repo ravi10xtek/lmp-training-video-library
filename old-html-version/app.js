@@ -239,11 +239,38 @@ async function loadVideos() {
   allVideos = data || [];
 
   updateCounts();
+  if (canManageScripts()) migrateInlineThumbnails();
   if (currentPage === 'review') { showReviewPage(); return; }
   renderVideos();
 }
 
 let videosLoadError = null;
+
+// One-time clean-up, run quietly in the manager's browser: thumbnails used to
+// be stored as base64 inside the videos row (every list load downloaded them
+// all). Moves each one into the video-thumbnails bucket and keeps its URL.
+let thumbMigrationRunning = false;
+async function migrateInlineThumbnails() {
+  if (thumbMigrationRunning) return;
+  const todo = allVideos.filter(v => typeof v.thumbnail_url === 'string' && v.thumbnail_url.startsWith('data:image/'));
+  if (!todo.length) return;
+  thumbMigrationRunning = true;
+  try {
+    for (const v of todo) {
+      try {
+        const blob = await (await fetch(v.thumbnail_url)).blob();
+        const url = await uploadVideoThumbnail(v.id, blob);
+        const { error } = await sb.from('videos').update({ thumbnail_url: url }).eq('id', v.id);
+        if (error) throw error;
+        v.thumbnail_url = url;
+      } catch (err) {
+        console.warn('[thumbnails] could not move', v.id, err?.message || err);
+      }
+    }
+  } finally {
+    thumbMigrationRunning = false;
+  }
+}
 
 // In-pipeline statuses — hidden from the main browse, shown only in their folders
 const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
@@ -2641,7 +2668,7 @@ function updateEditorBtnState(v) {
 
   const text =
     showSubmit   ? `Upload done — send v${nextVideoVersion(v)} to Joe for review` :
-    showMarkDone ? `Joe asked for changes on v${round}. His notes are below — make them, then send v${round + 1}.` :
+    showMarkDone ? `Joe asked for changes on v${round}. Upload v${round + 1} on the project's Video tab, then send it.` :
     showPublish  ? `Joe approved v${round} — ready to publish` :
     v.status === 'to_review' ? `v${round} is with Joe` :
     v.status === 'published' ? `Published ✓ (approved on v${round})` : '';
