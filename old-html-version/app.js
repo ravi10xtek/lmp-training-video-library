@@ -2300,10 +2300,12 @@ function showToast(msg, type = 'success') {
 function closeAfterDecision(btn, doneText) {
   if (btn) { btn.disabled = true; btn.textContent = doneText; }
   const scriptId = currentScriptId;
-  setTimeout(() => {
+  setTimeout(async () => {
     if (scriptId && scriptId !== currentScriptId) return;   // they already moved on
     if (paWorkflowMounted() || currentScriptId) closeScriptModal();
     else closeVideoModal();
+    // Re-read both lists so what was just decided drops out of To Review
+    await Promise.all([loadScripts(), loadVideos()]);
     if (isReviewerUser()) showReviewPage(document.getElementById('folder-to-review'));
     else showScriptsPage(document.getElementById('sidebar-scripts-item'));
   }, TOAST_MS);
