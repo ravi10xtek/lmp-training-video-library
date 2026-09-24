@@ -1132,7 +1132,7 @@ async function submitComment() {
       if (error) throw error;
     }
 
-    const { error: insErr } = await sb.from('video_feedback').insert({
+    const { data: inserted, error: insErr } = await sb.from('video_feedback').insert({
       video_id:         currentVideoId,
       user_id:          currentUser.id,
       body:             body || null,
@@ -1140,8 +1140,9 @@ async function submitComment() {
       image_path:       imagePath,
       duration_seconds: composerAudioBlob ? composerAudioDuration : null,
       review_round:     allVideos.find(x => x.id === currentVideoId)?.review_round || 1,
-    });
+    }).select('id').single();
     if (insErr) throw insErr;
+    if (audioPath) fbTranscribe(inserted.id, 'video');   // once, in the background
 
     vidMyNotes++;            // so the footer goes straight to Add more / Done
     vidChangesAdding = false;
@@ -5073,43 +5074,58 @@ async function loadScriptFeedback() {
   list.innerHTML = items.join('');
 }
 
-// ── Voice-note transcripts: one line per note ─────────────────
+// ── Voice-note transcripts ────────────────────────────────────
+// Transcription costs money (Whisper), so it runs ONCE per note: right after
+// the note is saved. The result — even an empty one — is stored on the row
+// and the server returns the stored text instead of re-billing. Loading a
+// list never transcribes; an older note without a transcript gets a manual
+// Transcribe button for the manager.
 // Joe opens each recording with the section it's about ("Section 4 …"), so
-// the note shows just the first line of its transcript — tap to see it all.
-// Transcribed server-side right after saving (transcribe fn, feedbackId mode);
-// older notes are filled in when their author or the manager opens them.
+// his view shows just the first line (tap for all); everyone else sees the
+// full text in a small scrollable box.
 const fbTranscribing = new Set();
+function fbTranscriptHtml(text) {
+  const t = (text || '').trim();
+  if (!t) return '';
+  return isClientUser()
+    ? `<div class="fb-firstline" onclick="this.classList.toggle('open')">${escapeHtml(t)}</div>`
+    : `<div class="fb-transcript-box">${escapeHtml(t)}</div>`;
+}
 function fbTranscriptLine(fb, kind) {
   if (!fb.audio_path) return '';
   const id = `fl-${kind}-${fb.id}`;
-  if (fb.transcript) {
-    return `<div class="fb-firstline" id="${id}" onclick="this.classList.toggle('open')">${escapeHtml(fb.transcript.trim())}</div>`;
+  if (fb.transcript != null) return `<div id="${id}">${fbTranscriptHtml(fb.transcript)}</div>`;
+  if (fbTranscribing.has(kind + fb.id)) return `<div id="${id}"><div class="fb-firstline pending">Transcribing…</div></div>`;
+  if (currentProfile?.role === 'admin') {
+    return `<div id="${id}"><button class="fb-transcribe-btn" onclick="fbTranscribe('${fb.id}', '${kind}')">Transcribe</button></div>`;
   }
-  if (fb.user_id !== currentUser?.id && currentProfile?.role !== 'admin') return '';
-  queueMicrotask(() => fbTranscribe(fb.id, kind));
-  return `<div class="fb-firstline pending" id="${id}">Transcribing…</div>`;
+  return '';
 }
 async function fbTranscribe(fbId, kind) {
   const key = kind + fbId;
   if (fbTranscribing.has(key)) return;
   fbTranscribing.add(key);
+  const box = () => document.getElementById(`fl-${kind}-${fbId}`);
+  if (box()) box().innerHTML = '<div class="fb-firstline pending">Transcribing…</div>';
   let text = null;
   try {
     const { data, error } = await invokeEdge(TRANSCRIBE_FUNCTION, { body: { feedbackId: fbId, kind } });
     const detail = error ? await parseFunctionError(error) : (data?.error || null);
     if (detail) throw new Error(detail);
-    text = (data?.text || '').trim();
+    text = data?.text || '';
   } catch (err) {
     console.warn('[note transcript]', err);
   } finally {
     fbTranscribing.delete(key);
   }
-  const el = document.getElementById(`fl-${kind}-${fbId}`);
+  const el = box();
   if (!el) return;
-  if (!text) { el.remove(); return; }
-  el.classList.remove('pending');
-  el.textContent = text;
-  el.onclick = () => el.classList.toggle('open');
+  if (text === null) {
+    el.innerHTML = currentProfile?.role === 'admin'
+      ? `<button class="fb-transcribe-btn" onclick="fbTranscribe('${fbId}', '${kind}')">Transcribe</button>` : '';
+    return;
+  }
+  el.innerHTML = fbTranscriptHtml(text);
 }
 
 async function deleteScriptFeedback(id) {
@@ -5154,6 +5170,7 @@ async function submitScriptComment() {
       duration_seconds: scAudioBlob ? scAudioDuration : null,
     }).select('id').single();
     if (insErr) throw insErr;
+    if (audioPath) fbTranscribe(inserted.id, 'script');   // once, in the background
 
     scMyNotes++;             // so the footer goes straight to Add more / Done
     scChangesAdding = false;

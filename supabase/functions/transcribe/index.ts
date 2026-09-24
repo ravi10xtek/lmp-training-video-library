@@ -128,7 +128,7 @@ Deno.serve(async (req) => {
         .select("id, user_id, audio_path, transcript").eq("id", feedbackId).maybeSingle();
       if (!row) return json(404, { error: "Note not found" });
       if (row.user_id !== userId && !isAdmin) return json(403, { error: "Not allowed" });
-      if (row.transcript) return json(200, { text: row.transcript });
+      if (row.transcript != null) return json(200, { text: row.transcript });
       if (!row.audio_path) return json(400, { error: "This note has no recording" });
       const { data: file, error: dlErr } = await supabase.storage.from(FEEDBACK_BUCKET).download(row.audio_path);
       if (dlErr || !file) return json(404, { error: "Audio not found" });
