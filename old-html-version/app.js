@@ -177,14 +177,17 @@ async function initApp(user) {
     }
   }
   if (profile?.is_reviewer) {
-    badge.textContent = 'Client';
+    badge.textContent = profile?.account_type === 'video_reviewer' ? 'Video reviewer' : 'Client';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
   }
   if (profile?.role === 'admin' || profile?.is_reviewer) {
     document.getElementById('notif-wrap').classList.remove('hidden');
-    document.getElementById('capture-topbar-btn').classList.remove('hidden');
   }
+  // Recordings (capture + Joe's Recordings) are the client's and the manager's
+  const recordings = profile?.role === 'admin';
+  document.getElementById('capture-topbar-btn').classList.toggle('hidden', !recordings);
+  document.getElementById('sidebar-recordings-item')?.classList.toggle('hidden', !recordings);
 
   // Role-specific workflow folders: Joe (reviewer) sees TO REVIEW;
   // Ravi (editor = admin, not reviewer) sees TO EDIT + COMPLETED VIDEOS.
@@ -342,7 +345,7 @@ function filterSubcat(slug) {
 // ══════════════════════════════════════════════════════
 const reviewQueueCount = () =>
   allVideos.filter(v => v.status === 'to_review').length +
-  (isReviewerUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
+  (isClientUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
 
 async function showReviewPage(sidebarEl) {
   if (!isReviewerUser()) return;
@@ -357,7 +360,7 @@ async function showReviewPage(sidebarEl) {
   if (currentPage !== 'review') return;
 
   const byTime = (a, b) => new Date(a.updated_at || a.created_at) - new Date(b.updated_at || b.created_at);
-  const scripts = allScripts.filter(s => s.status === 'sent').sort(byTime);
+  const scripts = isClientUser() ? allScripts.filter(s => s.status === 'sent').sort(byTime) : [];
   const videos = allVideos.filter(v => v.status === 'to_review').sort(byTime);
   const projectOf = (v) => allScripts.find(s => s.video_id === v.id);
   const where = (x) => [x.categories?.name, x.subcategories?.name].filter(Boolean).join(' › ');
@@ -391,10 +394,10 @@ async function showReviewPage(sidebarEl) {
       <div class="page-title">To Review</div>
       <div class="page-sub">${total ? `${total} item${total !== 1 ? 's' : ''} waiting for you` : 'Nothing waiting for you right now'}</div>
     </div>
-    <div class="rv-section">
+    ${isClientUser() ? `<div class="rv-section">
       <div class="rv-section-head">${PJ_STAGE_ICONS.script} Scripts <span class="pj-muted">${scripts.length}</span></div>
       ${scripts.length ? scripts.map(scriptCard).join('') : '<div class="rv-empty">No scripts waiting. You get a notification when a writer sends one.</div>'}
-    </div>
+    </div>` : ''}
     <div class="rv-section">
       <div class="rv-section-head">${PJ_STAGE_ICONS.video} Videos <span class="pj-muted">${videos.length}</span></div>
       ${videos.length ? videos.map(videoCard).join('') : '<div class="rv-empty">No videos waiting. Approved scripts come back here once the video is produced.</div>'}
@@ -3727,13 +3730,19 @@ let scTimerInterval = null, scRecStart = 0;
 
 // ── Roles ────────────────────────────────────────────────────
 const isStaffUser    = () => currentProfile?.role === 'admin' || currentProfile?.is_reviewer === true;
+// Reviewers decide on videos: the client (Joe) and the video reviewer
 const isReviewerUser = () => currentProfile?.is_reviewer === true;
+// Only the client reviews scripts (and has recordings); the video reviewer doesn't
+const isClientUser   = () => currentProfile?.account_type
+  ? currentProfile.account_type === 'client'
+  : currentProfile?.role === 'admin' && currentProfile?.is_reviewer === true;
 // Ravi: creates projects, assigns people, links slots
 const canManageScripts = () => currentProfile?.role === 'admin' && !currentProfile?.is_reviewer;
 // Who may edit the text: the manager, or the assigned writer
 const canWriteScript   = (s) => !!s && (canManageScripts() || s.writer_id === currentUser?.id);
 const isScriptAssignee = (s) => !!s && (s.writer_id === currentUser?.id || s.editor_id === currentUser?.id);
-const canCommentScript = (s) => isStaffUser() || isScriptAssignee(s);
+// Same as the database: the manager, the client, and the project's writer/editor
+const canCommentScript = (s) => canManageScripts() || isClientUser() || isScriptAssignee(s);
 
 function profileName(p) {
   const n = p?.full_name || '';
@@ -3763,7 +3772,7 @@ async function loadProfiles() {
 // "Waiting on you" per role
 function scriptNeedsMe(s) {
   const me = currentUser?.id;
-  if (isReviewerUser() && s.status === 'sent') return true;
+  if (isClientUser() && s.status === 'sent') return true;
   if (s.writer_id === me && (s.status === 'draft' || s.status === 'changes')) return true;
   if (canManageScripts() && !s.writer_id && (s.status === 'draft' || s.status === 'changes')) return true;
   if (s.editor_id === me && s.status === 'approved') return true;
@@ -4080,15 +4089,15 @@ function projRow(s) {
 }
 
 // ── New project (starts with its script) ─────────────────────
-// Writers and editors are picked from the "Writer / editor" accounts (and the
-// manager); client reviewers and client staff aren't offered. Whoever is
+// The Writer picker offers writer accounts, the Editor picker editor accounts;
+// the manager can take either (the database enforces the same). Whoever is
 // already assigned stays listed so the choice never silently changes.
-function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
+function peopleOptions(selectedId, { allowNone, noneLabel, role } = {}) {
   let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
-  const assignable = (p) => !p.account_type || p.account_type === 'team' || p.account_type === 'manager';
+  const assignable = (p) => p.account_type === role || p.account_type === 'manager';
   allProfiles.filter(p => assignable(p) || p.id === selectedId).forEach(p => {
     const you = p.id === currentUser?.id ? ' (you)' : '';
-    const tag = p.account_type === 'manager' ? ' · manager' : p.is_reviewer ? ' · reviewer' : p.account_type === 'staff' ? ' · staff' : '';
+    const tag = p.account_type === 'manager' ? ' · manager' : '';
     html += `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${escapeHtml(profileName(p))}${you}${tag}</option>`;
   });
   return html;
@@ -4104,8 +4113,8 @@ async function openScriptNewModal() {
   document.getElementById('sc-new-title').value = '';
   document.getElementById('sc-new-title').dataset.auto = '';
   const otterIn = document.getElementById('sc-new-otter'); if (otterIn) otterIn.value = '';
-  document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id);
-  document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true });
+  document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id, { role: 'writer' });
+  document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true, role: 'editor' });
   document.getElementById('script-new-modal').classList.add('open');
 }
 
@@ -4358,11 +4367,11 @@ function renderScriptModal() {
   const isLatest = view && latest && view.id === latest.id;
   const manager  = canManageScripts();
   const writer   = canWriteScript(s);
-  const reviewer = isReviewerUser();
+  const reviewer = isClientUser();          // reviews this script (the video reviewer doesn't)
   const where    = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
   // Opened from the client's To Review page: a minimal view with no team, no asset
   // panels, no step tabs — just the stage under review (script until approved, then video).
-  const client   = reviewer && currentPage === 'review';
+  const client   = isReviewerUser() && currentPage === 'review';
   if (client) scriptTab = s.status === 'approved' ? 'video' : 'script';
 
   // ── Header ──
@@ -4387,13 +4396,13 @@ function renderScriptModal() {
       <div class="sc-team-role">
         <span class="sc-team-label">Content writer</span>
         ${manager
-          ? `<select class="form-select sc-team-select" onchange="assignScript('writer', this.value)">${peopleOptions(s.writer_id)}</select>`
+          ? `<select class="form-select sc-team-select" onchange="assignScript('writer', this.value)">${peopleOptions(s.writer_id, { role: 'writer' })}</select>`
           : `<span class="sc-team-name">${person(s.writer)}${s.writer_id === currentUser?.id ? ' (you)' : ''}</span>`}
       </div>
       <div class="sc-team-role">
         <span class="sc-team-label">Editor</span>
         ${manager
-          ? `<select class="form-select sc-team-select" onchange="assignScript('editor', this.value)">${peopleOptions(s.editor_id, { allowNone: true })}</select>`
+          ? `<select class="form-select sc-team-select" onchange="assignScript('editor', this.value)">${peopleOptions(s.editor_id, { allowNone: true, role: 'editor' })}</select>`
           : `<span class="sc-team-name">${person(s.editor)}${s.editor_id === currentUser?.id ? ' (you)' : ''}</span>`}
       </div>
     </div>`;
@@ -4970,7 +4979,7 @@ async function copyApprovedScript(btn) {
 
 // ── Reviewer decision (Joe) ──────────────────────────────────
 async function scriptDecision(decision) {
-  if (!isReviewerUser() || !currentScriptId) return;
+  if (!isClientUser() || !currentScriptId) return;
   const latest = scriptVersions.at(-1);
   if (!latest || currentScript.status !== 'sent') return;
 
@@ -5270,8 +5279,10 @@ let paPendingThumb   = null; // its poster frame (Blob), made while the file is 
 let projVideoVersions = [];   // video_versions of the open project's slot, ascending
 let paViewVersion    = null;  // version number the Video tab is showing (null = default)
 
-const canAddProjectAssets   = (s) => isStaffUser() || isScriptAssignee(s);
-const canDeleteProjectAsset = (a) => isStaffUser() || a.created_by === currentUser?.id;
+// project_assets: the manager does anything; the project's writer/editor add and
+// remove their own; the client only reads
+const canAddProjectAssets   = (s) => canManageScripts() || isScriptAssignee(s);
+const canDeleteProjectAsset = (a) => canManageScripts() || a.created_by === currentUser?.id;
 // The manager, or the editor assigned to this project (record_video_upload checks the same)
 const canEditProjectVideo   = (s) => !!s && (canManageScripts() || (!!currentUser && s.editor_id === currentUser.id));
 const canUploadSlotVideo    = () => canEditProjectVideo(currentScript);
@@ -6037,12 +6048,14 @@ async function deleteProjectAsset(id) {
 // ══════════════════════════════════════════════════════
 const ADMIN_USERS_FUNCTION = 'admin-users';
 const ACCOUNT_TYPES = {
-  team:     { label: 'Writer / editor', plural: 'Writers & editors', desc: 'Writes scripts or edits videos on the projects you assign them to.' },
-  reviewer: { label: 'Client reviewer', plural: 'Client reviewers',  desc: 'Listens to scripts and watches videos, then approves them or asks for changes.' },
-  staff:    { label: 'Client staff',    plural: 'Client staff',      desc: 'Watches published training videos. Nothing else.' },
-  manager:  { label: 'Manager',         plural: 'Managers',          desc: 'Runs projects: assigns people, uploads and publishes. Full access.' },
+  writer:         { label: 'Writer',         plural: 'Writers',         desc: 'Writes the scripts on the projects you assign them to.' },
+  editor:         { label: 'Editor',         plural: 'Editors',         desc: 'Produces and uploads the videos on the projects you assign them to.' },
+  video_reviewer: { label: 'Video reviewer', plural: 'Video reviewers', desc: 'Watches videos sent for review and approves them or asks for changes, alongside the client. No scripts.' },
+  client:         { label: 'Client',         plural: 'Client',          desc: 'Approves scripts and videos, leaves voice notes, and records reference material.' },
+  staff:          { label: 'Client staff',   plural: 'Client staff',    desc: 'Watches published training videos. Nothing else.' },
+  manager:        { label: 'Manager',        plural: 'Managers',        desc: 'Runs projects: assigns people, uploads and publishes. Full access.' },
 };
-const ACCOUNT_TYPE_ORDER = ['manager', 'reviewer', 'team', 'staff'];
+const ACCOUNT_TYPE_ORDER = ['manager', 'client', 'video_reviewer', 'writer', 'editor', 'staff'];
 
 let teamAccounts = [];
 let teamModalState = null;   // { mode: 'add' | 'edit' | 'created', ... }
@@ -6146,7 +6159,7 @@ function closeTeamModal(e) {
 
 function teamTypePickerHtml(selected, { lockedTo } = {}) {
   return `<div class="team-types" role="radiogroup" aria-label="Account type">${
-    ['team', 'reviewer', 'staff', 'manager'].map(t => `
+    ['writer', 'editor', 'video_reviewer', 'client', 'staff', 'manager'].map(t => `
       <label class="team-type ${t === selected ? 'on' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}">
         <input type="radio" name="team-type" value="${t}" ${t === selected ? 'checked' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}
                onchange="document.querySelectorAll('.team-type').forEach(el => el.classList.toggle('on', el.contains(this)))">
@@ -6180,7 +6193,7 @@ function openTeamAdd() {
       <input class="form-input" id="team-name" placeholder="e.g. Nimal Perera" autocomplete="off"></div>
     <div class="form-group"><label class="form-label" for="team-email">Email</label>
       <input class="form-input" id="team-email" type="email" inputmode="email" autocomplete="off" placeholder="name@example.com"></div>
-    <div class="form-group"><label class="form-label">What do they do?</label>${teamTypePickerHtml('team')}</div>
+    <div class="form-group"><label class="form-label">What do they do?</label>${teamTypePickerHtml('writer')}</div>
     <div class="form-group"><label class="form-label" for="team-password">Password</label>${teamPasswordFieldHtml(generatePassword())}</div>
     <div class="sc-btn-row team-actions">
       <button class="btn btn-ghost btn-sm" onclick="closeTeamModal()">Cancel</button>

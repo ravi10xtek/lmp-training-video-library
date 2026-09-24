@@ -8,9 +8,9 @@
 //   password { user_id, password }         → set a new password
 //   active   { user_id, active }           → deactivate / reactivate sign-in
 //
-// account_type → what the database checks:
-//   manager  role 'admin'                    reviewer role 'admin' + is_reviewer
-//   team     role 'worker' (writer/editor)   staff    role 'worker' (published only)
+// account_type → what the database checks (see database/accounts_migration.sql):
+//   manager         role 'admin'                 client  role 'admin' + is_reviewer (Joe)
+//   video_reviewer  role 'worker' + is_reviewer  writer / editor / staff  role 'worker'
 import { createClient, SupabaseClient } from "npm:@supabase/supabase-js@2";
 
 const corsHeaders = {
@@ -22,13 +22,15 @@ const corsHeaders = {
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-type AccountType = "manager" | "reviewer" | "team" | "staff";
-const ACCOUNT_TYPES: AccountType[] = ["manager", "reviewer", "team", "staff"];
+type AccountType = "manager" | "client" | "video_reviewer" | "writer" | "editor" | "staff";
+const ACCOUNT_TYPES: AccountType[] = ["manager", "client", "video_reviewer", "writer", "editor", "staff"];
 const ROLE_FOR: Record<AccountType, { role: string; is_reviewer: boolean }> = {
-  manager:  { role: "admin",  is_reviewer: false },
-  reviewer: { role: "admin",  is_reviewer: true },
-  team:     { role: "worker", is_reviewer: false },
-  staff:    { role: "worker", is_reviewer: false },
+  manager:        { role: "admin",  is_reviewer: false },
+  client:         { role: "admin",  is_reviewer: true },
+  video_reviewer: { role: "worker", is_reviewer: true },
+  writer:         { role: "worker", is_reviewer: false },
+  editor:         { role: "worker", is_reviewer: false },
+  staff:          { role: "worker", is_reviewer: false },
 };
 const MIN_PASSWORD = 8;
 const BANNED_FOREVER = "876000h";   // ~100 years: "deactivated"
@@ -151,6 +153,18 @@ Deno.serve(async (req) => {
         const type = checkType(body.account_type);
         if (userId === callerId && type !== "manager") throw new HttpError(400, "You can't change your own account type");
         Object.assign(patch, { account_type: type, ...ROLE_FOR[type] });
+        // A writer can't stay a project's writer as an editor (and vice versa)
+        const { data: cur } = await supabase.from("profiles").select("account_type").eq("id", userId).single();
+        if (cur?.account_type !== type) {
+          const { count: w } = await supabase.from("scripts").select("id", { count: "exact", head: true }).eq("writer_id", userId);
+          const { count: e } = await supabase.from("scripts").select("id", { count: "exact", head: true }).eq("editor_id", userId);
+          if ((w || 0) && !["writer", "manager"].includes(type)) {
+            throw new HttpError(409, `They are the writer on ${w} project${w === 1 ? "" : "s"}. Assign another writer there first.`);
+          }
+          if ((e || 0) && !["editor", "manager"].includes(type)) {
+            throw new HttpError(409, `They are the editor on ${e} project${e === 1 ? "" : "s"}. Assign another editor there first.`);
+          }
+        }
       }
       if (!Object.keys(patch).length) throw new HttpError(400, "Nothing to change");
       await setProfile(supabase, userId, patch);

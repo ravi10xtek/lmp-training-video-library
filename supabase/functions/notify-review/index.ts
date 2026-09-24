@@ -140,7 +140,8 @@ async function notifyScript(supabase: SupabaseClient, callerId: string, caller: 
   if (type === "script_assigned") {
     if (assigneeId) ids.add(assigneeId);
   } else if (type === "script_sent") {
-    const { data } = await supabase.from("profiles").select("id").eq("is_reviewer", true);
+    // Scripts are reviewed by the client only, not the video reviewer
+    const { data } = await supabase.from("profiles").select("id").eq("account_type", "client");
     (data || []).forEach((r) => ids.add(r.id));
   } else {
     (await managerIds(supabase)).forEach((id) => ids.add(id));

@@ -44,8 +44,8 @@ function sanitizeFileName(fileName: string) {
   return fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-// Admins, the reviewer (Joe's own recordings) and the editor assigned to the
-// project that owns `videoId`.
+// Admins (the manager; the client for his own recordings) and the editor
+// assigned to the project that owns `videoId`.
 async function requireUploader(authHeader: string | null, videoId?: string) {
   if (!authHeader?.startsWith("Bearer ")) {
     throw new Error("Missing bearer token");
@@ -66,7 +66,7 @@ async function requireUploader(authHeader: string | null, videoId?: string) {
     .single();
   if (profileError || !profile) throw new Error("Unauthorized");
 
-  if (profile.role === "admin" || profile.is_reviewer) return { userId };
+  if (profile.role === "admin") return { userId };
 
   if (videoId) {
     const { data: script } = await supabase

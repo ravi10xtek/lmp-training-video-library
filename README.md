@@ -108,10 +108,15 @@ service key.
 
 | Who | How it is recognised | Can |
 |---|---|---|
-| Manager (Ravi) | type `manager` (`role = 'admin'`, not `is_reviewer`) | everything, including the Team page |
-| Client reviewer (Joe) | type `reviewer` (`is_reviewer`) | read projects, decide on what is sent to him (via `decide_script` / `set_video_status`), leave notes |
-| Writer / editor | type `team`; per project via `scripts.writer_id` / `editor_id` | writer: edit and send the script draft. Editor: upload video versions (`record_video_upload`), send them to Joe, read and answer notes |
-| Client staff | type `staff` | published videos only |
+| Manager (Ravi) | `manager` (`role = 'admin'`) | everything, including the Team page |
+| Client (Joe) | `client` (`admin` + `is_reviewer`) | approve scripts (`decide_script`) and videos (`set_video_status`), notes, recordings |
+| Video reviewer | `video_reviewer` (`worker` + `is_reviewer`) | approve videos alongside Joe; no scripts, no recordings |
+| Writer | `writer`, on projects where `scripts.writer_id` = them | edit and send the script draft |
+| Editor | `editor`, on projects where `scripts.editor_id` = them | upload video versions (`record_video_upload`), send them for review, read and answer notes |
+| Client staff | `staff` | watch published training videos only |
+
+A project's writer must be a writer account and its editor an editor account
+(the manager can fill either).
 
 Nobody can change their own `role` / `is_reviewer`, and new signups are
 always `worker`. Every uploaded video file is a row in `video_versions`; a

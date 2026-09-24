@@ -35,14 +35,15 @@ if (-not $UsersOnly) {
   }
 }
 
-# Test accounts. Roles follow workflow_folders_migration.sql:
-#   reviewer = admin + is_reviewer, editor/manager = admin, writers/editors/staff = worker
+# Test accounts. Types follow database/accounts_migration.sql:
+#   manager = admin; client = admin + is_reviewer; video_reviewer = worker + is_reviewer;
+#   writer / editor / staff = worker
 $users = @(
-  @{ email = 'joe@lmp.test';      name = 'Joe (Client)';           role = 'admin';  reviewer = $true;  type = 'reviewer' },
-  @{ email = 'reviewer@lmp.test'; name = 'Video Reviewer';         role = 'admin';  reviewer = $true;  type = 'reviewer' },
+  @{ email = 'joe@lmp.test';      name = 'Joe (Client)';           role = 'admin';  reviewer = $true;  type = 'client' },
+  @{ email = 'reviewer@lmp.test'; name = 'Video Reviewer';         role = 'worker'; reviewer = $true;  type = 'video_reviewer' },
   @{ email = 'ravi@lmp.test';     name = 'Ravi (Manager/Editor)';  role = 'admin';  reviewer = $false; type = 'manager' },
-  @{ email = 'writer@lmp.test';   name = 'Script Writer';          role = 'worker'; reviewer = $false; type = 'team' },
-  @{ email = 'editor@lmp.test';   name = 'Video Editor';           role = 'worker'; reviewer = $false; type = 'team' },
+  @{ email = 'writer@lmp.test';   name = 'Script Writer';          role = 'worker'; reviewer = $false; type = 'writer' },
+  @{ email = 'editor@lmp.test';   name = 'Video Editor';           role = 'worker'; reviewer = $false; type = 'editor' },
   @{ email = 'staff@lmp.test';    name = 'Client Staff';           role = 'worker'; reviewer = $false; type = 'staff' }
 )
 $headers = @{ apikey = $cfg.DEV_SERVICE_ROLE_KEY; Authorization = "Bearer $($cfg.DEV_SERVICE_ROLE_KEY)" }

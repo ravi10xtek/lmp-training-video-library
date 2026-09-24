@@ -112,11 +112,11 @@ Deno.serve(async (req) => {
       storageKey = video.storage_key;
     } else if (body.storageKey) {
       // A bare key is only signed if it belongs to something this user may see:
-      // one of Joe's recordings (admins + reviewer) or a video / video version.
+      // one of Joe's recordings (admins: the client and the manager) or a video / video version.
       const key = body.storageKey;
       const { data: rec } = await supabase
         .from("joe_recordings").select("id").eq("storage_key", key).limit(1).maybeSingle();
-      let allowed = !!rec && (viewer.isAdmin || viewer.isReviewer);
+      let allowed = !!rec && viewer.isAdmin;
       if (!allowed) {
         const { data: ver } = await supabase
           .from("video_versions").select("video_id, version").eq("storage_key", key).limit(1).maybeSingle();
