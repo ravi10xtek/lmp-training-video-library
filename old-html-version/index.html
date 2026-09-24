@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260918a">
+<link rel="stylesheet" href="styles.css?v=20260924c">
 </head>
 <body>
 
@@ -188,6 +188,12 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
             Manage videos
           </div>
+          <!-- Manager only: create and manage everyone's account -->
+          <div class="sidebar-item all hidden" id="sidebar-team-item" onclick="showTeamPage(this)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Team
+            <span class="sidebar-count" id="count-team">—</span>
+          </div>
           <!-- Recordings (admin / reviewer) -->
           <div class="sidebar-item all" id="sidebar-recordings-item" onclick="showRecordingsPage(this)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/></svg>
@@ -239,13 +245,15 @@
 
       <div class="feedback-section hidden" id="feedback-section">
         <div class="feedback-header">
-          <h3>Feedback &amp; comments</h3>
+          <h3 id="feedback-heading">Feedback &amp; comments</h3>
         </div>
 
+        <div class="feedback-list" id="feedback-list"></div>
+
         <!-- Comment composer: text + optional audio + optional image -->
-        <div class="comment-composer">
+        <div class="comment-composer" id="vid-composer">
           <textarea id="comment-text" class="comment-input" rows="2"
-                    placeholder="Write a comment… add a voice note or image too"></textarea>
+                    placeholder="Write a comment… add a voice note or image too" oninput="vidSyncChangesUI()"></textarea>
 
           <!-- Attachment previews (shown only when something is attached) -->
           <div class="comment-attachments hidden" id="comment-attachments">
@@ -264,6 +272,7 @@
               <button class="comment-tool-btn" id="comment-mic-btn" onclick="toggleRecording()" title="Record voice note">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
               </button>
+              <span class="sc-rec-label hidden" id="rec-label">Recording in progress…</span>
               <span class="record-timer hidden" id="record-timer">0:00</span>
               <button class="comment-tool-btn" id="comment-image-btn" onclick="document.getElementById('comment-image-input').click()" title="Attach image">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
@@ -276,40 +285,45 @@
             </button>
           </div>
         </div>
-
-        <div class="feedback-list" id="feedback-list"></div>
+        <div class="sc-rec-controls hidden" id="rec-controls">
+          <button class="btn btn-ghost btn-sm" id="rec-pause-btn" style="margin-top:0" onclick="toggleRecordingPause()">Pause</button>
+          <button class="btn btn-danger btn-sm" style="margin-top:0" onclick="stopRecording()">Stop</button>
+        </div>
+        <!-- Joe's "Needs changes" footer: Cancel → Post → Add more / Done (same as the script stage) -->
+        <div class="sc-changes-foot hidden" id="video-changes-foot">
+          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
+          <button class="btn btn-ghost btn-sm hidden" id="vid-add-more-btn" style="margin-top:0" onclick="vidAddMore()">Add more</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-post-btn" style="margin-top:0" onclick="submitComment()">Post</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-done-btn" style="margin-top:0" onclick="sendBackForEdits()">Done</button>
+        </div>
       </div>
 
       <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
       <div class="workflow-section hidden" id="reviewer-section">
-        <div class="workflow-section-label">Review decision</div>
+        <div class="workflow-section-label" id="reviewer-section-label">Your decision</div>
         <div class="reviewer-buttons">
           <button class="btn-more-changes" id="send-back-btn" onclick="openVideoChanges()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-            Send back for edits
+            Needs changes
           </button>
           <button class="btn-reviewer" id="mark-complete-btn" onclick="markComplete()">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            Mark as Complete
+            Approve video
           </button>
-        </div>
-        <div class="sc-changes-foot hidden" id="video-changes-foot">
-          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="width:auto;margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
-          <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="sendBackForEdits()">Done</button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
       </div>
 
       <!-- EDITOR ACTIONS (other admins) -->
       <div class="workflow-section hidden" id="editor-section">
-        <div class="workflow-section-label">Video status</div>
+        <div class="workflow-section-label" id="editor-section-label">Video status</div>
         <button class="btn-submit-review hidden" id="submit-review-btn" onclick="submitForReview()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-          Submit for Review
+          Send to Joe
         </button>
         <button class="btn-mark-done hidden" id="mark-done-btn" onclick="markAsDone()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-          Mark as Done
+          Send to Joe
         </button>
         <button class="btn-publish hidden" id="publish-btn" onclick="publishVideo()">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg>
@@ -322,99 +336,131 @@
 </div>
 
 <!-- ══════════════════════════
-     ADD/EDIT VIDEO MODAL
+     ADD/EDIT VIDEO DRAWER
+     A right-hand slide-over rather than a modal or an inline panel: the list
+     behind it keeps its scroll position and the row being edited stays visible,
+     so an admin never loses their place while working down the table.
 ══════════════════════════ -->
-<div class="modal-overlay" id="admin-modal" onclick="closeAdminModal(event)">
-  <div class="modal" style="max-width:600px">
-    <button class="modal-close" onclick="document.getElementById('admin-modal').classList.remove('open')">✕</button>
-    <div class="modal-info" id="video-form">
-      <h3 style="font-family:var(--font-head);font-size:18px;margin-bottom:20px;color:var(--white)" id="admin-modal-title">Add video</h3>
-
-      <div class="form-group">
-        <label class="form-label">Video title</label>
-        <input class="form-input" id="v-title" placeholder="e.g. Greenbrier — Property Overview">
+<div class="drawer-overlay" id="video-drawer" onclick="videoDrawerBackdrop(event)">
+  <aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="admin-modal-title" tabindex="-1">
+    <header class="drawer-head">
+      <div class="drawer-head-text">
+        <div class="drawer-title" id="admin-modal-title">Add video slot</div>
+        <div class="drawer-sub" id="video-form-sub"></div>
       </div>
+      <button class="drawer-close" onclick="closeVideoForm()" aria-label="Close">✕</button>
+    </header>
 
-      <input type="hidden" id="v-source" value="wasabi">
+    <div class="drawer-body">
+      <div class="modal-info" id="video-form">
 
-      <div class="form-row">
+        <!-- The slot's video, so an edit starts from watching it rather than
+             from a wall of fields. Hidden while the slot has no file. -->
+        <div class="drawer-preview hidden" id="v-preview"></div>
+
+        <div class="drawer-section">Details</div>
+
         <div class="form-group">
-          <label class="form-label">Category</label>
-          <select class="form-select" id="v-category" onchange="loadSubcats(this.value)">
-            <option value="">Select category…</option>
-          </select>
+          <label class="form-label" for="v-title">Video title</label>
+          <input class="form-input" id="v-title" placeholder="e.g. Greenbrier — Property Overview">
         </div>
-        <div class="form-group">
-          <label class="form-label">Sub-category</label>
-          <select class="form-select" id="v-subcat">
-            <option value="">Select sub-category…</option>
-          </select>
-        </div>
-      </div>
 
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Video type</label>
-          <select class="form-select" id="v-type">
-            <option value="">No type yet</option>
-            <option value="INTRO">INTRO</option>
-            <option value="HOW-TO">HOW-TO</option>
-            <option value="WALKTHROUGH">WALKTHROUGH</option>
-            <option value="PROCESS">PROCESS</option>
-            <option value="DEEP-DIVE">DEEP-DIVE</option>
-          </select>
-        </div>
-        <div class="form-group" id="v-status-group">
-          <label class="form-label">Status</label>
-          <select class="form-select" id="v-status">
-            <option value="empty">Empty slot</option>
-            <option value="raw">Raw / slot (not yet submitted)</option>
-            <option value="to_review">To Review (with Joe)</option>
-            <option value="to_edit">To Edit (with Ravi)</option>
-            <option value="completed">Completed (ready to publish)</option>
-            <option value="published">Published</option>
-          </select>
-          <div class="form-hint" style="font-size:11px;color:var(--muted);margin-top:4px">New uploads are sent to Joe's <strong>To Review</strong> automatically.</div>
-        </div>
-      </div>
+        <input type="hidden" id="v-source" value="wasabi">
 
-      <div id="wasabi-field-group">
-        <div class="form-group">
-          <label class="form-label">Upload video file</label>
-          <input class="form-input" id="v-wasabi-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="handleWasabiFileSelected(this.files)">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="v-category">Category</label>
+            <select class="form-select" id="v-category" onchange="loadSubcats(this.value)">
+              <option value="">Select category…</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="v-subcat">Sub-category</label>
+            <select class="form-select" id="v-subcat">
+              <option value="">Select sub-category…</option>
+            </select>
+          </div>
         </div>
-        <div class="form-group">
-          <label class="form-label">Wasabi video URL <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional fallback if you already have a URL)</span></label>
-          <input class="form-input" id="v-wasabi-url" placeholder="https://...">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Storage key</label>
-          <input class="form-input" id="v-storage-key" placeholder="videos/uuid/file.mp4">
-        </div>
-      </div>
 
-      <div class="form-group">
-        <label class="form-label">Description (optional)</label>
-        <textarea class="form-input" id="v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical"></textarea>
-      </div>
-
-      <div id="upload-progress-wrap" class="upload-progress-wrap hidden" aria-live="polite">
-        <div class="upload-progress-label-row">
-          <span id="upload-progress-label">Uploading…</span>
-          <span id="upload-progress-pct">0%</span>
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label" for="v-type">Video type</label>
+            <select class="form-select" id="v-type">
+              <option value="">No type yet</option>
+              <option value="INTRO">INTRO</option>
+              <option value="HOW-TO">HOW-TO</option>
+              <option value="WALKTHROUGH">WALKTHROUGH</option>
+              <option value="PROCESS">PROCESS</option>
+              <option value="DEEP-DIVE">DEEP-DIVE</option>
+            </select>
+          </div>
+          <div class="form-group" id="v-status-group">
+            <label class="form-label" for="v-status">Status</label>
+            <select class="form-select" id="v-status">
+              <option value="empty">Empty slot</option>
+              <option value="raw">Raw / slot (not yet submitted)</option>
+              <option value="to_review">To Review (with Joe)</option>
+              <option value="to_edit">To Edit (with the editor)</option>
+              <option value="completed">Completed (ready to publish)</option>
+              <option value="published">Published</option>
+            </select>
+          </div>
         </div>
-        <div class="upload-progress-track">
-          <div class="upload-progress-bar" id="upload-progress-bar"></div>
-        </div>
-      </div>
 
-      <div class="admin-btn-row" style="display:flex; gap:12px; margin-top:24px; padding-top:24px; border-top:var(--glass-border)">
-        <button class="btn btn-danger hidden" id="delete-video-btn" onclick="deleteVideo()" style="margin-right:auto">Delete Video</button>
-        <button class="btn btn-ghost" onclick="closeVideoForm()">Cancel</button>
-        <button class="btn btn-primary" id="save-video-btn" onclick="saveVideo()" style="margin-top:0; width:auto">Save video</button>
+        <div class="form-hint">New uploads start as <strong>Raw</strong> — use <em>Submit for review</em> to send them to Joe. Pick <strong>Empty slot</strong> to plan a slot before there is a file.</div>
+
+        <div class="form-group">
+          <label class="form-label" for="v-desc">Description <span class="form-label-opt">optional</span></label>
+          <textarea class="form-input" id="v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical"></textarea>
+        </div>
+
+        <div class="drawer-section">Video file</div>
+
+        <div id="wasabi-field-group">
+          <!-- What the file currently is, so an edit shows the slot's state
+               before asking the admin to replace anything. -->
+          <div class="drawer-media" id="v-media-state"></div>
+
+          <div class="form-group">
+            <label class="form-label" for="v-wasabi-file">Upload a file</label>
+            <input class="form-input" id="v-wasabi-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="handleWasabiFileSelected(this.files)">
+            <div class="form-hint">MP4, WebM or MOV. The upload starts when you press Save.</div>
+          </div>
+
+          <!-- Escape hatch for a file that is already in Wasabi. Collapsed by
+               default — day to day nobody needs to see raw storage keys. -->
+          <details class="drawer-advanced">
+            <summary>Link a file that is already in Wasabi</summary>
+            <div class="form-group">
+              <label class="form-label" for="v-wasabi-url">Wasabi video URL</label>
+              <input class="form-input" id="v-wasabi-url" placeholder="https://…">
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="v-storage-key">Storage key</label>
+              <input class="form-input" id="v-storage-key" placeholder="videos/uuid/file.mp4">
+            </div>
+          </details>
+        </div>
+
+        <div id="upload-progress-wrap" class="upload-progress-wrap hidden" aria-live="polite">
+          <div class="upload-progress-label-row">
+            <span id="upload-progress-label">Uploading…</span>
+            <span id="upload-progress-pct">0%</span>
+          </div>
+          <div class="upload-progress-track">
+            <div class="upload-progress-bar" id="upload-progress-bar"></div>
+          </div>
+        </div>
+
       </div>
     </div>
-  </div>
+
+    <footer class="drawer-foot">
+      <button class="btn btn-danger hidden" id="delete-video-btn" onclick="deleteVideo()">Delete</button>
+      <button class="btn btn-ghost" onclick="closeVideoForm()">Cancel</button>
+      <button class="btn btn-primary" id="save-video-btn" onclick="saveVideo()">Save video</button>
+    </footer>
+  </aside>
 </div>
 
 <!-- ══════════════════════════
@@ -633,6 +679,14 @@
   </div>
 </div>
 
+<!-- TEAM: add a person / manage one account (filled by app.js) -->
+<div class="modal-overlay" id="team-modal" onclick="closeTeamModal(event)">
+  <div class="modal team-modal" role="dialog" aria-modal="true" aria-labelledby="team-modal-title">
+    <button class="modal-close" onclick="closeTeamModal()" aria-label="Close">✕</button>
+    <div class="modal-info" id="team-modal-body"></div>
+  </div>
+</div>
+
 <!-- TOAST -->
 <div class="toast" id="toast"></div>
 
@@ -640,6 +694,6 @@
   // Local dev only: load env.local.js (dev Supabase project) if present.
   if (['localhost', '127.0.0.1'].includes(location.hostname) || location.hostname.endsWith('.ngrok-free.dev')) document.write('<script src="env.local.js"><\/script>');
 </script>
-<script src="app.js?v=20260918a"></script>
+<script src="app.js?v=20260924c"></script>
 </body>
 </html>

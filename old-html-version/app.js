@@ -70,9 +70,13 @@ let currentSearch = '';
 let currentPage = 'library';
 let editingVideoId = null;
 let pendingWasabiFile = null;
-let pendingThumbnail = null;
+let pendingThumbnail = null;   // Blob — uploaded to storage once the video has an id
 let currentVideoId = null;
-let vidChangesOpen = false;   // Joe clicked "Send back for edits": video feedback is showing
+let vidChangesOpen = false;   // Joe clicked "Needs changes": video feedback is showing
+let vidViewRound   = null;    // version tab being read on the Video tab (null = current)
+let vidMyNotes = 0;           // Joe's notes in this review round (Cancel → Add more / Done)
+let vidChangesAdding = false; // …and clicked "Add more"
+let recPausedMs = 0, recPauseAt = 0;
 let mediaRecorder = null;
 let recordedChunks = [];
 let recordingStream = null;
@@ -88,6 +92,7 @@ let notifPanelOpen = false;
 let notifSubscription = null;
 const NOTIFY_FUNCTION = 'notify-review';
 const FEEDBACK_BUCKET = 'video-feedback';
+const THUMBNAIL_BUCKET = 'video-thumbnails';
 const MAX_RECORDING_MS = 3 * 60 * 1000;
 
 const WASABI_UPLOAD_INIT_FUNCTION = 'wasabi-upload-init';
@@ -117,7 +122,10 @@ async function handleLogin() {
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
 
   if (error) {
-    err.textContent = error.message;
+    const m = error.message || '';
+    err.textContent = /banned/i.test(m) ? 'This account has been deactivated. Ask your manager to reactivate it.'
+      : /invalid login credentials/i.test(m) ? 'Wrong email or password.'
+      : m;
     err.style.display = 'block';
     btn.disabled = false;
     btn.textContent = 'Sign in';
@@ -152,7 +160,9 @@ async function initApp(user) {
   document.getElementById('app').style.display = 'flex';
 
   // Set user UI
-  const initials = (profile?.full_name || user.email).split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2);
+  // Initials from the words of the name, ignoring punctuation ("Joe (Client)" → "JC")
+  const initials = (profile?.full_name || user.email).split(/[\s@._-]+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, '')[0]).filter(Boolean).join('').toUpperCase().slice(0, 2) || '?';
   document.getElementById('user-avatar').textContent = initials;
   document.getElementById('user-name').textContent = profile?.full_name || user.email;
 
@@ -161,17 +171,23 @@ async function initApp(user) {
     badge.textContent = 'Admin';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
-    if (!profile?.is_reviewer) document.getElementById('sidebar-manage-item').classList.remove('hidden');
+    if (!profile?.is_reviewer) {
+      document.getElementById('sidebar-manage-item').classList.remove('hidden');
+      document.getElementById('sidebar-team-item')?.classList.remove('hidden');
+    }
   }
   if (profile?.is_reviewer) {
-    badge.textContent = profile?.role === 'admin' ? 'Admin · Reviewer' : 'Reviewer';
+    badge.textContent = profile?.account_type === 'video_reviewer' ? 'Video reviewer' : 'Client';
     badge.classList.add('admin');
     document.getElementById('sidebar-admin').classList.remove('hidden');
   }
   if (profile?.role === 'admin' || profile?.is_reviewer) {
     document.getElementById('notif-wrap').classList.remove('hidden');
-    document.getElementById('capture-topbar-btn').classList.remove('hidden');
   }
+  // Recordings (capture + Joe's Recordings) are the client's and the manager's
+  const recordings = profile?.role === 'admin';
+  document.getElementById('capture-topbar-btn').classList.toggle('hidden', !recordings);
+  document.getElementById('sidebar-recordings-item')?.classList.toggle('hidden', !recordings);
 
   // Role-specific workflow folders: Joe (reviewer) sees TO REVIEW;
   // Ravi (editor = admin, not reviewer) sees TO EDIT + COMPLETED VIDEOS.
@@ -184,8 +200,10 @@ async function initApp(user) {
   // Load data — scripts before videos so cards can show their script tag
   await Promise.all([loadCategories(), loadScripts()]);
   await loadVideos();
-  // The client lands on TO REVIEW, not the library dashboard
+  // The client lands on TO REVIEW, not the library dashboard; a writer or
+  // editor lands on their projects (the library is empty until videos publish).
   if (isReviewerUser()) showReviewPage(document.getElementById('folder-to-review'));
+  else if (!isStaffUser() && allScripts.some(isScriptAssignee)) showScriptsPage(document.getElementById('sidebar-scripts-item'));
   await Promise.all([loadNotifications(), loadRecordingsCount()]);
   subscribeToNotifications();
   subscribeToScriptChanges();
@@ -204,7 +222,7 @@ async function loadCategories() {
   const catSel = document.getElementById('v-category');
   catSel.innerHTML = '<option value="">Select category…</option>';
   allCategories.forEach(c => {
-    catSel.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+    catSel.innerHTML += `<option value="${c.id}">${escapeHtml(c.name)}</option>`;
   });
 }
 
@@ -212,7 +230,7 @@ async function loadSubcats(catId) {
   const sel = document.getElementById('v-subcat');
   sel.innerHTML = '<option value="">Select sub-category…</option>';
   allSubcats.filter(s => s.category_id === catId).forEach(s => {
-    sel.innerHTML += `<option value="${s.id}">${s.name}</option>`;
+    sel.innerHTML += `<option value="${s.id}">${escapeHtml(s.name)}</option>`;
   });
 }
 
@@ -230,11 +248,38 @@ async function loadVideos() {
   allVideos = data || [];
 
   updateCounts();
+  if (canManageScripts()) migrateInlineThumbnails();
   if (currentPage === 'review') { showReviewPage(); return; }
   renderVideos();
 }
 
 let videosLoadError = null;
+
+// One-time clean-up, run quietly in the manager's browser: thumbnails used to
+// be stored as base64 inside the videos row (every list load downloaded them
+// all). Moves each one into the video-thumbnails bucket and keeps its URL.
+let thumbMigrationRunning = false;
+async function migrateInlineThumbnails() {
+  if (thumbMigrationRunning) return;
+  const todo = allVideos.filter(v => typeof v.thumbnail_url === 'string' && v.thumbnail_url.startsWith('data:image/'));
+  if (!todo.length) return;
+  thumbMigrationRunning = true;
+  try {
+    for (const v of todo) {
+      try {
+        const blob = await (await fetch(v.thumbnail_url)).blob();
+        const url = await uploadVideoThumbnail(v.id, blob);
+        const { error } = await sb.from('videos').update({ thumbnail_url: url }).eq('id', v.id);
+        if (error) throw error;
+        v.thumbnail_url = url;
+      } catch (err) {
+        console.warn('[thumbnails] could not move', v.id, err?.message || err);
+      }
+    }
+  } finally {
+    thumbMigrationRunning = false;
+  }
+}
 
 // In-pipeline statuses — hidden from the main browse, shown only in their folders
 const WORKFLOW_STATUSES = ['to_review', 'to_edit', 'completed'];
@@ -300,7 +345,7 @@ function filterSubcat(slug) {
 // ══════════════════════════════════════════════════════
 const reviewQueueCount = () =>
   allVideos.filter(v => v.status === 'to_review').length +
-  (isReviewerUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
+  (isClientUser() ? allScripts.filter(s => s.status === 'sent').length : 0);
 
 async function showReviewPage(sidebarEl) {
   if (!isReviewerUser()) return;
@@ -315,7 +360,7 @@ async function showReviewPage(sidebarEl) {
   if (currentPage !== 'review') return;
 
   const byTime = (a, b) => new Date(a.updated_at || a.created_at) - new Date(b.updated_at || b.created_at);
-  const scripts = allScripts.filter(s => s.status === 'sent').sort(byTime);
+  const scripts = isClientUser() ? allScripts.filter(s => s.status === 'sent').sort(byTime) : [];
   const videos = allVideos.filter(v => v.status === 'to_review').sort(byTime);
   const projectOf = (v) => allScripts.find(s => s.video_id === v.id);
   const where = (x) => [x.categories?.name, x.subcategories?.name].filter(Boolean).join(' › ');
@@ -349,10 +394,10 @@ async function showReviewPage(sidebarEl) {
       <div class="page-title">To Review</div>
       <div class="page-sub">${total ? `${total} item${total !== 1 ? 's' : ''} waiting for you` : 'Nothing waiting for you right now'}</div>
     </div>
-    <div class="rv-section">
+    ${isClientUser() ? `<div class="rv-section">
       <div class="rv-section-head">${PJ_STAGE_ICONS.script} Scripts <span class="pj-muted">${scripts.length}</span></div>
       ${scripts.length ? scripts.map(scriptCard).join('') : '<div class="rv-empty">No scripts waiting. You get a notification when a writer sends one.</div>'}
-    </div>
+    </div>` : ''}
     <div class="rv-section">
       <div class="rv-section-head">${PJ_STAGE_ICONS.video} Videos <span class="pj-muted">${videos.length}</span></div>
       ${videos.length ? videos.map(videoCard).join('') : '<div class="rv-empty">No videos waiting. Approved scripts come back here once the video is produced.</div>'}
@@ -415,7 +460,6 @@ function getFilteredVideos() {
 
 function renderVideos() {
   if (currentPage !== 'library') return;
-  parkVideoForm();
   const videos = getFilteredVideos();
   const isAdmin = currentProfile?.role === 'admin';
   const main = document.getElementById('main-content');
@@ -444,7 +488,7 @@ function renderVideos() {
     || (currentFilter === 'all' ? 'All Videos'
         : allCategories.find(c => c.slug === currentFilter)?.name || 'Videos');
   html += `<div class="page-header">
-    <div class="page-title">${catLabel}</div>
+    <div class="page-title">${escapeHtml(catLabel)}</div>
     <div class="page-sub">${videos.length} ${currentStatus === 'empty' ? `slot${videos.length !== 1 ? 's' : ''}` : `video${videos.length !== 1 ? 's' : ''}`}${currentSearch ? ` matching "${escapeHtml(currentSearch)}"` : ''}</div>
   </div>`;
 
@@ -456,7 +500,7 @@ function renderVideos() {
       if (subcats.length > 0) {
         html += `<div class="filter-tabs">`;
         subcats.forEach(s => {
-          html += `<button class="filter-tab ${currentSubcatFilter === s.slug ? 'active' : ''}" onclick="filterSubcat('${s.slug}')">${s.name}</button>`;
+          html += `<button class="filter-tab ${currentSubcatFilter === s.slug ? 'active' : ''}" onclick="filterSubcat(${jsArg(s.slug)})">${escapeHtml(s.name)}</button>`;
         });
         html += `</div>`;
       }
@@ -547,7 +591,7 @@ function renderVideoCard(v, isAdmin) {
   const hasPlayableVideo = Boolean(v.video_url || v.storage_key);
 
   const thumb = v.thumbnail_url
-    ? `<img src="${v.thumbnail_url}" alt="" class="card-thumb-img" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block">`
+    ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="" class="card-thumb-img" loading="lazy" style="width:100%;height:100%;object-fit:cover;display:block">`
     : `<div class="card-thumb-empty">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         <span>${hasPlayableVideo ? 'Video ready' : 'No video yet'}</span>
@@ -579,13 +623,13 @@ function renderVideoCard(v, isAdmin) {
     </div>
     <div class="card-body">
       <div class="card-tags">
-        ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
+        ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
         ${roundBadge}
         ${isAdmin ? scriptTagHtml(scriptForVideo(v.id)) : ''}
       </div>
-      <div class="card-title">${v.title}</div>
-      <div class="card-sub">${v.subcategories?.name || v.categories?.name || ''}</div>
+      <div class="card-title">${escapeHtml(v.title)}</div>
+      <div class="card-sub">${escapeHtml(v.subcategories?.name || v.categories?.name || '')}</div>
       <div class="card-footer">
         <span class="card-status">
           <span class="status-dot" style="background:${statusColor}; box-shadow: 0 0 8px ${statusColor}"></span>
@@ -638,7 +682,7 @@ async function openVideo(id) {
     }
     document.getElementById('video-player').innerHTML = `
       <video controls autoplay playsinline style="width:100%;height:100%;background:black">
-        <source src="${playbackUrl}">
+        <source src="${escapeHtmlAttr(playbackUrl)}">
         Your browser does not support HTML5 video.
       </video>`;
   } catch (err) {
@@ -647,15 +691,15 @@ async function openVideo(id) {
   }
 
   document.getElementById('modal-tags').innerHTML = `
-    ${v.video_type ? `<span class="card-tag ${typeClass}">${v.video_type}</span>` : ''}
-    <span class="card-tag" style="background:rgba(255,255,255,0.08);color:var(--muted)">${v.categories?.name || ''}</span>
-    ${v.subcategories?.name ? `<span class="card-tag" style="background:rgba(255,255,255,0.06);color:var(--muted)">${v.subcategories.name}</span>` : ''}`;
+    ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
+    <span class="card-tag" style="background:rgba(255,255,255,0.08);color:var(--muted)">${escapeHtml(v.categories?.name || '')}</span>
+    ${v.subcategories?.name ? `<span class="card-tag" style="background:rgba(255,255,255,0.06);color:var(--muted)">${escapeHtml(v.subcategories.name)}</span>` : ''}`;
 
   document.getElementById('modal-title').textContent = v.title;
   document.getElementById('modal-desc').textContent = v.description || 'No description provided.';
   document.getElementById('modal-meta').innerHTML = `
-    <div class="modal-meta-item"><strong>${v.video_type || '—'}</strong>Type</div>
-    <div class="modal-meta-item"><strong>${v.subcategories?.name || '—'}</strong>Sub-category</div>`;
+    <div class="modal-meta-item"><strong>${escapeHtml(v.video_type || '—')}</strong>Type</div>
+    <div class="modal-meta-item"><strong>${escapeHtml(v.subcategories?.name || '—')}</strong>Sub-category</div>`;
   renderModalScriptLink(v.id);
 
   modal.classList.add('open');
@@ -732,46 +776,53 @@ function closeVideoModal() {
 // ══════════════════════════════════════════════════════
 // ADMIN FEEDBACK — voice notes per video
 // ══════════════════════════════════════════════════════
-async function loadFeedback(videoId) {
+async function loadFeedback(videoId, viewRound) {
   const list = document.getElementById('feedback-list');
   list.innerHTML = '<div class="feedback-empty">Loading…</div>';
 
-  // Only show the current review cycle's feedback. When Ravi resubmits, the
-  // video's review_round increments, so prior-round notes are hidden (but kept).
-  const round = allVideos.find(x => x.id === videoId)?.review_round || 1;
+  // Feedback is scoped to one review cycle. The current cycle is the default;
+  // picking an earlier version tab reads that cycle's notes back (read-only).
+  const current = allVideos.find(x => x.id === videoId)?.review_round || 1;
+  const round = viewRound || current;
+
+  const heading = document.getElementById('feedback-heading');
+  if (heading) heading.textContent = `Feedback on v${round}`;
 
   const { data, error } = await sb
     .from('video_feedback')
     .select('id, user_id, body, audio_path, image_path, duration_seconds, created_at, profiles:user_id(full_name)')
     .eq('video_id', videoId)
     .eq('review_round', round)
-    .order('created_at', { ascending: false });   // newest at the top, just under the composer
+    .order('created_at', { ascending: false });   // newest at the top
 
+  vidMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
+  vidSyncChangesUI();
   if (error) {
-    list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`;
+    list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`;
     return;
   }
 
   if (!data || data.length === 0) {
-    list.innerHTML = '<div class="feedback-empty">No comments yet. Add the first one above.</div>';
+    list.innerHTML = '<div class="feedback-empty">No comments yet.</div>';
     return;
   }
 
-  const isAdmin = currentProfile?.role === 'admin';
+  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
 
+  const locked = vidNotesLocked();
   const items = await Promise.all(data.map(async (fb) => {
     const name = fb.profiles?.full_name || 'Admin';
     const when = new Date(fb.created_at).toLocaleString();
-    const canDelete = fb.user_id === currentUser?.id;
+    const canDelete = fb.user_id === currentUser?.id && !locked;
 
     let audioHtml = '';
     let transcribeHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
-      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
       if (isAdmin) {
         transcribeHtml = `
-          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', '${fb.audio_path}', this)">
+          <button class="fb-transcribe-btn" onclick="transcribeFeedback('${fb.id}', ${jsArg(fb.audio_path)}, this)">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></svg>
             Transcribe
           </button>
@@ -789,7 +840,7 @@ async function loadFeedback(videoId) {
     if (fb.image_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.image_path, 60 * 60);
       if (signed?.signedUrl) {
-        imageHtml = `<a href="${signed.signedUrl}" target="_blank" rel="noopener" class="feedback-image-link"><img class="feedback-image" src="${signed.signedUrl}" alt="attachment"></a>`;
+        imageHtml = `<a href="${escapeHtmlAttr(signed.signedUrl)}" target="_blank" rel="noopener" class="feedback-image-link"><img class="feedback-image" src="${escapeHtmlAttr(signed.signedUrl)}" alt="attachment"></a>`;
       }
     }
 
@@ -798,7 +849,7 @@ async function loadFeedback(videoId) {
     return `
       <div class="feedback-item">
         <div class="feedback-item-header">
-          <span><span class="feedback-item-author">${name}</span> · ${when}</span>
+          <span><span class="feedback-item-author">${escapeHtml(name)}</span> · ${when}</span>
           ${canDelete ? `<button class="feedback-delete" onclick="deleteFeedback('${fb.id}')">Delete</button>` : ''}
         </div>
         ${bodyHtml}
@@ -819,6 +870,7 @@ function escapeHtml(str) {
 }
 
 async function deleteFeedback(id) {
+  if (vidNotesLocked()) { showToast('This feedback has been sent and is locked', 'error'); return; }
   if (!confirm('Delete this comment?')) return;
   // Look up attached file paths so we can clean up storage too
   const { data: row } = await sb.from('video_feedback')
@@ -832,11 +884,11 @@ async function deleteFeedback(id) {
     return;
   }
   showToast('Comment deleted', 'success');
-  if (currentVideoId) loadFeedback(currentVideoId);
+  if (currentVideoId) loadFeedback(currentVideoId, vidViewRound);
 }
 
 async function toggleRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     stopRecording();
     return;
   }
@@ -880,7 +932,9 @@ async function startRecording() {
   mediaRecorder.addEventListener('stop', handleRecordingStop);
 
   mediaRecorder.start();
-  recordingStartTime = Date.now();
+  recordingStartTime = Date.now(); recPausedMs = 0; recPauseAt = 0;
+  setRecUI('recording');
+  vidSyncChangesUI();
 
   const btn = document.getElementById('comment-mic-btn');
   btn.classList.add('mic-recording');
@@ -893,9 +947,33 @@ async function startRecording() {
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
+}
+
+function toggleRecordingPause() {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if (mediaRecorder.state === 'paused') {
+    recPausedMs += Date.now() - recPauseAt; recPauseAt = 0;
+    mediaRecorder.resume();
+  } else {
+    recPauseAt = Date.now();
+    mediaRecorder.pause();
+  }
+  setRecUI(mediaRecorder.state);
+}
+
+// Recording replaces the text box with a status line; Pause/Resume + Stop sit below
+function setRecUI(state) {
+  const on = state === 'recording' || state === 'paused';
+  document.getElementById('vid-composer')?.classList.toggle('recording', on);
+  document.getElementById('rec-controls')?.classList.toggle('hidden', !on);
+  const label = document.getElementById('rec-label');
+  if (label) { label.classList.toggle('hidden', !on); label.textContent = state === 'paused' ? 'Recording paused' : 'Recording in progress…'; }
+  const pause = document.getElementById('rec-pause-btn');
+  if (pause) pause.textContent = state === 'paused' ? 'Resume' : 'Pause';
+  document.getElementById('comment-mic-btn')?.classList.toggle('mic-recording', state === 'recording');
 }
 
 function stopMicStream() {
@@ -906,7 +984,8 @@ function stopMicStream() {
 }
 
 function updateRecordingTimer() {
-  const elapsed = Date.now() - recordingStartTime;
+  if (mediaRecorder?.state === 'paused') return;
+  const elapsed = Date.now() - recordingStartTime - recPausedMs;
   if (elapsed >= MAX_RECORDING_MS) {
     stopRecording();
     return;
@@ -920,7 +999,9 @@ function updateRecordingTimer() {
 function handleRecordingStop() {
   clearInterval(recordingTimerInterval);
   recordingTimerInterval = null;
-  const durationMs = Date.now() - recordingStartTime;
+  if (recPauseAt) { recPausedMs += Date.now() - recPauseAt; recPauseAt = 0; }
+  const durationMs = Date.now() - recordingStartTime - recPausedMs;
+  setRecUI(null);
   composerAudioDuration = Math.max(1, Math.round(durationMs / 1000));
 
   const btn = document.getElementById('comment-mic-btn');
@@ -938,6 +1019,7 @@ function handleRecordingStop() {
   player.src = URL.createObjectURL(composerAudioBlob);
   document.getElementById('comment-audio-preview').classList.remove('hidden');
   document.getElementById('comment-attachments').classList.remove('hidden');
+  vidSyncChangesUI();
 }
 
 // ── Image attachment ──────────────────────────────────────────────
@@ -958,6 +1040,7 @@ async function handleComposerImage(event) {
   thumb.src = URL.createObjectURL(composerImageFile);
   document.getElementById('comment-image-preview').classList.remove('hidden');
   document.getElementById('comment-attachments').classList.remove('hidden');
+  vidSyncChangesUI();
 }
 
 // Downscale/compress an image to a JPEG blob (keeps uploads small)
@@ -1004,11 +1087,12 @@ function clearComposerImage() {
 function syncAttachmentsVisibility() {
   const any = composerAudioBlob || composerImageFile;
   document.getElementById('comment-attachments').classList.toggle('hidden', !any);
+  vidSyncChangesUI();
 }
 
 function resetComposer() {
   // Stop any in-progress recording
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     try { mediaRecorder.stop(); } catch (_) {}
   }
   clearInterval(recordingTimerInterval);
@@ -1023,10 +1107,12 @@ function resetComposer() {
 
 // ── Submit a comment (text + optional audio + optional image) ──────
 async function submitComment() {
-  if (currentProfile?.role !== 'admin' || !currentVideoId) return;
+  if (!currentVideoId) return;
+  const onProject = !!currentScript && currentScript.video_id === currentVideoId && isScriptAssignee(currentScript);
+  if (!(isStaffUser() || onProject)) return;
 
   // Block submit while still recording
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     showToast('Stop the recording before sending', 'error');
     return;
   }
@@ -1037,7 +1123,7 @@ async function submitComment() {
     return;
   }
 
-  const sendBtn = document.getElementById('comment-send-btn');
+  const sendBtn = document.getElementById(vidChangesOpen ? 'vid-post-btn' : 'comment-send-btn');
   sendBtn.disabled = true;
   const sendHtml = sendBtn.innerHTML;
   sendBtn.textContent = 'Sending…';
@@ -1074,10 +1160,11 @@ async function submitComment() {
     });
     if (insErr) throw insErr;
 
+    vidMyNotes++;            // so the footer goes straight to Add more / Done
+    vidChangesAdding = false;
     resetComposer();
     showToast('Comment posted', 'success');
-    if (vidChangesOpen) { vidChangesPostedThisRound = true; document.getElementById('video-changes-cancel')?.classList.add('hidden'); }
-    loadFeedback(currentVideoId);
+    loadFeedback(currentVideoId, vidViewRound);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
     const detail = err?.message || err?.error || err?.statusText || 'Unknown error';
@@ -1261,125 +1348,469 @@ function closeModal(e) {
 // ══════════════════════════════════════════════════════
 // ADMIN — ADD / EDIT VIDEO
 // ══════════════════════════════════════════════════════
-// Manage videos is a page, not a modal. The add/edit form markup still lives in
-// #admin-modal (never opened now); it is moved into the page while in use and
-// parked back before any page rewrites #main-content, so its inputs survive.
+// The add/edit form lives permanently in #video-drawer, a right-hand slide-over
+// that sits outside #main-content. Nothing has to move it around any more, so a
+// page re-render can never disturb a half-filled form.
 const VIDEO_STATUS_LABELS = {
   empty: 'Empty slot', raw: 'Raw', to_review: 'To Review', to_edit: 'To Edit',
   completed: 'Completed', published: 'Published',
 };
 
-function parkVideoForm() {
-  const form = document.getElementById('video-form');
-  const home = document.querySelector('#admin-modal .modal');
-  if (form && home && form.parentElement !== home) home.appendChild(form);
-}
+// ══════════════════════════════════════════════════════
+// MANAGE VIDEOS PAGE (admin only)
+// ══════════════════════════════════════════════════════
+// The page renders in two parts so that typing in the search box, flipping a
+// filter chip or changing a row's status never repaints more than it has to,
+// and never steals input focus:
+//   showManageVideosPage() → builds the shell once per visit
+//   renderManageTable()    → repaints chips, counts, bulk bar and rows
+let manageStatusFilter = 'all';
+let manageSearch = '';
+let manageSort = { key: 'updated', dir: 'desc' };
+let manageSelection = new Set();
+let manageFormOpen = false;
+let manageFormSnapshot = '';
+let manageSearchTimer = null;
+
+// Pipeline order — also the order statuses sort in
+const MANAGE_STATUS_ORDER = ['empty', 'raw', 'to_review', 'to_edit', 'completed', 'published'];
+
+const hasMedia = (v) => !!(v.storage_key || v.video_url);
+
+const MANAGE_STATUS_FILTERS = [
+  { key: 'all',       label: 'All',           match: () => true },
+  { key: 'empty',     label: 'Empty slots',   match: v => v.status === 'empty' },
+  { key: 'raw',       label: 'Raw',           match: v => v.status === 'raw' },
+  { key: 'to_review', label: 'To Review',     match: v => v.status === 'to_review' },
+  { key: 'to_edit',   label: 'To Edit',       match: v => v.status === 'to_edit' },
+  { key: 'completed', label: 'Completed',     match: v => v.status === 'completed' },
+  { key: 'published', label: 'Published',     match: v => v.status === 'published' },
+  // Slots that claim to hold footage but have no file behind them — these are
+  // what silently break playback, so they get their own shortcut.
+  { key: 'no_media',  label: 'Missing media', match: v => v.status !== 'empty' && !hasMedia(v) },
+];
+
+const MANAGE_SORTS = [
+  { key: 'updated-desc', label: 'Recently updated' },
+  { key: 'updated-asc',  label: 'Oldest updated' },
+  { key: 'title-asc',    label: 'Title A→Z' },
+  { key: 'title-desc',   label: 'Title Z→A' },
+  { key: 'status-asc',   label: 'Pipeline stage' },
+  { key: 'category-asc', label: 'Category' },
+];
 
 function showAdmin() {
   showManageVideosPage(document.getElementById('sidebar-manage-item'));
 }
 
-// Status filter on the Manage videos page (moved here from the sidebar — admin only)
-let manageStatusFilter = 'all';
-const MANAGE_STATUS_FILTERS = [
-  { key: 'all',       label: 'All',         match: () => true },
-  { key: 'published', label: 'Published',   match: v => v.status === 'published' },
-  { key: 'empty',     label: 'Empty slots', match: v => v.status === 'empty' || v.status === 'raw' },
-  { key: 'to_review', label: 'To Review',   match: v => v.status === 'to_review' },
-  { key: 'to_edit',   label: 'To Edit',     match: v => v.status === 'to_edit' },
-  { key: 'completed', label: 'Completed',   match: v => v.status === 'completed' },
-];
+function manageFilteredVideos() {
+  const filter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  const q = manageSearch.trim().toLowerCase();
+  let list = allVideos.filter(filter.match);
+
+  if (q) {
+    list = list.filter(v => [
+      v.title, v.categories?.name, v.subcategories?.name,
+      v.video_type, VIDEO_STATUS_LABELS[v.status], v.description,
+    ].filter(Boolean).join(' ').toLowerCase().includes(q));
+  }
+
+  const dir = manageSort.dir === 'asc' ? 1 : -1;
+  const keyOf = (v) => {
+    switch (manageSort.key) {
+      case 'title':    return (v.title || '').toLowerCase();
+      case 'category': return `${v.categories?.name || 'zzz'} ${v.subcategories?.name || ''}`.toLowerCase();
+      case 'status':   return String(MANAGE_STATUS_ORDER.indexOf(v.status)).padStart(2, '0');
+      default:         return v.updated_at || v.created_at || '';
+    }
+  };
+  return list.slice().sort((a, b) => {
+    const A = keyOf(a), B = keyOf(b);
+    if (A === B) return (a.title || '').localeCompare(b.title || '');
+    return A < B ? -dir : dir;
+  });
+}
 
 function showManageVideosPage(sidebarEl, statusFilter) {
   if (currentProfile?.role !== 'admin') return;
-  if (statusFilter) manageStatusFilter = statusFilter;
+  if (statusFilter && statusFilter !== manageStatusFilter) {
+    manageStatusFilter = statusFilter;
+    manageSelection.clear();
+  }
+
+  const shellAlive = currentPage === 'manage' && document.getElementById('manage-table-body');
   currentPage = 'manage';
-  parkVideoForm();
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   (sidebarEl || document.getElementById('sidebar-manage-item'))?.classList.add('active');
 
-  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
-  const shown = allVideos.filter(activeFilter.match);
-  const chips = MANAGE_STATUS_FILTERS.map(f => `
-    <button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''}" onclick="showManageVideosPage(null, '${f.key}')">
-      ${f.label} <span class="manage-chip-count">${allVideos.filter(f.match).length}</span>
-    </button>`).join('');
+  // Repaint in place when the page is already up — keeps an open form, the
+  // search text and the caret exactly where the admin left them.
+  if (shellAlive) { renderManageTable(); return; }
 
-  const rows = shown.map(v => `
-    <tr>
-      <td>${escapeHtml(v.title || 'Untitled')}</td>
-      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
-      <td>${escapeHtml(v.video_type || '—')}</td>
-      <td><span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || escapeHtml(v.status || '')}</span></td>
-      <td style="text-align:right"><button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0;padding:4px 12px;font-size:12px" onclick="openEditVideo('${v.id}')">Edit</button></td>
-    </tr>`).join('');
+  const sortOpts = MANAGE_SORTS.map(s =>
+    `<option value="${s.key}" ${`${manageSort.key}-${manageSort.dir}` === s.key ? 'selected' : ''}>${s.label}</option>`).join('');
 
   document.getElementById('main-content').innerHTML = `
-    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div class="page-header manage-header">
       <div>
         <div class="page-title">Manage videos</div>
-        <div class="page-sub">${shown.length} video${shown.length !== 1 ? 's' : ''}${activeFilter.key !== 'all' ? ` · ${activeFilter.label}` : ''}</div>
+        <div class="page-sub" id="manage-count"></div>
       </div>
       <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openAddVideo()">+ Add video slot</button>
     </div>
-    <div class="manage-chips">${chips}</div>
-    <div id="manage-form-slot" class="manage-form-panel hidden"></div>
+
+    <div class="manage-toolbar">
+      <input class="form-input manage-search" id="manage-search" type="search" autocomplete="off"
+             placeholder="Search title, category, type…" value="${escapeHtmlAttr(manageSearch)}"
+             oninput="onManageSearch(this.value)" aria-label="Search videos">
+      <select class="form-select manage-sortby" aria-label="Sort by" onchange="setManageSort(this.value)">${sortOpts}</select>
+    </div>
+
+    <div class="manage-chips" id="manage-chips"></div>
+    <div class="manage-bulk hidden" id="manage-bulk"></div>
+
     <div class="manage-table-wrap">
       <table class="manage-table">
-        <thead><tr><th>Title</th><th>Category</th><th>Type</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted)">No videos with this status.</td></tr>'}</tbody>
+        <thead><tr>
+          <th class="manage-check-col"><input type="checkbox" id="manage-check-all" onchange="toggleManageSelectAll(this.checked)" aria-label="Select all shown"></th>
+          <th>Title</th><th>Category</th><th>Type</th><th>Status</th><th>Updated</th><th></th>
+        </tr></thead>
+        <tbody id="manage-table-body"></tbody>
       </table>
     </div>`;
+
+  renderManageTable();
+}
+
+function renderManageTable() {
+  const body = document.getElementById('manage-table-body');
+  if (!body) return;
+
+  const shown = manageFilteredVideos();
+  const shownIds = new Set(shown.map(v => v.id));
+  // Drop selections that fell outside the current filter/search
+  [...manageSelection].forEach(id => { if (!shownIds.has(id)) manageSelection.delete(id); });
+
+  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  document.getElementById('manage-chips').innerHTML = MANAGE_STATUS_FILTERS.map(f => {
+    const n = allVideos.filter(f.match).length;
+    if (f.key === 'no_media' && n === 0) return '';   // nothing broken → no noise
+    return `<button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''} ${f.key === 'no_media' ? 'warn' : ''}"
+              onclick="showManageVideosPage(null, '${f.key}')">${f.label} <span class="manage-chip-count">${n}</span></button>`;
+  }).join('');
+
+  const count = document.getElementById('manage-count');
+  if (count) {
+    const bits = [`${shown.length} of ${allVideos.length} video${allVideos.length !== 1 ? 's' : ''}`];
+    if (activeFilter.key !== 'all') bits.push(activeFilter.label);
+    if (manageSearch.trim()) bits.push(`matching “${escapeHtml(manageSearch.trim())}”`);
+    count.innerHTML = bits.join(' · ');
+  }
+
+  const statusOptions = (current) => MANAGE_STATUS_ORDER.map(s =>
+    `<option value="${s}" ${s === current ? 'selected' : ''}>${VIDEO_STATUS_LABELS[s]}</option>`).join('');
+
+  body.innerHTML = shown.map(v => {
+    const missing = v.status !== 'empty' && !hasMedia(v);
+    const thumb = v.thumbnail_url
+      ? `<img class="manage-thumb" src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">`
+      : `<div class="manage-thumb manage-thumb-empty" aria-hidden="true"></div>`;
+    return `
+    <tr class="${manageSelection.has(v.id) ? 'selected' : ''} ${manageFormOpen && editingVideoId === v.id ? 'editing' : ''}">
+      <td class="manage-check-col"><input type="checkbox" ${manageSelection.has(v.id) ? 'checked' : ''}
+        onchange="toggleManageRow('${v.id}', this.checked)" aria-label="Select ${escapeHtmlAttr(v.title || 'Untitled')}"></td>
+      <td>
+        <div class="manage-title-cell">
+          ${thumb}
+          <div>
+            <div class="manage-title">${escapeHtml(v.title || 'Untitled')}</div>
+            <div class="manage-sub">
+              ${v.duration_seconds ? formatDuration(v.duration_seconds) : ''}
+              ${missing ? '<span class="manage-warn">No file attached</span>' : ''}
+            </div>
+          </div>
+        </div>
+      </td>
+      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
+      <td>${escapeHtml(v.video_type || '—')}</td>
+      <td>
+        <select class="manage-status-select status-${v.status}" aria-label="Status"
+                onchange="setVideoStatus('${v.id}', this.value, this)">${statusOptions(v.status)}</select>
+      </td>
+      <td class="manage-updated">${(v.updated_at || v.created_at) ? timeAgo(v.updated_at || v.created_at) : '—'}</td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm manage-edit-btn" onclick="openEditVideo('${v.id}')">Edit</button></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" class="manage-empty">${manageEmptyMessage(activeFilter)}</td></tr>`;
+
+  const all = document.getElementById('manage-check-all');
+  if (all) {
+    all.checked = shown.length > 0 && manageSelection.size === shown.length;
+    all.indeterminate = manageSelection.size > 0 && manageSelection.size < shown.length;
+  }
+  renderManageBulkBar();
+}
+
+function manageEmptyMessage(filter) {
+  if (manageSearch.trim()) {
+    return `Nothing matches “${escapeHtml(manageSearch.trim())}”. <a class="sc-link" onclick="onManageSearch('', true)">Clear the search</a>`;
+  }
+  if (filter.key === 'all') {
+    return `No videos yet. <a class="sc-link" onclick="openAddVideo()">Add the first slot</a>`;
+  }
+  return `Nothing in ${filter.label} right now. <a class="sc-link" onclick="showManageVideosPage(null, 'all')">Show all videos</a>`;
+}
+
+function onManageSearch(value, syncInput) {
+  manageSearch = value;
+  if (syncInput) {
+    const input = document.getElementById('manage-search');
+    if (input) input.value = value;
+  }
+  clearTimeout(manageSearchTimer);
+  manageSearchTimer = setTimeout(renderManageTable, 150);
+}
+
+function setManageSort(value) {
+  const [key, dir] = value.split('-');
+  manageSort = { key, dir };
+  renderManageTable();
+}
+
+// ── Selection + bulk actions ─────────────────────────────────
+function toggleManageRow(id, checked) {
+  if (checked) manageSelection.add(id); else manageSelection.delete(id);
+  renderManageTable();
+}
+
+function toggleManageSelectAll(checked) {
+  manageSelection.clear();
+  if (checked) manageFilteredVideos().forEach(v => manageSelection.add(v.id));
+  renderManageTable();
+}
+
+function clearManageSelection() {
+  manageSelection.clear();
+  renderManageTable();
+}
+
+function renderManageBulkBar() {
+  const bar = document.getElementById('manage-bulk');
+  if (!bar) return;
+  const n = manageSelection.size;
+  bar.classList.toggle('hidden', n === 0);
+  if (!n) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `
+    <span class="manage-bulk-count">${n} selected</span>
+    <select class="form-select manage-bulk-select" aria-label="Move selected to status"
+            onchange="bulkSetStatus(this.value); this.value = '';">
+      <option value="">Move to…</option>
+      ${MANAGE_STATUS_ORDER.map(s => `<option value="${s}">${VIDEO_STATUS_LABELS[s]}</option>`).join('')}
+    </select>
+    <button class="btn btn-ghost btn-sm manage-bulk-btn" onclick="clearManageSelection()">Clear</button>
+    <button class="btn btn-danger btn-sm manage-bulk-btn" onclick="bulkDeleteVideos()">Delete</button>`;
+}
+
+async function setVideoStatus(id, status, el) {
+  const v = allVideos.find(x => x.id === id);
+  if (!v || v.status === status) return;
+  const prev = v.status;
+  if (el) el.disabled = true;
+
+  await ensureFreshSession();
+  const stamp = new Date().toISOString();
+  const { error } = await sb.from('videos').update({ status, updated_at: stamp }).eq('id', id);
+
+  if (el) el.disabled = false;
+  if (error) {
+    if (el) el.value = prev;
+    showToast('Could not update status: ' + error.message, 'error');
+    return;
+  }
+  v.status = status;
+  v.updated_at = stamp;
+  showToast(`“${v.title || 'Untitled'}” moved to ${VIDEO_STATUS_LABELS[status]}`, 'success');
+  updateCounts();
+  renderManageTable();
+}
+
+async function bulkSetStatus(status) {
+  if (!status || !manageSelection.size) return;
+  const ids = [...manageSelection];
+  if (!confirm(`Move ${ids.length} video${ids.length !== 1 ? 's' : ''} to “${VIDEO_STATUS_LABELS[status]}”?`)) return;
+
+  await ensureFreshSession();
+  const stamp = new Date().toISOString();
+  const { error } = await sb.from('videos').update({ status, updated_at: stamp }).in('id', ids);
+  if (error) { showToast('Bulk update failed: ' + error.message, 'error'); return; }
+
+  ids.forEach(id => {
+    const v = allVideos.find(x => x.id === id);
+    if (v) { v.status = status; v.updated_at = stamp; }
+  });
+  manageSelection.clear();
+  showToast(`${ids.length} video${ids.length !== 1 ? 's' : ''} moved to ${VIDEO_STATUS_LABELS[status]}`, 'success');
+  updateCounts();
+  renderManageTable();
+}
+
+async function bulkDeleteVideos() {
+  const ids = [...manageSelection];
+  if (!ids.length) return;
+  const names = ids.slice(0, 3).map(id => allVideos.find(v => v.id === id)?.title || 'Untitled').join(', ');
+  const more = ids.length > 3 ? ` and ${ids.length - 3} more` : '';
+  if (!confirm(`Delete ${ids.length} video slot${ids.length !== 1 ? 's' : ''} (${names}${more})?\n\nThis cannot be undone.`)) return;
+
+  await ensureFreshSession();
+  const { error } = await sb.from('videos').delete().in('id', ids);
+  if (error) { showToast('Delete failed: ' + error.message, 'error'); return; }
+
+  manageSelection.clear();
+  showToast(`${ids.length} video${ids.length !== 1 ? 's' : ''} deleted`, 'success');
+  await loadVideos();
+  showManageVideosPage();
+}
+
+// ── Add / edit form ──────────────────────────────────────────
+// Snapshot of the form's values, so leaving it can warn about unsaved work.
+function videoFormSnapshot() {
+  const ids = ['v-title', 'v-category', 'v-subcat', 'v-type', 'v-status', 'v-wasabi-url', 'v-storage-key', 'v-desc'];
+  return ids.map(id => document.getElementById(id)?.value || '').join('\u0001')
+    + '\u0001' + (pendingWasabiFile ? pendingWasabiFile.name : '');
+}
+
+function videoSaveLabel() {
+  return editingVideoId ? 'Save changes' : 'Create slot';
+}
+
+function videoFormIsDirty() {
+  return manageFormOpen && !!manageFormSnapshot && videoFormSnapshot() !== manageFormSnapshot;
 }
 
 function mountVideoForm() {
-  if (currentPage !== 'manage' || !document.getElementById('manage-form-slot')) showManageVideosPage();
-  const slot = document.getElementById('manage-form-slot');
-  const form = document.getElementById('video-form');
-  if (!slot || !form) return;
-  slot.appendChild(form);
-  slot.classList.remove('hidden');
+  const drawer = document.getElementById('video-drawer');
+  if (!drawer) return;
+  manageFormOpen = true;
   document.getElementById('v-status-group').classList.toggle('hidden', currentProfile?.role !== 'admin');
-  slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  drawer.classList.add('open');
+  document.body.classList.add('drawer-open');
+  document.querySelector('#video-drawer .drawer-body').scrollTop = 0;
+  // Mark the row being edited, if the list happens to be on screen behind it
+  if (currentPage === 'manage') renderManageTable();
+  setTimeout(() => document.getElementById('v-title')?.focus(), 220);
 }
 
-function closeVideoForm() {
-  parkVideoForm();
-  document.getElementById('manage-form-slot')?.classList.add('hidden');
+function closeVideoForm(force) {
+  if (!force && videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
+  manageFormOpen = false;
+  manageFormSnapshot = '';
+  editingVideoId = null;
+  ++videoPreviewToken;
+  const prev = document.getElementById('v-preview');
+  if (prev) { prev.querySelectorAll('video').forEach(el => el.pause()); prev.className = 'drawer-preview hidden'; prev.innerHTML = ''; }
+  document.getElementById('video-drawer')?.classList.remove('open');
+  document.body.classList.remove('drawer-open');
+  if (currentPage === 'manage') renderManageTable();
+}
+
+// Clicking the dimmed area outside the panel closes it (same guard as Cancel)
+function videoDrawerBackdrop(e) {
+  if (e.target === document.getElementById('video-drawer')) closeVideoForm();
+}
+
+// The drawer opens on the video itself: an admin's first question about a slot
+// is almost always "which one is this?", and the answer is the footage, not the
+// title field. A token guards the signed-URL lookup against a fast reopen.
+let videoPreviewToken = 0;
+
+async function renderVideoFormPreview(v) {
+  const box = document.getElementById('v-preview');
+  if (!box) return;
+  const token = ++videoPreviewToken;
+
+  if (!v || !hasMedia(v)) { box.className = 'drawer-preview hidden'; box.innerHTML = ''; return; }
+
+  box.className = 'drawer-preview';
+  box.innerHTML = '<div class="drawer-preview-msg">Loading video…</div>';
+  try {
+    const url = await resolveWasabiPlaybackUrl(v);
+    if (token !== videoPreviewToken) return;
+    if (!url) throw new Error('no playback url');
+    box.innerHTML = `<video controls playsinline preload="metadata"
+      ${v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : ''}><source src="${escapeHtmlAttr(url)}"></video>`;
+  } catch (err) {
+    if (token !== videoPreviewToken) return;
+    console.warn('[drawer preview]', err);
+    box.innerHTML = `<div class="drawer-preview-msg">Could not load the video.
+      <a class="sc-link" onclick="renderVideoFormPreview(allVideos.find(x => x.id === editingVideoId))">Retry</a></div>`;
+  }
+}
+
+// The sub-line under the drawer title, plus the "what file is on this slot"
+// summary. Both exist so an edit opens showing the slot's current state
+// instead of a set of blank-looking inputs.
+function renderVideoFormContext(v) {
+  renderVideoFormPreview(v);
+  const sub = document.getElementById('video-form-sub');
+  const media = document.getElementById('v-media-state');
+  if (sub) {
+    sub.innerHTML = v
+      ? `<span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || v.status}</span>
+         <span>${escapeHtml(v.categories?.name || 'No category')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</span>
+         ${(v.updated_at || v.created_at) ? `<span>· updated ${timeAgo(v.updated_at || v.created_at)}</span>` : ''}`
+      : 'A new slot in the library — fill in what you know, the file can follow later.';
+  }
+  if (media) {
+    if (v && hasMedia(v)) {
+      media.className = 'drawer-media';
+      media.innerHTML = `<span class="drawer-media-ok">✓ File attached</span>
+        <code>${escapeHtml((v.storage_key || v.video_url || '').split('/').pop())}</code>
+        <span class="drawer-media-note">Uploading a new file replaces it.</span>`;
+    } else if (v) {
+      media.className = 'drawer-media warn';
+      media.innerHTML = '<span class="drawer-media-warn">No file on this slot yet</span>';
+    } else {
+      media.className = 'drawer-media hidden';
+      media.innerHTML = '';
+    }
+  }
 }
 
 function openAddVideo() {
+  if (videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
   editingVideoId = null;
   pendingWasabiFile = null;
   pendingThumbnail = null;
-  document.getElementById('admin-modal-title').textContent = 'Add video slot';
+  document.getElementById('admin-modal-title').textContent = 'New video slot';
   document.getElementById('v-title').value = '';
   document.getElementById('v-category').value = '';
   document.getElementById('v-subcat').innerHTML = '<option value="">Select sub-category…</option>';
   document.getElementById('v-type').value = '';
-  document.getElementById('v-status').value = 'empty';
+  // Raw = footage in hand but not yet submitted for review. Switch to
+  // "Empty slot" to plan a slot before there is anything to upload.
+  document.getElementById('v-status').value = 'raw';
   document.getElementById('v-wasabi-file').value = '';
   document.getElementById('v-wasabi-url').value = '';
   document.getElementById('v-storage-key').value = '';
   document.getElementById('v-desc').value = '';
   document.getElementById('delete-video-btn').classList.add('hidden');
+  document.getElementById('save-video-btn').textContent = videoSaveLabel();
+  renderVideoFormContext(null);
   hideUploadProgress();
   mountVideoForm();
+  manageFormSnapshot = videoFormSnapshot();
 }
 
 function openEditVideo(id) {
   const v = allVideos.find(x => x.id === id);
   if (!v) return;
+  if (id !== editingVideoId && videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
 
   editingVideoId = id;
   pendingWasabiFile = null;
   pendingThumbnail = null;
-  document.getElementById('admin-modal-title').textContent = 'Edit video';
+  document.getElementById('admin-modal-title').textContent = v.title || 'Untitled';
   document.getElementById('v-title').value = v.title || '';
   document.getElementById('v-category').value = v.category_id || '';
-  loadSubcats(v.category_id).then(() => {
-    document.getElementById('v-subcat').value = v.subcategory_id || '';
-  });
   document.getElementById('v-type').value = v.video_type || '';
   document.getElementById('v-status').value = v.status || 'empty';
   document.getElementById('v-wasabi-file').value = '';
@@ -1387,19 +1818,47 @@ function openEditVideo(id) {
   document.getElementById('v-storage-key').value = v.storage_key || '';
   document.getElementById('v-desc').value = v.description || '';
   document.getElementById('delete-video-btn').classList.remove('hidden');
+  document.getElementById('save-video-btn').textContent = videoSaveLabel();
+  renderVideoFormContext(v);
   hideUploadProgress();
   mountVideoForm();
+  manageFormSnapshot = videoFormSnapshot();
+  // Sub-categories load asynchronously — re-take the baseline once they land,
+  // or the form looks dirty the moment the select is populated.
+  loadSubcats(v.category_id).then(() => {
+    document.getElementById('v-subcat').value = v.subcategory_id || '';
+    manageFormSnapshot = videoFormSnapshot();
+  });
 }
+
+// Esc closes the add/edit form (with the same unsaved-changes guard)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && manageFormOpen) { e.stopPropagation(); closeVideoForm(); }
+});
 
 function handleWasabiFileSelected(files) {
   pendingWasabiFile = files && files.length ? files[0] : null;
   pendingThumbnail = null;
   hideUploadProgress();
 
+  // Preview the file that was just picked, so a wrong pick is obvious before
+  // it is uploaded. Falls back to the slot's existing video when cleared.
+  const box = document.getElementById('v-preview');
+  if (box) {
+    if (pendingWasabiFile) {
+      ++videoPreviewToken;
+      box.className = 'drawer-preview is-new';
+      box.innerHTML = `<video controls playsinline preload="metadata" src="${URL.createObjectURL(pendingWasabiFile)}"></video>
+        <div class="drawer-preview-tag">New file — not uploaded yet</div>`;
+    } else {
+      renderVideoFormPreview(allVideos.find(x => x.id === editingVideoId));
+    }
+  }
+
   if (pendingWasabiFile) {
-    generateThumbnailDataUri(pendingWasabiFile)
-      .then((dataUri) => {
-        pendingThumbnail = dataUri;
+    generateThumbnailBlob(pendingWasabiFile)
+      .then((blob) => {
+        pendingThumbnail = blob;
       })
       .catch((err) => {
         console.warn('Thumbnail generation failed:', err);
@@ -1408,52 +1867,87 @@ function handleWasabiFileSelected(files) {
   }
 }
 
-function generateThumbnailDataUri(file, seekSeconds = 1) {
+// Poster frame for a video file, as a JPEG Blob. Screen recordings and edits
+// often open on a black or faded frame, so several points are tried and the
+// first frame with real picture content wins (else the brightest one).
+function generateThumbnailBlob(file) {
   return new Promise((resolve, reject) => {
     const video = document.createElement('video');
-    video.preload = 'metadata';
+    video.preload = 'auto';
     video.muted = true;
     video.playsInline = true;
     const objectUrl = URL.createObjectURL(file);
     video.src = objectUrl;
 
-    let done = false;
+    const canvas = document.createElement('canvas');
+    const probe = document.createElement('canvas');
+    probe.width = 32; probe.height = 18;
+    let times = [], best = null, done = false, duration = null;
+
     const finish = (fn) => {
       if (done) return;
       done = true;
+      clearTimeout(timer);
       URL.revokeObjectURL(objectUrl);
+      video.removeAttribute('src'); video.load();
       fn();
+    };
+    const emit = () => {
+      if (!best) return finish(() => reject(new Error('Could not read a frame')));
+      canvas.width = best.w; canvas.height = best.h;
+      canvas.getContext('2d').putImageData(best.img, 0, 0);
+      // The Blob carries the video's length along, for the videos row
+      canvas.toBlob(b => finish(() => b ? resolve(Object.assign(b, { duration })) : reject(new Error('Could not encode thumbnail'))), 'image/jpeg', 0.82);
+    };
+    const next = () => {
+      if (!times.length) return emit();
+      try { video.currentTime = times.shift(); } catch (_) { emit(); }
     };
 
     video.addEventListener('loadedmetadata', () => {
-      const target = Math.min(seekSeconds, Math.max(0, (video.duration || 2) * 0.1));
-      try { video.currentTime = target; } catch (_) { /* ignore */ }
+      const d = isFinite(video.duration) && video.duration > 0 ? video.duration : 2;
+      if (isFinite(video.duration) && video.duration > 0) duration = video.duration;
+      times = [Math.min(1, d * 0.1), d * 0.1, d * 0.25, d * 0.4, d * 0.6]
+        .map(t => Math.max(0, Math.min(t, d - 0.05)));
+      next();
     });
 
     video.addEventListener('seeked', () => {
       try {
-        const canvas = document.createElement('canvas');
-        const targetWidth = 320;
-        const scale = video.videoWidth ? targetWidth / video.videoWidth : 1;
-        canvas.width = targetWidth;
-        canvas.height = Math.round((video.videoHeight || 180) * scale);
+        const w = 640, h = Math.round((video.videoHeight || 360) * (w / (video.videoWidth || 640)));
+        canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d');
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUri = canvas.toDataURL('image/jpeg', 0.6);
-        finish(() => resolve(dataUri));
+        ctx.drawImage(video, 0, 0, w, h);
+        // Mean brightness and spread on a tiny copy: black / flat frames score low
+        const pctx = probe.getContext('2d');
+        pctx.drawImage(video, 0, 0, probe.width, probe.height);
+        const px = pctx.getImageData(0, 0, probe.width, probe.height).data;
+        let sum = 0, sq = 0, n = px.length / 4;
+        for (let k = 0; k < px.length; k += 4) {
+          const y = 0.2126 * px[k] + 0.7152 * px[k + 1] + 0.0722 * px[k + 2];
+          sum += y; sq += y * y;
+        }
+        const mean = sum / n, spread = Math.sqrt(Math.max(0, sq / n - mean * mean));
+        const score = mean + spread;
+        if (!best || score > best.score) best = { score, w, h, img: ctx.getImageData(0, 0, w, h) };
+        if (mean > 28 && spread > 12) { times = []; }   // good enough — stop looking
+        next();
       } catch (err) {
         finish(() => reject(err));
       }
     });
 
-    video.addEventListener('error', () => {
-      finish(() => reject(new Error('Could not load video for thumbnail')));
-    });
-
-    setTimeout(() => {
-      finish(() => reject(new Error('Thumbnail generation timed out')));
-    }, 15000);
+    video.addEventListener('error', () => finish(() => reject(new Error('Could not load video for thumbnail'))));
+    const timer = setTimeout(() => (best ? emit() : finish(() => reject(new Error('Thumbnail generation timed out')))), 20000);
   });
+}
+
+// Stores a thumbnail in the public video-thumbnails bucket → its URL.
+async function uploadVideoThumbnail(videoId, blob) {
+  const path = `${videoId}/${crypto.randomUUID()}.jpg`;
+  const { error } = await sb.storage.from(THUMBNAIL_BUCKET).upload(path, blob, { contentType: 'image/jpeg', upsert: false });
+  if (error) throw error;
+  return sb.storage.from(THUMBNAIL_BUCKET).getPublicUrl(path).data.publicUrl;
 }
 
 function showUploadProgress() {
@@ -1563,7 +2057,7 @@ async function parseFunctionError(error) {
   return msg;
 }
 
-async function uploadViaWasabiDirect(file, onProgress) {
+async function uploadViaWasabiDirect(file, onProgress, videoId = null) {
   const contentType = (file.type && file.type.trim()) || 'application/octet-stream';
   onProgress?.(3, 'Preparing upload…');
 
@@ -1572,13 +2066,14 @@ async function uploadViaWasabiDirect(file, onProgress) {
       fileName: file.name,
       fileType: contentType,
       fileSize: file.size,
+      ...(videoId ? { videoId } : {}),
     },
   });
 
   if (error) {
     const msg = await parseFunctionError(error);
-    if (msg.includes('Admin') || msg.includes('401') || msg.includes('Unauthorized')) {
-      throw new Error('Upload denied: sign in as an admin user.');
+    if (/only an admin|admin access|unauthorized|401|403/i.test(msg)) {
+      throw new Error("Upload denied — only the project's editor or an admin can upload this video.");
     }
     throw new Error('Upload init failed: ' + msg);
   }
@@ -1630,12 +2125,10 @@ async function uploadViaStaging(file, onProgress) {
  * Small files: Supabase staging (if under plan limit).
  * Large files or size errors: direct Wasabi upload (up to 5GB).
  */
-async function uploadToWasabiViaEdgeFunction(file, onProgress) {
+async function uploadToWasabiViaEdgeFunction(file, onProgress, videoId = null) {
   if (!currentUser?.id) throw new Error('You must be signed in to upload.');
-  if (currentProfile?.role !== 'admin') throw new Error('Upload denied: admin account required.');
-
-  // Always use direct presigned-URL upload — simpler, no staging bucket needed
-  return uploadViaWasabiDirect(file, onProgress);
+  // The server decides who may upload (admins, the reviewer, the project's editor)
+  return uploadViaWasabiDirect(file, onProgress, videoId);
 }
 
 async function saveVideo() {
@@ -1656,14 +2149,13 @@ async function saveVideo() {
     description: document.getElementById('v-desc').value.trim() || null,
   };
 
-  if (pendingThumbnail) {
-    payload.thumbnail_url = pendingThumbnail;
-  }
+  const thumbBlob = pendingThumbnail;   // uploaded below, once the row has an id
+  let uploaded = null;                  // { storageKey, publicUrl } of a new file
 
   if (!payload.title) {
     showToast('Please enter a title', 'error');
     btn.disabled = false;
-    btn.textContent = 'Save video';
+    btn.textContent = videoSaveLabel();
     return;
   }
 
@@ -1673,7 +2165,8 @@ async function saveVideo() {
     try {
       const result = await uploadToWasabiViaEdgeFunction(pendingWasabiFile, (pct, label) => {
         setUploadProgress(pct, label);
-      });
+      }, editingVideoId);
+      uploaded = { ...result, fileName: pendingWasabiFile.name, size: pendingWasabiFile.size };
       payload.storage_key = result.storageKey;
       payload.video_url = result.publicUrl || payload.video_url || null;
       // Reflect the captured key in the UI so it's visible and recoverable if the save fails.
@@ -1685,54 +2178,84 @@ async function saveVideo() {
       hideUploadProgress();
       showToast('Upload failed: ' + (uploadErr.message || 'Unknown error'), 'error');
       btn.disabled = false;
-      btn.textContent = 'Save video';
+      btn.textContent = videoSaveLabel();
       return;
     }
     hideUploadProgress();
   }
 
-  if (!payload.storage_key && !payload.video_url) {
-    showToast('Upload a file or provide a Wasabi video URL/storage key', 'error');
+  // An "Empty slot" is a deliberately unfilled placeholder — it is the one
+  // status that is allowed to exist with no file behind it.
+  if (!payload.storage_key && !payload.video_url && payload.status !== 'empty') {
+    showToast('Upload a file, paste a Wasabi URL, or set the status to “Empty slot” to plan it for later', 'error');
     btn.disabled = false;
-    btn.textContent = 'Save video';
+    btn.textContent = videoSaveLabel();
     return;
   }
 
   await ensureFreshSession();   // attach a valid token — avoids anon 403 on the write
+  // A new file before the video is with Joe is recorded as a numbered version
+  // (so it can be sent for review); the row itself gets everything else.
+  const asVersion = !!uploaded && ['empty', 'raw', 'to_edit'].includes(payload.status);
+  const row = { ...payload };
+  if (asVersion) { delete row.storage_key; delete row.video_url; }
+  if (asVersion && payload.status === 'empty') row.status = 'raw';
+
   let error, insertedId;
   if (editingVideoId) {
-    ({ error } = await sb.from('videos').update(payload).eq('id', editingVideoId));
+    ({ error } = await sb.from('videos').update(row).eq('id', editingVideoId));
   } else {
-    payload.created_by = currentUser.id;
-    payload.review_round = 1;
-    // Starts as 'raw' — the team sees it and sends it to Joe with Submit for Review.
-    payload.status = 'raw';
-    const { data: inserted, error: insertErr } = await sb.from('videos').insert(payload).select('id').single();
+    row.created_by = currentUser.id;
+    row.review_round = 1;
+    // Honour the status the admin picked (defaults to Raw) instead of
+    // silently overriding it — the form's own field is the source of truth.
+    if (!row.status) row.status = 'raw';
+    const { data: inserted, error: insertErr } = await sb.from('videos').insert(row).select('id').single();
     error = insertErr;
     insertedId = inserted?.id;
-    console.log('[saveVideo] insert result:', { insertedId, insertErr });
+  }
+  const videoId = editingVideoId || insertedId;
+
+  let thumbUrl = null;
+  if (!error && videoId && thumbBlob) {
+    try { thumbUrl = await uploadVideoThumbnail(videoId, thumbBlob); }
+    catch (e) { console.warn('[saveVideo] thumbnail', e); }
+  }
+  if (!error && videoId && asVersion) {
+    ({ error } = await sb.rpc('record_video_upload', {
+      p_video_id: videoId, p_storage_key: uploaded.storageKey, p_video_url: uploaded.publicUrl || null,
+      p_description: payload.description, p_thumbnail_url: thumbUrl,
+      p_file_name: uploaded.fileName, p_size_bytes: uploaded.size,
+    }));
+  } else if (!error && videoId && thumbUrl) {
+    ({ error } = await sb.from('videos').update({ thumbnail_url: thumbUrl }).eq('id', videoId));
   }
 
   if (error) {
     showToast('Error: ' + error.message, 'error');
   } else {
     if (!editingVideoId && insertedId) {
-      showToast('Uploaded — submit it for review when ready', 'success');
+      showToast(payload.status === 'raw'
+        ? 'Saved as Raw — submit it for review when ready'
+        : `Saved as ${VIDEO_STATUS_LABELS[payload.status] || payload.status}`, 'success');
     } else {
       showToast('Video updated', 'success');
     }
-    closeVideoForm();
+    closeVideoForm(true);
     await loadVideos();
     if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
-  btn.textContent = 'Save video';
+  btn.textContent = videoSaveLabel();
 }
 
 async function deleteVideo() {
   if (!editingVideoId) return;
-  if (!confirm('Are you sure you want to delete this video slot? This cannot be undone.')) return;
+  const title = allVideos.find(v => v.id === editingVideoId)?.title || 'this video slot';
+  if (!confirm(`Delete “${title}”?
+
+This cannot be undone.`)) return;
 
   const btn = document.getElementById('delete-video-btn');
   btn.disabled = true;
@@ -1744,18 +2267,13 @@ async function deleteVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast('Video deleted', 'success');
-    closeVideoForm();
+    closeVideoForm(true);
     await loadVideos();
     if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
-  btn.textContent = 'Delete Video';
-}
-
-function closeAdminModal(e) {
-  if (e.target === document.getElementById('admin-modal'))
-    document.getElementById('admin-modal').classList.remove('open');
+  btn.textContent = 'Delete';
 }
 
 // ══════════════════════════════════════════════════════
@@ -1905,8 +2423,8 @@ function renderNotifPanel() {
   }
   list.innerHTML = allNotifications.slice(0, 25).map(n => `
     <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
-      <div class="notif-title">${n.title}</div>
-      ${n.message ? `<div class="notif-msg">${n.message}</div>` : ''}
+      <div class="notif-title">${escapeHtml(n.title)}</div>
+      ${n.message ? `<div class="notif-msg">${escapeHtml(n.message)}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
       ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
     </div>
@@ -1949,42 +2467,74 @@ function notifClick(videoId, scriptId) {
 // REVIEWER — mark as reviewed & notify
 // ══════════════════════════════════════════════════════
 // Canonical reviewer-button labels (restored by updateReviewedBtnState).
-const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Send back for edits';
-const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Complete';
+const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Needs changes';
+const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Approve video';
 
 // Joe sends the video back to Ravi's TO EDIT folder with his feedback.
 // While Joe is deciding on a video, the feedback section stays hidden until he
 // clicks "Send back for edits"; then the decision buttons give way to the notes
 // and a Done button that records the decision.
 function applyVideoReviewMode(v) {
-  const deciding = currentProfile?.is_reviewer === true && v?.status === 'to_review';
+  const reviewer = currentProfile?.is_reviewer === true;
+  const deciding = reviewer && v?.status === 'to_review' && !vidViewRound;
   const fb = document.getElementById('feedback-section');
   const buttons = document.querySelector('#reviewer-section .reviewer-buttons');
   const foot = document.getElementById('video-changes-foot');
-  const status = document.getElementById('reviewer-status');
   const send = document.getElementById('comment-send-btn');
+  const text = document.getElementById('comment-text');
+  if (text) text.placeholder = reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note — add a voice note or image too';
   if (!deciding) {
     foot?.classList.add('hidden'); buttons?.classList.remove('hidden');
-    if (send) send.innerHTML = COMMENT_SEND_HTML;
+    // Joe comments only while deciding; once he has, his notes stay but the composer closes
+    send?.classList.toggle('hidden', reviewer);
+    document.getElementById('vid-composer')?.classList.toggle('hidden', reviewer);
     return;
   }
+  // Like the script stage: "Needs changes" swaps the decision for the notes
   fb?.classList.toggle('hidden', !vidChangesOpen);
-  buttons?.classList.toggle('hidden', vidChangesOpen);
+  document.getElementById('reviewer-section')?.classList.toggle('hidden', vidChangesOpen);
+  buttons?.classList.remove('hidden');
   foot?.classList.toggle('hidden', !vidChangesOpen);
-  document.getElementById('video-changes-cancel')?.classList.toggle('hidden', vidChangesOpen && vidChangesPostedThisRound);
-  if (send) send.innerHTML = vidChangesOpen ? COMMENT_SEND_HTML.replace('Send', 'Save') : COMMENT_SEND_HTML;
-  if (status && vidChangesOpen) setStatusText(status, 'Leave your notes for Ravi, then click Done to send the video back.');
+  send?.classList.toggle('hidden', vidChangesOpen);   // Post lives in the footer
+  document.getElementById('vid-composer')?.classList.remove('hidden');
+  vidSyncChangesUI();
 }
-const COMMENT_SEND_HTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Send';
-let vidChangesPostedThisRound = false;
+// While Joe is writing "Send back for edits" notes there is one main action at a time:
+// Cancel (nothing posted) → Post (a note/recording is ready) → Add more / Done.
+function vidSyncChangesUI() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!vidChangesOpen || currentProfile?.is_reviewer !== true || v?.status !== 'to_review') return;
+  const recording = !!mediaRecorder && mediaRecorder.state !== 'inactive';
+  const draft = !!composerAudioBlob || !!composerImageFile || !!document.getElementById('comment-text')?.value.trim();
+  const posted = vidMyNotes > 0;
+  const composing = !posted || vidChangesAdding || draft || recording;
+  const show = (id, on) => document.getElementById(id)?.classList.toggle('hidden', !on);
+  show('vid-composer', composing);
+  show('video-changes-cancel', !posted && !draft && !recording);
+  show('vid-post-btn', draft && !recording);
+  show('vid-add-more-btn', posted && !composing);
+  show('vid-done-btn', posted && !draft && !recording);
+}
+function vidAddMore() {
+  vidChangesAdding = true;
+  vidSyncChangesUI();
+  document.getElementById('comment-text')?.focus();
+}
+// Joe's notes are locked once the video leaves his review (Done / Mark as Complete)
+function vidNotesLocked() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  // An earlier version is history — nothing on it can be added to or removed.
+  if (vidViewRound && vidViewRound < videoRound(v)) return true;
+  return currentProfile?.is_reviewer === true && v?.status !== 'to_review';
+}
 function openVideoChanges() {
-  vidChangesOpen = true; vidChangesPostedThisRound = false;
+  vidChangesOpen = true; vidChangesAdding = false;
   const v = allVideos.find(x => x.id === currentVideoId);
   applyVideoReviewMode(v);
   document.getElementById('feedback-section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 function cancelVideoChanges() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') { showToast('Stop the recording first', 'error'); return; }
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') { showToast('Stop the recording first', 'error'); return; }
   vidChangesOpen = false;
   resetComposer();
   const v = allVideos.find(x => x.id === currentVideoId);
@@ -1996,21 +2546,23 @@ async function sendBackForEdits() {
   await reviewerDecision({
     status: 'to_edit',
     guardStatus: 'to_review',
-    btnId: 'send-back-btn',
+    btnId: 'vid-done-btn',            // the "Done" in the notes footer is what Joe clicks
     notifyType: 'more_changes_requested',
-    successMsg: 'Sent back for edits — Ravi notified',
+    successMsg: 'Sent back for changes — the editor has been notified',
     errorMsg: 'Could not send back',
   });
 }
 
 // Joe approves the video — it moves to Ravi's COMPLETED VIDEOS folder.
 async function markComplete() {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v || !confirm(`Approve v${videoRound(v)}? It becomes the final video and goes to the manager to publish.`)) return;
   await reviewerDecision({
     status: 'completed',
     guardStatus: 'to_review',
     btnId: 'mark-complete-btn',
     notifyType: 'round2_reviewed',
-    successMsg: 'Marked complete — moved to Ravi\'s Completed Videos',
+    successMsg: 'Video approved — the team has been notified',
     errorMsg: 'Could not mark complete',
   });
 }
@@ -2025,9 +2577,11 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
   const videoId = currentVideoId;
   const title = v.title;
   const btn = document.getElementById(btnId);
+  const btnHtml = btn?.innerHTML;
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
-  const otherBtn = document.getElementById(btnId === 'send-back-btn' ? 'mark-complete-btn' : 'send-back-btn');
-  if (otherBtn) otherBtn.disabled = true;
+  const others = ['mark-complete-btn', 'send-back-btn', 'vid-done-btn', 'vid-add-more-btn']
+    .filter(id => id !== btnId).map(id => document.getElementById(id)).filter(Boolean);
+  others.forEach(b => { b.disabled = true; });
 
   await ensureFreshSession();
   const reviewedAt = new Date().toISOString();
@@ -2037,6 +2591,8 @@ async function reviewerDecision({ status, guardStatus, btnId, notifyType, succes
 
   if (error) {
     showToast(`${errorMsg}: ${error.message}`, 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = btnHtml; }
+    others.forEach(b => { b.disabled = false; });
     updateReviewedBtnState(v);   // restores labels + re-enables
     return;
   }
@@ -2057,16 +2613,21 @@ function updateReviewedBtnState(v) {
   const sendBackBtn = document.getElementById('send-back-btn');
   const completeBtn = document.getElementById('mark-complete-btn');
   const statusEl = document.getElementById('reviewer-status');
+  const labelEl = document.getElementById('reviewer-section-label');
   if (!sendBackBtn || !v) return;
 
   // Restore canonical labels + enabled state (recovers from a stuck "Saving…").
   sendBackBtn.disabled = false; sendBackBtn.innerHTML = SEND_BACK_BTN_HTML;
   if (completeBtn) { completeBtn.disabled = false; completeBtn.innerHTML = MARK_COMPLETE_BTN_HTML; }
+  const done = document.getElementById('vid-done-btn');
+  if (done) { done.disabled = false; done.textContent = 'Done'; }
+  const more = document.getElementById('vid-add-more-btn');
+  if (more) more.disabled = false;
 
-  const round = v.review_round || 1;
-  setStatusText(statusEl, round > 1
-    ? `Revision round ${round} — send back for more edits, or mark complete`
-    : 'Review this video — send back with feedback, or mark complete');
+  const round = videoRound(v);
+  if (labelEl) labelEl.textContent = `Your decision on v${round}`;
+  setStatusText(statusEl,
+    'Watch, then decide. "Needs changes" lets you leave notes for the editor; approving marks the video complete.');
 }
 
 // ── EDITOR ACTIONS ───────────────────────────────────
@@ -2079,8 +2640,14 @@ function setStatusText(el, text) {
 // Canonical labels for the workflow buttons. Click handlers overwrite these
 // with transient text ("Saving…" etc.); updateEditorBtnState restores them so
 // a failed/interrupted action never leaves a button stuck.
-const SUBMIT_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Submit for Review';
-const MARK_DONE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Done';
+const SEND_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+// Like the script stage, an editor sends a numbered version to Joe and he keeps
+// asking for changes until he approves one. v1 is the first submission; every
+// resubmission after a "Needs changes" is the next version.
+const videoRound     = (v) => v?.review_round || 1;
+const nextVideoVersion = (v) => v?.status === 'to_edit' ? videoRound(v) + 1 : videoRound(v);
+const SUBMIT_BTN_HTML    = (v) => `${SEND_SVG} Send for review as v${nextVideoVersion(v)}`;
+const MARK_DONE_BTN_HTML = (v) => `${SEND_SVG} Send for review as v${nextVideoVersion(v)}`;
 const PUBLISH_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg> Publish Video';
 
 function updateEditorBtnState(v) {
@@ -2092,8 +2659,8 @@ function updateEditorBtnState(v) {
 
   // Restore canonical label + enabled state — recovers from any prior
   // transient "Saving…"/"Sending…"/"Publishing…" left by a failed action.
-  if (submitBtn)  { submitBtn.disabled  = false; submitBtn.innerHTML  = SUBMIT_BTN_HTML; }
-  markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML;
+  if (submitBtn)  { submitBtn.disabled  = false; submitBtn.innerHTML  = SUBMIT_BTN_HTML(v); }
+  markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML(v);
   if (publishBtn) { publishBtn.disabled = false; publishBtn.innerHTML = PUBLISH_BTN_HTML; }
 
   const showSubmit   = v.status === 'empty' || v.status === 'raw';
@@ -2104,12 +2671,16 @@ function updateEditorBtnState(v) {
   markDoneBtn.classList.toggle('hidden', !showMarkDone);
   publishBtn.classList.toggle('hidden', !showPublish);
 
+  const round = videoRound(v);
+  const labelEl = document.getElementById('editor-section-label');
+  if (labelEl) labelEl.textContent = showSubmit && round === 1 ? 'Video stage' : `Video · v${round}`;
+
   const text =
-    showSubmit   ? 'Upload done — submit for Joe to review' :
-    showMarkDone ? 'Joe requested changes — click when revisions are ready' :
-    showPublish  ? 'Approved by Joe — ready to publish' :
-    v.status === 'to_review' ? 'Waiting for Joe to review' :
-    v.status === 'published' ? 'Published ✓' : '';
+    showSubmit   ? `Upload done — send v${nextVideoVersion(v)} for review` :
+    showMarkDone ? `Changes were requested on v${round}. Upload v${round + 1} on the project's Video tab, then send it.` :
+    showPublish  ? `v${round} is approved — ready to publish` :
+    v.status === 'to_review' ? `v${round} is in review` :
+    v.status === 'published' ? `Published ✓ (approved on v${round})` : '';
   setStatusText(statusEl, text);
 }
 
@@ -2134,7 +2705,7 @@ async function submitForReview() {
   v.status = 'to_review';
   v.review_round = 1;
   const videoId = currentVideoId, title = v.title;
-  showToast('Submitted for review — Joe has been notified', 'success');
+  showToast('Sent for review as v1 — the reviewers have been notified', 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -2168,7 +2739,7 @@ async function markAsDone() {
   v.status = 'to_review';
   v.review_round = nextRound;
   const videoId = currentVideoId, title = v.title;
-  showToast('Marked as done — Joe has been notified', 'success');
+  showToast(`Sent for review as v${nextRound} — the reviewers have been notified`, 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -2800,7 +3371,6 @@ async function showRecordingsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
-  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading recordings…</div>';
 
@@ -2851,7 +3421,7 @@ async function showRecordingsPage(sidebarEl) {
 
     const thumbArea = r.thumbnail_data
       ? `<div class="recording-thumb" style="position:relative">
-           <img src="${r.thumbnail_data}" alt="${label}" style="width:100%;height:100%;object-fit:cover;display:block">
+           <img src="${escapeHtmlAttr(r.thumbnail_data)}" alt="${escapeHtmlAttr(label)}" style="width:100%;height:100%;object-fit:cover;display:block">
            ${dur ? `<div class="recording-duration">${dur}</div>` : ''}
          </div>`
       : `<div class="recording-thumb-icon" style="position:relative">
@@ -2863,9 +3433,9 @@ async function showRecordingsPage(sidebarEl) {
       <div class="recording-card" onclick="openRecordingViewer('${r.id}')">
         ${thumbArea}
         <div class="recording-body">
-          <div class="recording-name">${label}</div>
+          <div class="recording-name">${escapeHtml(label)}</div>
           <div class="recording-meta">
-            <span class="recording-type-badge ${r.type}">${r.type}</span>
+            <span class="recording-type-badge ${escapeHtmlAttr(r.type)}">${escapeHtml(r.type)}</span>
             ${date}
           </div>
         </div>
@@ -2898,25 +3468,25 @@ async function openRecordingViewer(id) {
 
   let playerHtml = '';
   if (r.type === 'photo') {
-    playerHtml = `<img src="${url}" alt="${label}" style="width:100%;display:block;border-radius:var(--radius-lg) var(--radius-lg) 0 0;object-fit:contain;max-height:60vh;background:#000">`;
+    playerHtml = `<img src="${escapeHtmlAttr(url)}" alt="${escapeHtmlAttr(label)}" style="width:100%;display:block;border-radius:var(--radius-lg) var(--radius-lg) 0 0;object-fit:contain;max-height:60vh;background:#000">`;
   } else if (r.type === 'video') {
     playerHtml = `<div class="video-wrapper" style="border-radius:var(--radius-lg) var(--radius-lg) 0 0">
       <video controls autoplay playsinline style="width:100%;height:100%;background:#000">
-        <source src="${url}">
+        <source src="${escapeHtmlAttr(url)}">
       </video>
     </div>`;
   } else {
     playerHtml = `<div style="padding:32px;background:rgba(0,0,0,0.3);border-radius:var(--radius-lg) var(--radius-lg) 0 0;display:flex;align-items:center;justify-content:center">
       <audio controls autoplay style="width:100%;outline:none">
-        <source src="${url}">
+        <source src="${escapeHtmlAttr(url)}">
       </audio>
     </div>`;
   }
 
   document.getElementById('recording-player-wrap').innerHTML = playerHtml;
   document.getElementById('recording-viewer-meta').innerHTML = `
-    <div class="recording-viewer-title">${label}</div>
-    <div class="recording-viewer-sub">${r.type.charAt(0).toUpperCase() + r.type.slice(1)} · ${date}${r.duration_sec ? ' · ' + _fmtDuration(r.duration_sec) : ''}</div>`;
+    <div class="recording-viewer-title">${escapeHtml(label)}</div>
+    <div class="recording-viewer-sub">${escapeHtml(r.type.charAt(0).toUpperCase() + r.type.slice(1))} · ${date}${r.duration_sec ? ' · ' + _fmtDuration(r.duration_sec) : ''}</div>`;
 
   // Only show delete button for own recordings or admins
   const isOwn  = r.created_by === currentUser.id;
@@ -3029,7 +3599,6 @@ async function downloadRecording() {
       closeCaptureModal();
       closeScriptModal();
       closeScriptNewModal();
-      document.getElementById('admin-modal').classList.remove('open');
       document.getElementById('notif-panel')?.classList.add('hidden');
       notifPanelOpen = false;
       closeSidebar();
@@ -3094,7 +3663,7 @@ if ('serviceWorker' in navigator) {
 const SCRIPT_TTS_FUNCTION = 'script-tts';
 const SCRIPT_AUDIO_BUCKET = 'script-audio';
 // PostgREST needs the FK name to embed profiles twice (writer + editor)
-const SCRIPT_SELECT = `*, videos(id, title, status, thumbnail_url, storage_key, video_url, description, duration_seconds), categories(name, slug), subcategories(name),
+const SCRIPT_SELECT = `*, videos(id, title, status, thumbnail_url, storage_key, video_url, description, duration_seconds, review_round, reviewed_at), categories(name, slug), subcategories(name),
   writer:profiles!scripts_writer_id_fkey(full_name), editor:profiles!scripts_editor_id_fkey(full_name)`;
 
 const SCRIPT_STATUS_META = {
@@ -3161,13 +3730,19 @@ let scTimerInterval = null, scRecStart = 0;
 
 // ── Roles ────────────────────────────────────────────────────
 const isStaffUser    = () => currentProfile?.role === 'admin' || currentProfile?.is_reviewer === true;
+// Reviewers decide on videos: the client (Joe) and the video reviewer
 const isReviewerUser = () => currentProfile?.is_reviewer === true;
+// Only the client reviews scripts (and has recordings); the video reviewer doesn't
+const isClientUser   = () => currentProfile?.account_type
+  ? currentProfile.account_type === 'client'
+  : currentProfile?.role === 'admin' && currentProfile?.is_reviewer === true;
 // Ravi: creates projects, assigns people, links slots
 const canManageScripts = () => currentProfile?.role === 'admin' && !currentProfile?.is_reviewer;
 // Who may edit the text: the manager, or the assigned writer
 const canWriteScript   = (s) => !!s && (canManageScripts() || s.writer_id === currentUser?.id);
 const isScriptAssignee = (s) => !!s && (s.writer_id === currentUser?.id || s.editor_id === currentUser?.id);
-const canCommentScript = (s) => isStaffUser() || isScriptAssignee(s);
+// Same as the database: the manager, the client, and the project's writer/editor
+const canCommentScript = (s) => canManageScripts() || isClientUser() || isScriptAssignee(s);
 
 function profileName(p) {
   const n = p?.full_name || '';
@@ -3190,14 +3765,14 @@ async function loadScripts() {
 
 async function loadProfiles() {
   if (!canManageScripts()) return;
-  const { data } = await sb.from('profiles').select('id, full_name, role, is_reviewer').order('full_name');
+  const { data } = await sb.from('profiles').select('id, full_name, role, is_reviewer, account_type').order('full_name');
   allProfiles = data || [];
 }
 
 // "Waiting on you" per role
 function scriptNeedsMe(s) {
   const me = currentUser?.id;
-  if (isReviewerUser() && s.status === 'sent') return true;
+  if (isClientUser() && s.status === 'sent') return true;
   if (s.writer_id === me && (s.status === 'draft' || s.status === 'changes')) return true;
   if (canManageScripts() && !s.writer_id && (s.status === 'draft' || s.status === 'changes')) return true;
   if (s.editor_id === me && s.status === 'approved') return true;
@@ -3259,7 +3834,6 @@ async function showScriptsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
-  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
@@ -3515,11 +4089,15 @@ function projRow(s) {
 }
 
 // ── New project (starts with its script) ─────────────────────
-function peopleOptions(selectedId, { allowNone, noneLabel } = {}) {
+// The Writer picker offers writer accounts, the Editor picker editor accounts;
+// the manager can take either (the database enforces the same). Whoever is
+// already assigned stays listed so the choice never silently changes.
+function peopleOptions(selectedId, { allowNone, noneLabel, role } = {}) {
   let html = allowNone ? `<option value="">${noneLabel || 'Assign later'}</option>` : '';
-  allProfiles.forEach(p => {
+  const assignable = (p) => p.account_type === role || p.account_type === 'manager';
+  allProfiles.filter(p => assignable(p) || p.id === selectedId).forEach(p => {
     const you = p.id === currentUser?.id ? ' (you)' : '';
-    const tag = p.is_reviewer ? ' · reviewer' : p.role === 'admin' ? ' · admin' : '';
+    const tag = p.account_type === 'manager' ? ' · manager' : '';
     html += `<option value="${p.id}" ${p.id === selectedId ? 'selected' : ''}>${escapeHtml(profileName(p))}${you}${tag}</option>`;
   });
   return html;
@@ -3535,8 +4113,8 @@ async function openScriptNewModal() {
   document.getElementById('sc-new-title').value = '';
   document.getElementById('sc-new-title').dataset.auto = '';
   const otterIn = document.getElementById('sc-new-otter'); if (otterIn) otterIn.value = '';
-  document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id);
-  document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true });
+  document.getElementById('sc-new-writer').innerHTML = peopleOptions(currentUser.id, { role: 'writer' });
+  document.getElementById('sc-new-editor').innerHTML = peopleOptions(null, { allowNone: true, role: 'editor' });
   document.getElementById('script-new-modal').classList.add('open');
 }
 
@@ -3649,13 +4227,15 @@ async function assignScript(role, userId) {
 // ── Script modal ─────────────────────────────────────────────
 async function openScript(id, versionId = null) {
   stopScriptPlayer();
-  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesAdding = false; projectAssetsFor = null; }
+  if (id !== currentScriptId) { scriptTab = 'script'; scChangesOpen = false; scChangesAdding = false; projectAssetsFor = null; paViewVersion = null; projVideoVersions = []; }
   if (canManageScripts() && !allProfiles.length) await loadProfiles();
   const [{ data: s, error }, { data: vers }] = await Promise.all([
     sb.from('scripts').select(SCRIPT_SELECT).eq('id', id).single(),
     sb.from('script_versions').select('*').eq('script_id', id).order('version'),
   ]);
   if (error || !s) { showToast('Could not open script', 'error'); return; }
+  // A project already in the video stage opens on its Video tab
+  if (id !== currentScriptId && s.status === 'approved') scriptTab = 'video';
 
   currentScript = s;
   currentScriptId = id;
@@ -3691,7 +4271,7 @@ function setScriptTab(tab) {
   document.getElementById('sc-pane-script')?.toggleAttribute('hidden', tab === 'video');
   document.getElementById('sc-pane-video')?.toggleAttribute('hidden', tab !== 'video');
   document.querySelectorAll('.sc-step').forEach((b, i) => b.classList.toggle('active', (i === 1) === (tab === 'video')));
-  if (tab === 'video') { loadProjectVideo(); showProjectAssets(); paMountWorkflow(); }
+  if (tab === 'video') { loadProjectVideo(); showProjectAssets(); }
   else paUnmountWorkflow();
 }
 
@@ -3760,11 +4340,13 @@ function projStatusChipsHtml(s, latest) {
     : `Script: ${meta.label}${latest ? ` · v${latest.version}` : ' · not sent yet'}`;
   const vs = s.videos?.status || null;
   const videoApproved = vs === 'completed' || vs === 'published';
+  // Same shape as the script chip: state plus the version it refers to
+  const vRound = s.videos ? videoRound(allVideos.find(x => x.id === s.videos.id) || s.videos) : 1;
   const videoText = !s.videos ? 'Video: no slot' :
-    videoApproved ? (vs === 'published' ? 'Video approved · published' : 'Video approved') :
-    vs === 'to_review' ? 'Video: with Joe' :
-    vs === 'to_edit'   ? 'Video: changes requested' :
-    (s.videos.storage_key || s.videos.video_url) && !isReviewerUser() ? 'Video: uploaded' : 'Video: not made yet';
+    videoApproved ? (vs === 'published' ? `Video approved · v${vRound} published` : `Video approved · v${vRound}`) :
+    vs === 'to_review' ? `Video: in review · v${vRound}` :
+    vs === 'to_edit'   ? `Video: changes requested on v${vRound}` :
+    (s.videos.storage_key || s.videos.video_url) && !isReviewerUser() ? 'Video: uploaded · not sent yet' : 'Video: not made yet';
   const videoCls = videoApproved ? 'sc-status-approved' : vs === 'to_review' ? 'sc-status-sent' : vs === 'to_edit' ? 'sc-status-changes' : 'sc-status-draft';
   return `
       <span class="card-tag sc-status-${s.status} sc-chip">${scriptApproved ? TICK_SVG : ''}${scriptText}</span>
@@ -3775,6 +4357,9 @@ function renderScriptModal() {
   const s = currentScript;
   const body = document.getElementById('script-modal-body');
   if (!s || !body) return;
+  // The decision / feedback sections may be mounted inside the old markup:
+  // put them back first, or replacing the markup below destroys them.
+  paUnmountWorkflow({ keepVersion: true });
 
   const meta     = SCRIPT_STATUS_META[s.status] || SCRIPT_STATUS_META.draft;
   const latest   = scriptVersions.at(-1) || null;
@@ -3782,11 +4367,11 @@ function renderScriptModal() {
   const isLatest = view && latest && view.id === latest.id;
   const manager  = canManageScripts();
   const writer   = canWriteScript(s);
-  const reviewer = isReviewerUser();
+  const reviewer = isClientUser();          // reviews this script (the video reviewer doesn't)
   const where    = [s.categories?.name, s.subcategories?.name].filter(Boolean).join(' › ');
   // Opened from the client's To Review page: a minimal view with no team, no asset
   // panels, no step tabs — just the stage under review (script until approved, then video).
-  const client   = reviewer && currentPage === 'review';
+  const client   = isReviewerUser() && currentPage === 'review';
   if (client) scriptTab = s.status === 'approved' ? 'video' : 'script';
 
   // ── Header ──
@@ -3811,13 +4396,13 @@ function renderScriptModal() {
       <div class="sc-team-role">
         <span class="sc-team-label">Content writer</span>
         ${manager
-          ? `<select class="form-select sc-team-select" onchange="assignScript('writer', this.value)">${peopleOptions(s.writer_id)}</select>`
+          ? `<select class="form-select sc-team-select" onchange="assignScript('writer', this.value)">${peopleOptions(s.writer_id, { role: 'writer' })}</select>`
           : `<span class="sc-team-name">${person(s.writer)}${s.writer_id === currentUser?.id ? ' (you)' : ''}</span>`}
       </div>
       <div class="sc-team-role">
         <span class="sc-team-label">Editor</span>
         ${manager
-          ? `<select class="form-select sc-team-select" onchange="assignScript('editor', this.value)">${peopleOptions(s.editor_id, { allowNone: true })}</select>`
+          ? `<select class="form-select sc-team-select" onchange="assignScript('editor', this.value)">${peopleOptions(s.editor_id, { allowNone: true, role: 'editor' })}</select>`
           : `<span class="sc-team-name">${person(s.editor)}${s.editor_id === currentUser?.id ? ' (you)' : ''}</span>`}
       </div>
     </div>`;
@@ -3847,12 +4432,14 @@ function renderScriptModal() {
   if (paragraphs.length) {
     const changed = showingDraft ? 0 : (view?.changed_count || 0);
     const label = showingDraft ? 'Draft preview' : `Version ${view.version}`;
+    const prev = showingDraft ? latest : scriptVersions.find(v => v.version === view.version - 1);
+    const removed = removedParagraphs(prev?.paragraphs, paragraphs);
     const note = showingDraft
       ? 'Not sent yet — this is what Joe will hear.'
       : (view.version > 1
-          ? (changed ? `${changed} of ${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''} changed since v${view.version - 1}` : `No text changes since v${view.version - 1}`)
+          ? changeNote(changed, view.total_count, removed.length, view.version - 1)
           : `${view.total_count} paragraph${view.total_count !== 1 ? 's' : ''}`);
-    html += renderScriptPlayerHtml(paragraphs, { label, note, changed });
+    html += renderScriptPlayerHtml(paragraphs, { label, note, changed, removed });
   } else if (!latest && !writer) {
     html += `<div class="sc-locked" style="background:rgba(255,255,255,0.03);border-color:rgba(255,255,255,0.1)"><div class="sc-locked-text">Nothing to listen to yet — the writer hasn't sent a version.</div></div>`;
   }
@@ -3921,7 +4508,8 @@ function renderScriptModal() {
 
   // ── Feedback — posted notes first (newest at the top), the composer below.
   //    While Joe is deciding, it only appears after he clicks "Needs changes". ──
-  const canComment = canCommentScript(s);
+  // Joe comments only while deciding; after "Done" his notes stay, the composer closes
+  const canComment = canCommentScript(s) && !(reviewer && !reviewing);
   if (!reviewing || scChangesOpen) html += `
     <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
@@ -3969,15 +4557,22 @@ function renderScriptModal() {
 
   // Wire the player to whatever is showing
   if (!client) showProjectAssets();
-  if (scriptTab === 'video') { loadProjectVideo(); paMountWorkflow(); }
+  if (scriptTab === 'video') loadProjectVideo();   // renders the stage, then mounts the workflow
   if (paragraphs.length) scriptPlayerLoad(paragraphs);
   scSyncChangesUI();
 }
 
-// Textarea content must be escaped but keep newlines as-is (escapeHtml turns them into <br>)
+// For attribute values and textarea content: escapes quotes too (so a value
+// can't close its attribute) but keeps newlines as-is (escapeHtml turns them into <br>)
 function escapeHtmlAttr(str) {
   return String(str ?? '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// A value passed as a string argument inside an inline handler: onclick="f(${jsArg(x)})"
+function jsArg(v) {
+  return escapeHtmlAttr(JSON.stringify(String(v ?? '')));
 }
 
 function scriptDraftDirty() {
@@ -4023,15 +4618,82 @@ async function linkScriptVideo() {
   renderScriptModal(); loadScripts().then(renderVideos);
 }
 
+// ── What changed between two versions ───────────────────────
+// Same splitting rules as the script-tts function (blank-line paragraphs,
+// '#' headings, whitespace ignored), so the writer can tell before paying
+// for a render whether anything changed at all.
+function scriptParagraphs(raw) {
+  return String(raw || '')
+    .replace(/\r\n?/g, '\n')
+    .split(/\n\s*\n/)
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => {
+      const m = p.match(/^#{1,6}\s*([\s\S]+)$/);
+      if (m) return { text: m[1].replace(/\s+/g, ' ').trim(), heading: true };
+      return { text: p.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, ' ').trim(), heading: false };
+    });
+}
+
+function sameParagraphs(a, b) {
+  return a.length === b.length && a.every((p, i) => p.text === b[i].text && !!p.heading === !!b[i].heading);
+}
+
+// Paragraphs of `prev` that are gone from `paras`, each anchored after the
+// paragraph of `paras` it used to follow (-1 = at the top). Unchanged
+// paragraphs line the two versions up; within each gap between them an old
+// paragraph pairs with a new one as an edit, and only the old ones left over
+// were deleted.
+function removedParagraphs(prev, paras) {
+  if (!prev?.length) return [];
+  const key = (p) => p.hash || `${p.heading ? '#' : ''}${p.text}`;
+  const newKeys = new Set(paras.map(key));
+  const prevKeys = new Set(prev.map(key));
+  const pairs = [];                      // [prevIndex, newIndex], increasing in both
+  let from = 0;
+  paras.forEach((p, i) => {
+    for (let j = from; j < prev.length; j++) {
+      if (key(prev[j]) === key(p)) { pairs.push([j, i]); from = j + 1; break; }
+    }
+  });
+  pairs.push([prev.length, paras.length]);   // sentinel closes the last gap
+
+  const out = [];
+  let pj = -1, pi = -1;
+  for (const [j, i] of pairs) {
+    // Moved paragraphs (still present elsewhere) are neither edits nor removals
+    const oldGap = prev.slice(pj + 1, j).filter(p => !newKeys.has(key(p)));
+    const newGap = paras.slice(pi + 1, i).filter(p => !prevKeys.has(key(p)));
+    oldGap.slice(newGap.length).forEach(p =>
+      out.push({ text: p.text, heading: !!p.heading, after: i - 1 }));
+    pj = j; pi = i;
+  }
+  return out;
+}
+
+function changeNote(changed, total, removed, prevVersion) {
+  const parts = [];
+  if (changed) parts.push(`${changed} of ${total} paragraph${total !== 1 ? 's' : ''} changed`);
+  if (removed) parts.push(`${removed} removed`);
+  return parts.length ? `${parts.join(' · ')} since v${prevVersion}` : `No text changes since v${prevVersion}`;
+}
+
 // ── Player ───────────────────────────────────────────────────
-function renderScriptPlayerHtml(paragraphs, { label, note, changed }) {
+function renderScriptPlayerHtml(paragraphs, { label, note, changed, removed = [] }) {
   const changedIdx = paragraphs.map((p, i) => p.changed ? i : -1).filter(i => i >= 0);
-  const rows = paragraphs.map((p, i) => `
+  const removedRow = (r) => `
+    <div class="sp-para removed ${r.heading ? 'heading' : ''}">
+      <span class="sp-para-num">${r.heading ? '§' : '–'}</span>
+      <span>${escapeHtml(r.text)}</span>
+      <span class="sp-chip removed">Removed</span>
+    </div>`;
+  const removedAfter = (i) => removed.filter(r => r.after === i).map(removedRow).join('');
+  const rows = removedAfter(-1) + paragraphs.map((p, i) => `
     <div class="sp-para ${p.heading ? 'heading' : ''} ${p.changed ? 'changed' : ''} ${p.audio_path ? '' : 'no-audio'}" id="sp-para-${i}" onclick="spPlayFrom(${i})">
       <span class="sp-para-num">${p.heading ? '§' : i + 1}</span>
       <span>${escapeHtml(p.text)}</span>
       ${p.changed ? '<span class="sp-chip changed">Changed</span>' : '<span></span>'}
-    </div>`).join('');
+    </div>` + removedAfter(i)).join('');
 
   return `
     <div class="sp-wrap">
@@ -4234,6 +4896,11 @@ async function sendScriptToJoe() {
   if (!text) { setScriptEditorStatus('Write something first.', 'err'); return; }
 
   const latest = scriptVersions.at(-1) || null;
+  if (latest && sameParagraphs(scriptParagraphs(text), latest.paragraphs || [])) {
+    if (!confirm(`Nothing changed since v${latest.version}. Send it to Joe again anyway?`)) {
+      setScriptEditorStatus('Not sent.'); return;
+    }
+  }
   scriptSending = true;
   scriptEditorBusy(true);
   const sendBtn = document.getElementById('sc-send-btn');
@@ -4248,12 +4915,7 @@ async function sendScriptToJoe() {
     const prevHashes = new Set((latest?.paragraphs || []).map(p => p.hash));
     const paragraphs = r.paragraphs.map(p => ({ ...p, changed: latest ? !prevHashes.has(p.hash) : false }));
     const changedCount = paragraphs.filter(p => p.changed).length;
-
-    if (latest && changedCount === 0 && paragraphs.length === (latest.paragraphs || []).length) {
-      if (!confirm(`Nothing changed since v${latest.version}. Send it to Joe again anyway?`)) {
-        setScriptEditorStatus('Not sent.'); return;
-      }
-    }
+    const removedCount = latest ? removedParagraphs(latest.paragraphs, paragraphs).length : 0;
 
     if (sendBtn) sendBtn.textContent = 'Sending…';
     await ensureFreshSession();
@@ -4264,6 +4926,7 @@ async function sendScriptToJoe() {
       body: text,
       paragraphs,
       changed_count: changedCount,
+      removed_count: removedCount,
       total_count: paragraphs.length,
       created_by: currentUser.id,
     }).select('id').single();
@@ -4316,15 +4979,14 @@ async function copyApprovedScript(btn) {
 
 // ── Reviewer decision (Joe) ──────────────────────────────────
 async function scriptDecision(decision) {
-  if (!isReviewerUser() || !currentScriptId) return;
+  if (!isClientUser() || !currentScriptId) return;
   const latest = scriptVersions.at(-1);
   if (!latest || currentScript.status !== 'sent') return;
 
+  // "Done" only appears once Joe has posted a note (scMyNotes), so no extra
+  // round trip is needed before showing that the click registered.
   if (decision === 'changes') {
-    const { count } = await sb.from('script_feedback')
-      .select('id', { count: 'exact', head: true })
-      .eq('version_id', latest.id).eq('user_id', currentUser.id);
-    if (!count && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
+    if (!scMyNotes && !confirm("You haven't left any feedback on this version. Send it back anyway?")) return;
   } else if (!confirm(`Approve v${latest.version}? The text is locked and the final narration is recorded from it.`)) {
     return;
   }
@@ -4336,17 +4998,12 @@ async function scriptDecision(decision) {
   if (btn) btn.textContent = 'Saving…';
 
   await ensureFreshSession();
-  const now = new Date().toISOString();
-  const { error: vErr } = await sb.from('script_versions')
-    .update({ decision, decided_at: now, decided_by: currentUser.id })
-    .eq('id', latest.id);
-  const scriptPatch = decision === 'approved'
-    ? { status: 'approved', approved_version_id: latest.id, approved_at: now, approved_by: currentUser.id }
-    : { status: 'changes' };
-  const { error: sErr } = vErr ? { error: vErr } : await sb.from('scripts').update(scriptPatch).eq('id', currentScriptId);
+  // One server-side step: checks this version is still with Joe, records the
+  // decision on it and moves the script on.
+  const { error } = await sb.rpc('decide_script', { p_script_id: currentScriptId, p_decision: decision });
 
-  if (vErr || sErr) {
-    showToast('Could not save decision: ' + (vErr || sErr).message, 'error');
+  if (error) {
+    showToast('Could not save decision: ' + error.message, 'error');
     renderScriptModal();
     return;
   }
@@ -4377,10 +5034,10 @@ async function loadScriptFeedback() {
 
   scMyNotes = (data || []).filter(fb => fb.user_id === currentUser?.id).length;
   scSyncChangesUI();
-  if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${error.message}</div>`; return; }
+  if (error) { list.innerHTML = `<div class="feedback-empty">Could not load feedback: ${escapeHtml(error.message)}</div>`; return; }
   if (!data?.length) { list.innerHTML = '<div class="feedback-empty">No feedback on this version yet.</div>'; return; }
 
-  const isAdmin = currentProfile?.role === 'admin';
+  const isAdmin = canManageScripts();   // Transcribe: the manager's tool (and the transcribe function is admin-only)
   // Once Joe has decided on a version (Done / Approve), its notes are locked
   const locked = scVersionLocked();
   const items = await Promise.all(data.map(async (fb) => {
@@ -4391,11 +5048,11 @@ async function loadScriptFeedback() {
     let audioHtml = '';
     if (fb.audio_path) {
       const { data: signed } = await sb.storage.from(FEEDBACK_BUCKET).createSignedUrl(fb.audio_path, 60 * 60);
-      if (signed?.signedUrl) audioHtml = `<audio controls src="${signed.signedUrl}"></audio>`;
+      if (signed?.signedUrl) audioHtml = `<audio controls src="${escapeHtmlAttr(signed.signedUrl)}"></audio>`;
       if (fb.transcript) {
         audioHtml += `<div class="sc-transcript"><span class="sc-transcript-label">Transcript</span>${escapeHtml(fb.transcript)}</div>`;
       } else if (isAdmin) {
-        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', '${fb.audio_path}')">Transcribe</button></div>`;
+        audioHtml += `<div class="sc-transcript pending" id="sc-transcript-${fb.id}"><button class="fb-transcribe-btn" onclick="transcribeScriptFeedback('${fb.id}', ${jsArg(fb.audio_path)})">Transcribe</button></div>`;
       }
     }
     const bodyHtml = fb.body ? `<div class="feedback-text">${escapeHtml(fb.body)}</div>` : '';
@@ -4428,7 +5085,7 @@ async function transcribeScriptFeedback(fbId, audioPath) {
     if (currentScriptId) loadScriptFeedback();
   } catch (err) {
     console.warn('[script transcript]', err);
-    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', '${audioPath}')">retry</a>`;
+    if (box) box.innerHTML = `Transcription failed · <a class="sc-link" onclick="transcribeScriptFeedback('${fbId}', ${jsArg(audioPath)})">retry</a>`;
   }
 }
 
@@ -4475,9 +5132,10 @@ async function submitScriptComment() {
     }).select('id').single();
     if (insErr) throw insErr;
 
+    scMyNotes++;             // so the footer goes straight to Add more / Done
+    scChangesAdding = false;
     resetScriptComposer();
     showToast('Note posted', 'success');
-    scChangesAdding = false;
     await loadScriptFeedback();
   } catch (err) {
     showToast('Could not post: ' + (err?.message || 'Unknown error'), 'error');
@@ -4617,11 +5275,17 @@ let projectAssetsFor = null; // script id projectAssets was loaded for (null = n
 let projectAssetUrls = {};   // storage_path → signed URL
 let projVideoToken   = 0;    // guards a slow playback lookup against a modal switch
 let paPendingFile    = null; // video file picked in the inline upload form
-let paPendingThumb   = null;
+let paPendingThumb   = null; // its poster frame (Blob), made while the file is picked
+let projVideoVersions = [];   // video_versions of the open project's slot, ascending
+let paViewVersion    = null;  // version number the Video tab is showing (null = default)
 
-const canAddProjectAssets   = (s) => isStaffUser() || isScriptAssignee(s);
-const canDeleteProjectAsset = (a) => isStaffUser() || a.created_by === currentUser?.id;
-const canUploadSlotVideo    = () => currentProfile?.role === 'admin';   // videos RLS: staff only
+// project_assets: the manager does anything; the project's writer/editor add and
+// remove their own; the client only reads
+const canAddProjectAssets   = (s) => canManageScripts() || isScriptAssignee(s);
+const canDeleteProjectAsset = (a) => canManageScripts() || a.created_by === currentUser?.id;
+// The manager, or the editor assigned to this project (record_video_upload checks the same)
+const canEditProjectVideo   = (s) => !!s && (canManageScripts() || (!!currentUser && s.editor_id === currentUser.id));
+const canUploadSlotVideo    = () => canEditProjectVideo(currentScript);
 const canTranscribe         = () => currentProfile?.role === 'admin';   // transcribe function: admin only
 
 function formatBytes(n) {
@@ -4652,7 +5316,31 @@ function renderSidePanelsHtml(kinds) {
   return `<div class="pa-side">${kinds.map(kind => paPanelHtml(kind, kind === 'final_audio' ? '' : 'pa-panel-tall')).join('')}</div>`;
 }
 
-// Video tab: video (or the upload form) + details + review workflow, panels beside it
+// ── Video tab ────────────────────────────────────────────────
+// Laid out like the Script tab, top to bottom: version tabs → the version
+// being viewed → Joe's decision → "approved" note → the editor's controls
+// (upload the next version, send it) → feedback on that version.
+//
+// Versions: every upload is a video_versions row. v1…v{review_round} have
+// been sent to Joe; while the video is being made (empty/raw) or changed
+// (to_edit) the next number is the editor's draft, which only the team sees.
+
+const videoSentRound = (v) => ['empty', 'raw'].includes(v?.status) ? 0 : videoRound(v);
+// The version the next upload / "Send to Joe" is for (null while it is with
+// Joe or finished)
+function pendingVideoVersion(v) {
+  if (!v) return null;
+  if (['empty', 'raw'].includes(v.status)) return 1;
+  if (v.status === 'to_edit') return videoRound(v) + 1;
+  return null;
+}
+// The project's video: the row fetched with the project is the freshest (it is
+// re-read on every open); the library list fills in anything it lacks.
+const projVideo = () => {
+  const v = currentScript?.videos;
+  return v ? { ...(allVideos.find(x => x.id === v.id) || {}), ...v } : null;
+};
+
 function renderProjectHubHtml(s, client = false) {
   const v = s.videos;
   const manager = canManageScripts();
@@ -4660,26 +5348,11 @@ function renderProjectHubHtml(s, client = false) {
   let main;
   if (!v) {
     main = `<div class="pa-video"><div class="pa-video-msg">No video slot linked yet.${manager ? ` <a class="sc-link" onclick="linkScriptVideo()">Link a slot</a>` : ''}</div></div>`;
-  } else if (isReviewerUser() && ['empty', 'raw', 'to_edit'].includes(v.status)) {
-    // Joe sees the video only once it has been submitted to him
-    main = `<div class="pa-video"><div class="pa-video-msg"><span>${v.status === 'to_edit' ? 'Ravi is making your changes — it comes back to your To Review when ready.' : 'The video is being produced — it comes to your To Review when ready.'}</span></div></div>`;
-  } else if (!v.storage_key && !v.video_url) {
-    main = canUploadSlotVideo() ? renderVideoUploadFormHtml(v) : `
-      <div class="pa-video"><div class="pa-video-msg">${v.thumbnail_url ? `<img src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">` : ''}<span>No video uploaded to this slot yet. Ravi uploads it here once it is produced.</span></div></div>`;
+  } else if (isReviewerUser() && ['empty', 'raw'].includes(v.status)) {
+    // Joe sees the video only once it has been sent to him
+    main = `<div class="pa-video"><div class="pa-video-msg"><span>The video is being produced — it comes to your To Review when it's ready.</span></div></div>`;
   } else {
-    main = `
-      <div class="pa-video" id="pa-video"><div class="pa-video-msg">Loading video…</div></div>
-      <div class="pa-details">
-        <div class="pa-details-title">${escapeHtml(v.title)}</div>
-        <div class="pa-details-desc">${v.description ? escapeHtml(v.description) : '<span class="pa-empty">No description yet.</span>'}</div>
-        <div class="pa-details-meta">
-          <div class="modal-meta-item"><strong>${escapeHtml(String(v.status || '—').replace('_', ' '))}</strong>Slot status</div>
-          <div class="modal-meta-item"><strong>${v.video_type ? escapeHtml(v.video_type) : '—'}</strong>Type</div>
-          ${v.duration_seconds ? `<div class="modal-meta-item"><strong>${formatDuration(v.duration_seconds)}</strong>Length</div>` : ''}
-          <a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>
-        </div>
-      </div>
-      <div id="pa-workflow"></div>`;
+    main = `<div id="pa-stage"><div class="pa-video"><div class="pa-video-msg">Loading video…</div></div></div>`;
   }
 
   return `
@@ -4689,44 +5362,216 @@ function renderProjectHubHtml(s, client = false) {
     </div>`;
 }
 
-// ── Inline upload (same fields as Manage videos) ─────────────
-function renderVideoUploadFormHtml(v) {
+// Which version the tab shows by default: the team sees its unsent draft if
+// there is one, otherwise (and always for Joe) the last version sent.
+function paDefaultVersion(v) {
+  const pending = pendingVideoVersion(v);
+  const team = !isReviewerUser();
+  if (team && pending && projVideoVersions.some(x => x.version === pending)) return pending;
+  return videoSentRound(v) || pending || 1;
+}
+
+function paVersionTabsHtml(v, shown) {
+  const sent = videoSentRound(v);
+  const pending = pendingVideoVersion(v);
+  const tabs = [];
+  for (let n = 1; n <= sent; n++) {
+    const outcome = n < sent ? 'changes'
+      : v.status === 'to_review' ? 'sent'
+      : v.status === 'to_edit' ? 'changes'
+      : 'approved';
+    const color = outcome === 'approved' ? 'var(--teal)' : outcome === 'changes' ? '#60a5fa' : '#f5a524';
+    const title = outcome === 'approved' ? 'Approved' : outcome === 'changes' ? 'Changes requested' : 'In review';
+    tabs.push(`<button class="sc-vtab ${n === shown ? 'active' : ''}" title="v${n} — ${title}" onclick="selectVideoVersion(${n})">v${n}<span class="dot" style="background:${color}"></span></button>`);
+  }
+  if (!isReviewerUser() && pending && projVideoVersions.some(x => x.version === pending)) {
+    tabs.push(`<button class="sc-vtab sc-vtab-draft ${pending === shown ? 'active' : ''}" title="Uploaded, not sent for review yet" onclick="selectVideoVersion(${pending})">v${pending} · draft</button>`);
+  }
+  // Like the script: tabs only once there is more than one version to pick from
+  return tabs.length > 1 ? `<div class="sc-version-tabs">${tabs.join('')}</div>` : '';
+}
+
+function paPlayerNote(v, n) {
+  const row = projVideoVersions.find(x => x.version === n);
+  const sent = videoSentRound(v);
+  const when = row ? `uploaded ${timeAgo(row.created_at)}` : '';
+  if (n > sent) return row ? `Not sent yet — this is what the reviewers will see · ${when}` : 'Not uploaded yet';
+  const outcome = n < sent ? 'Changes requested'
+    : v.status === 'to_review' ? 'In review'
+    : v.status === 'to_edit' ? 'Changes requested'
+    : v.status === 'published' ? 'Approved · published' : 'Approved';
+  return [outcome, when].filter(Boolean).join(' · ');
+}
+
+// Fills #pa-stage: tabs, the player card and the workflow mount point.
+function paRenderStage() {
+  const stage = document.getElementById('pa-stage');
+  const v = projVideo();
+  if (!stage || !v) return;
+  const shown = paViewVersion || paDefaultVersion(v);
+  paViewVersion = shown;
+  const row = projVideoVersions.find(x => x.version === shown);
+  const hasFile = !!row || (!!(v.storage_key || v.video_url) && shown === videoSentRound(v));
+  stage.innerHTML = `
+    <div id="pa-version-tabs">${paVersionTabsHtml(v, shown)}</div>
+    <div class="sp-wrap pa-player">
+      <div class="sp-head">
+        <span class="sp-head-label">Version ${shown} · video</span>
+        <span class="sp-head-note">${escapeHtml(paPlayerNote(v, shown))}</span>
+      </div>
+      <div class="pa-video" id="pa-video"><div class="pa-video-msg">${hasFile ? 'Loading video…'
+        : canUploadSlotVideo() ? `Upload v${shown} below — it shows here before you send it.`
+        : "No video uploaded yet. The editor uploads it here once it's produced."}</div></div>
+    </div>
+    ${v.description ? `<div class="pa-desc">${escapeHtml(v.description)}</div>` : ''}
+    <div id="pa-workflow"></div>`;
+  paMountWorkflow();
+  if (hasFile) paPlayVersion(shown);
+}
+
+async function loadProjectVideo() {
+  const v = projVideo();
+  if (!v || !document.getElementById('pa-stage')) return;
+  const token = ++projVideoToken;
+  const { data, error } = await sb.from('video_versions')
+    .select('id, version, created_at, file_name, storage_key, video_url, thumbnail_url')
+    .eq('video_id', v.id).order('version');
+  if (token !== projVideoToken) return;
+  if (error) console.warn('[video versions]', error);
+  projVideoVersions = data || [];
+  paRenderStage();
+}
+
+async function paPlayVersion(n) {
+  const v = projVideo();
+  const box = document.getElementById('pa-video');
+  if (!v || !box) return;
+  const token = ++projVideoToken;
+  const row = projVideoVersions.find(x => x.version === n);
+  try {
+    let url = row?.video_url || (!row ? v.video_url : null) || null;
+    if (!url) {
+      const { data, error } = await invokeEdge(WASABI_PLAYBACK_FUNCTION, {
+        body: row ? { versionId: row.id, videoId: v.id } : { videoId: v.id },
+      });
+      if (error) throw error;
+      url = data?.playbackUrl || null;
+    }
+    if (token !== projVideoToken) return;
+    if (!url) throw new Error('no url');
+    const posterUrl = row?.thumbnail_url || v.thumbnail_url;
+    const poster = posterUrl ? `poster="${escapeHtmlAttr(posterUrl)}"` : '';
+    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${escapeHtmlAttr(url)}">Your browser does not support HTML5 video.</video>`;
+  } catch (err) {
+    if (token !== projVideoToken) return;
+    console.warn('[project video]', err);
+    box.innerHTML = `<div class="pa-video-msg">Could not load the video. <a class="sc-link" onclick="paPlayVersion(${n})">Retry</a></div>`;
+  }
+}
+
+function selectVideoVersion(n) {
+  const v = projVideo();
+  if (!v || n === paViewVersion) return;
+  paUnmountWorkflow({ keepVersion: true });
+  paViewVersion = n;
+  paRenderStage();
+}
+
+// ── Stage blocks ────────────────────────────────────────────
+const LOCK_SVG = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>';
+
+function paApprovedHtml(v) {
+  if (!['completed', 'published'].includes(v.status)) return '';
+  const round = videoRound(v);
+  const published = v.status === 'published';
   return `
-    <div class="pa-upload-form" id="pa-upload-form">
-      <div class="pa-upload-head">
-        <div class="pa-details-title">Upload the produced video</div>
-        <div class="pa-empty">Slot: ${escapeHtml(v.title)}. Submit it for review once it's uploaded.</div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Upload video file</label>
-        <input class="form-input" id="pa-v-file" type="file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="paVideoFileSelected(this.files)">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Wasabi video URL <span style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0">(optional fallback if you already have a URL)</span></label>
-        <input class="form-input" id="pa-v-url" placeholder="https://..." value="${escapeHtmlAttr(v.video_url || '')}">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Storage key</label>
-        <input class="form-input" id="pa-v-key" placeholder="videos/uuid/file.mp4" value="${escapeHtmlAttr(v.storage_key || '')}">
-      </div>
-      <div class="form-group">
-        <label class="form-label">Description (optional)</label>
-        <textarea class="form-input" id="pa-v-desc" rows="3" placeholder="What this video covers…" style="resize:vertical">${escapeHtmlAttr(v.description || '')}</textarea>
-      </div>
+    <div class="sc-locked">
+      ${LOCK_SVG}
+      <div class="sc-locked-text"><strong>Approved</strong> ${v.reviewed_at ? timeAgo(v.reviewed_at) : ''} — v${round} is final.
+        ${published ? 'It is published in the library.' : canManageScripts() ? 'Publish it to put it in the library for the team.' : 'The manager publishes it to the library.'}</div>
+      ${canManageScripts() && !published ? `<div class="sc-btn-row" style="margin-top:0">
+        <button class="btn btn-primary btn-sm" id="pa-publish-btn" onclick="paPublish()">${SEND_SVG} Publish</button></div>` : ''}
+    </div>`;
+}
+
+// The editor's controls — the video counterpart of the writer's editor.
+function paEditorHtml(v) {
+  // Joe, while the editor works on his notes (the script stage shows him the same)
+  if (isReviewerUser() && v.status === 'to_edit') {
+    return `<div class="sc-editor-hint pa-wait">The editor is making your changes — v${videoRound(v) + 1} comes to your To Review when it's ready.</div>`;
+  }
+  if (!canUploadSlotVideo() || ['completed', 'published'].includes(v.status)) return '';
+  const round = videoRound(v);
+  if (v.status === 'to_review') {
+    return `
+      <div class="sc-editor" id="pa-editor">
+        <div class="workflow-section-label">Video</div>
+        <div class="sc-editor-hint">v${round} is in review. You'll be notified when it's approved or changes are asked for.</div>
+      </div>`;
+  }
+  const n = pendingVideoVersion(v);
+  const uploaded = projVideoVersions.find(x => x.version === n);
+  const manager = canManageScripts();
+  const ctx = v.status === 'to_edit'
+    ? `Changes were requested on v${round}. The notes are below — make them, upload v${n} and send it for review.`
+    : 'Upload the finished video. The reviewers watch it, then approve it or ask for changes.';
+  return `
+    <div class="sc-editor" id="pa-editor">
+      <div class="workflow-section-label">Video · v${n}</div>
+      <label class="pa-file" for="pa-v-file">
+        <input type="file" id="pa-v-file" accept="video/mp4,video/webm,video/quicktime,video/*" onchange="paVideoFileSelected(this.files)">
+        <span class="pa-file-btn">Choose file</span>
+        <span class="pa-file-name" id="pa-file-name">${uploaded ? `Replace v${n}: pick another file` : 'No file chosen'}</span>
+      </label>
+      ${manager ? `
+      <details class="pa-advanced">
+        <summary>Advanced — link an existing file</summary>
+        <div class="form-group"><label class="form-label" for="pa-v-url">Wasabi video URL</label>
+          <input class="form-input" id="pa-v-url" placeholder="https://..."></div>
+        <div class="form-group"><label class="form-label" for="pa-v-key">Storage key</label>
+          <input class="form-input" id="pa-v-key" placeholder="videos/uuid/file.mp4"></div>
+        <div class="form-group"><label class="form-label" for="pa-v-desc">Description (optional)</label>
+          <textarea class="form-input" id="pa-v-desc" rows="2" placeholder="What this video covers…">${escapeHtmlAttr(v.description || '')}</textarea></div>
+      </details>` : ''}
       <div class="upload-progress-wrap hidden" id="pa-up-wrap" aria-live="polite">
         <div class="upload-progress-label-row"><span id="pa-up-label">Uploading…</span><span id="pa-up-pct">0%</span></div>
         <div class="upload-progress-track"><div class="upload-progress-bar" id="pa-up-bar"></div></div>
       </div>
-      <div style="display:flex;justify-content:flex-end;margin-top:8px">
-        <button class="btn btn-primary" id="pa-v-save" onclick="paSaveVideo()" style="width:auto;margin-top:0">Save video</button>
+      <div class="sc-editor-hint">${escapeHtml(ctx)}</div>
+      <div class="sc-btn-row">
+        <button class="btn btn-ghost btn-sm" id="pa-v-save" onclick="paSaveVideo()" ${manager ? '' : 'disabled'}>${uploaded ? `Replace v${n}` : `Upload v${n}`}</button>
+        <button class="btn btn-primary btn-sm" id="pa-send-btn" onclick="paSendToJoe()" ${uploaded ? '' : 'disabled'}>${SEND_SVG} Send for review as v${n}</button>
       </div>
+      <div class="sc-editor-status" id="pa-editor-status">${uploaded
+        ? `v${n} uploaded ${timeAgo(uploaded.created_at)} — watch it above, then send it.`
+        : `Upload v${n} to send it for review.`}</div>
     </div>`;
+}
+
+function setPaStatus(text, cls = '') {
+  const el = document.getElementById('pa-editor-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sc-editor-status ' + cls;
 }
 
 function paVideoFileSelected(files) {
   paPendingFile = files && files.length ? files[0] : null;
   paPendingThumb = null;
-  if (paPendingFile) generateThumbnailDataUri(paPendingFile).then(u => { paPendingThumb = u; }).catch(() => { paPendingThumb = null; });
+  const name = document.getElementById('pa-file-name');
+  if (name) name.textContent = paPendingFile ? `${paPendingFile.name} · ${formatBytes(paPendingFile.size)}` : 'No file chosen';
+  const save = document.getElementById('pa-v-save');
+  if (save && !canManageScripts()) save.disabled = !paPendingFile;
+  if (!paPendingFile) { paRenderStage(); return; }
+  // Show the picked file in the player so a wrong pick is obvious before uploading
+  const box = document.getElementById('pa-video');
+  if (box) {
+    ++projVideoToken;
+    box.innerHTML = `<video controls playsinline preload="metadata" src="${URL.createObjectURL(paPendingFile)}"></video>`;
+  }
+  setPaStatus('Not uploaded yet — check the file above, then upload it.');
+  const picked = paPendingFile;
+  generateThumbnailBlob(picked).then(b => { if (paPendingFile === picked) paPendingThumb = b; }).catch(() => {});
 }
 
 function paSetProgress(pct, label) {
@@ -4739,102 +5584,159 @@ function paSetProgress(pct, label) {
   if (label) document.getElementById('pa-up-label').textContent = label;
 }
 
+function paEditorBusy(busy) {
+  ['pa-v-save', 'pa-send-btn', 'pa-v-file'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = busy; });
+}
+
 async function paSaveVideo() {
-  const s = currentScript, v = s?.videos;
+  const v = projVideo();
   if (!v || !canUploadSlotVideo()) return;
   const scriptId = currentScriptId;
+  const manager = canManageScripts();
+  const file = paPendingFile;
+  const url  = manager ? (document.getElementById('pa-v-url')?.value.trim() || null) : null;
+  const key  = manager ? (document.getElementById('pa-v-key')?.value.trim() || null) : null;
+  const desc = manager ? (document.getElementById('pa-v-desc')?.value.trim() || null) : null;
+  if (!file && !url && !key) { setPaStatus('Choose the video file first.', 'err'); return; }
+
   const btn = document.getElementById('pa-v-save');
-  const patch = {
-    video_source: 'wasabi',
-    video_url:    document.getElementById('pa-v-url').value.trim() || null,
-    storage_key:  document.getElementById('pa-v-key').value.trim() || null,
-    description:  document.getElementById('pa-v-desc').value.trim() || null,
-  };
-  if (paPendingThumb) patch.thumbnail_url = paPendingThumb;
-
-  btn.disabled = true; btn.textContent = 'Saving…';
+  const label = btn?.textContent;
+  paEditorBusy(true);
+  if (btn) btn.textContent = file ? 'Uploading…' : 'Saving…';
   try {
-    if (paPendingFile) {
-      btn.textContent = 'Uploading…';
+    let storageKey = key, videoUrl = url;
+    if (file) {
+      setPaStatus('Uploading — keep this page open until it finishes.');
       paSetProgress(0, 'Starting…');
-      const result = await uploadToWasabiViaEdgeFunction(paPendingFile, (pct, label) => paSetProgress(pct, label));
-      patch.storage_key = result.storageKey;
-      patch.video_url = result.publicUrl || patch.video_url || null;
-      paPendingFile = null;
+      const r = await uploadToWasabiViaEdgeFunction(file, (pct, l) => paSetProgress(pct, l), v.id);
+      storageKey = r.storageKey;
+      videoUrl = r.publicUrl || null;
     }
-    if (!patch.storage_key && !patch.video_url) throw new Error('Upload a file or provide a Wasabi video URL/storage key');
-
+    setPaStatus('Saving…');
+    let thumb = paPendingThumb;
+    // Not ready yet (e.g. the tab was in the background): give it a few seconds,
+    // never hold up the upload for it
+    if (!thumb && file) thumb = await Promise.race([
+      generateThumbnailBlob(file).catch(() => null),
+      new Promise(r => setTimeout(() => r(null), 8000)),
+    ]);
+    let thumbUrl = null;
+    if (thumb) {
+      try { thumbUrl = await uploadVideoThumbnail(v.id, thumb); } catch (e) { console.warn('[thumbnail]', e); }
+    }
     await ensureFreshSession();
-    if (v.status === 'empty') patch.status = 'raw';
-    const { error } = await sb.from('videos').update(patch).eq('id', v.id);
+    const { data: ver, error } = await sb.rpc('record_video_upload', {
+      p_video_id: v.id, p_storage_key: storageKey, p_video_url: videoUrl, p_description: desc,
+      p_thumbnail_url: thumbUrl, p_duration: thumb?.duration ? Math.round(thumb.duration) : null,
+      p_file_name: file?.name || null, p_size_bytes: file?.size || null,
+    });
     if (error) throw error;
-
-    // Stays with the team (raw) until someone clicks Submit for Review
-    showToast(v.status === 'empty' || v.status === 'raw' ? 'Uploaded — submit it for review when ready' : 'Video updated', 'success');
-    await loadVideos();
-    if (scriptId === currentScriptId) openScript(scriptId);   // re-render with the player + workflow
+    paPendingFile = null; paPendingThumb = null;
+    showToast(`v${ver} uploaded — watch it, then send it for review`, 'success');
+    await Promise.all([loadVideos(), loadScripts()]);
+    if (scriptId === currentScriptId) { paViewVersion = ver; openScript(scriptId); }
   } catch (err) {
-    showToast((paPendingFile ? 'Upload failed: ' : 'Could not save: ') + (err?.message || 'Unknown error'), 'error');
     document.getElementById('pa-up-wrap')?.classList.add('hidden');
-    if (btn) { btn.disabled = false; btn.textContent = 'Save video'; }
+    setPaStatus((file ? 'Upload failed: ' : 'Could not save: ') + (err?.message || 'Unknown error'), 'err');
+    paEditorBusy(false);
+    if (btn) btn.textContent = label;
   }
 }
 
-// ── Video playback on the Video tab ──────────────────────────
-async function loadProjectVideo() {
-  const s = currentScript, v = s?.videos;
-  const box = document.getElementById('pa-video');
-  if (!v || !box) return;
-  const token = ++projVideoToken;
-  try {
-    const url = await resolveWasabiPlaybackUrl(v);
-    if (token !== projVideoToken) return;
-    if (!url) throw new Error('no url');
-    const poster = v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : '';
-    box.innerHTML = `<video controls playsinline preload="metadata" ${poster}><source src="${url}">Your browser does not support HTML5 video.</video>`;
-  } catch (err) {
-    if (token !== projVideoToken) return;
-    console.warn('[project video]', err);
-    box.innerHTML = `<div class="pa-video-msg">Could not load the video. <a class="sc-link" onclick="loadProjectVideo()">Retry</a></div>`;
+async function paSendToJoe() {
+  const v = projVideo();
+  if (!v || !canUploadSlotVideo()) return;
+  const n = pendingVideoVersion(v);
+  if (!n || !projVideoVersions.some(x => x.version === n)) { setPaStatus(`Upload v${n} first.`, 'err'); return; }
+  const scriptId = currentScriptId;
+  const btn = document.getElementById('pa-send-btn');
+  const html = btn?.innerHTML;
+  paEditorBusy(true);
+  if (btn) btn.textContent = 'Sending…';
+  await ensureFreshSession();
+  const { error } = await sb.rpc('set_video_status', { p_video_id: v.id, p_status: 'to_review' });
+  if (error) {
+    setPaStatus('Send failed: ' + error.message, 'err');
+    paEditorBusy(false);
+    if (btn) btn.innerHTML = html;
+    return;
   }
+  showToast(`v${n} sent for review — the reviewers have been notified`, 'success');
+  invokeEdge(NOTIFY_FUNCTION, { body: { type: 'video_ready', videoId: v.id, videoTitle: v.title } })
+    .catch(err => console.warn('[notify video_ready]', err));
+  await Promise.all([loadVideos(), loadScripts()]);
+  if (scriptId === currentScriptId) { paViewVersion = null; openScript(scriptId); }
 }
 
-// ── Review workflow: the library modal's feedback + decision sections,
-//    moved into the Video tab while it is open and put back afterwards. ──
+async function paPublish() {
+  const v = projVideo();
+  if (!v || !canManageScripts() || v.status !== 'completed') return;
+  if (!confirm(`Publish "${v.title}"? It will become visible to all staff.`)) return;
+  const scriptId = currentScriptId;
+  const btn = document.getElementById('pa-publish-btn');
+  const html = btn?.innerHTML;
+  if (btn) { btn.disabled = true; btn.textContent = 'Publishing…'; }
+  await ensureFreshSession();
+  const { error } = await sb.rpc('set_video_status', { p_video_id: v.id, p_status: 'published' });
+  if (error) {
+    showToast('Could not publish: ' + error.message, 'error');
+    if (btn) { btn.disabled = false; btn.innerHTML = html; }
+    return;
+  }
+  showToast(`"${v.title}" is now live in the library`, 'success');
+  await Promise.all([loadVideos(), loadScripts()]);
+  if (scriptId === currentScriptId) openScript(scriptId);
+}
+
+// ── Review workflow: the library modal's decision + feedback sections are
+//    moved into the Video tab while it is open, and put back afterwards. ──
 const PA_WORKFLOW_IDS = ['feedback-section', 'reviewer-section', 'editor-section'];
 const paWorkflowMounted = () => !!document.getElementById('pa-workflow')?.querySelector('#feedback-section');
 
+// Anyone on the project (and the manager / Joe) reads and adds video notes
+const canSeeVideoFeedback = (s) => isStaffUser() || isScriptAssignee(s);
+
 function paMountWorkflow() {
-  const s = currentScript, v = s?.videos;
+  const s = currentScript;
+  const v = projVideo();
   const mount = document.getElementById('pa-workflow');
-  if (!v || !mount) return;
-  const full = allVideos.find(x => x.id === v.id) || v;
+  if (!v || !mount || paWorkflowMounted()) return;
   currentVideoId = v.id;
-  PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el) mount.appendChild(el); });
+  const shown = paViewVersion || paDefaultVersion(v);
+  const sent = videoSentRound(v);
+  // Notes belong to the version Joe reviewed; a draft shows the notes it answers
+  const noteRound = Math.max(1, Math.min(shown, sent || 1));
+  vidViewRound = noteRound < videoRound(v) ? noteRound : null;
 
-  const isAdmin = currentProfile?.role === 'admin';
-  const isReviewer = currentProfile?.is_reviewer === true;
-  const fb = document.getElementById('feedback-section');
-  if (isAdmin || isReviewer) { fb.classList.remove('hidden'); loadFeedback(v.id); }
-  else fb.classList.add('hidden');
-
+  mount.innerHTML = `<div id="pa-slot-decision"></div>${paApprovedHtml(v)}${paEditorHtml(v)}<div id="pa-slot-feedback"></div>`;
   const rs = document.getElementById('reviewer-section');
-  if (isReviewer && full.status === 'to_review') { rs.classList.remove('hidden'); updateReviewedBtnState(full); }
-  else rs.classList.add('hidden');
+  const fb = document.getElementById('feedback-section');
+  if (rs) document.getElementById('pa-slot-decision').replaceWith(rs);
+  if (fb) document.getElementById('pa-slot-feedback').replaceWith(fb);
+  // The library modal's own editor buttons are not used here
+  document.getElementById('editor-section')?.classList.add('hidden');
 
-  const es = document.getElementById('editor-section');
-  if (isAdmin && !isReviewer && ['empty', 'raw', 'to_review', 'to_edit', 'completed'].includes(full.status)) { es.classList.remove('hidden'); updateEditorBtnState(full); }
-  else es.classList.add('hidden');
+  const deciding = isReviewerUser() && v.status === 'to_review' && shown === sent;
+  rs?.classList.toggle('hidden', !deciding);
+  if (deciding) updateReviewedBtnState(v);
+
+  if (canSeeVideoFeedback(s) && sent > 0) { fb.classList.remove('hidden'); loadFeedback(v.id, vidViewRound); }
+  else fb?.classList.add('hidden');
   vidChangesOpen = false;
-  applyVideoReviewMode(full);
+  applyVideoReviewMode(v);
+  // Earlier versions are read-only history
+  if (vidViewRound) document.getElementById('vid-composer')?.classList.add('hidden');
 }
 
-function paUnmountWorkflow() {
-  if (!paWorkflowMounted()) return;
+function paUnmountWorkflow({ keepVersion = false } = {}) {
+  if (!paWorkflowMounted()) { if (!keepVersion) paViewVersion = null; return; }
   const home = document.querySelector('#video-modal .modal-info');
   PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el && home) home.appendChild(el); });
   resetComposer();
+  document.getElementById('vid-composer')?.classList.remove('hidden');
+  vidViewRound = null;
   currentVideoId = null;
+  if (!keepVersion) paViewVersion = null;
 }
 
 // ── Assets ───────────────────────────────────────────────────
@@ -4962,7 +5864,7 @@ async function paPlayApproved() {
 function projectAssetItemHtml(a) {
   const url = a.storage_path ? projectAssetUrls[a.storage_path] : null;
   const who = a.profiles ? profileName(a.profiles) : '';
-  const meta = [who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · ');
+  const meta = escapeHtml([who, timeAgo(a.created_at), a.size_bytes ? formatBytes(a.size_bytes) : ''].filter(Boolean).join(' · '));
   const del = canDeleteProjectAsset(a) ? `<button class="pa-del" title="Remove" onclick="deleteProjectAsset('${a.id}')">✕</button>` : '';
   const isAudio = (a.mime_type || '').startsWith('audio/') || /\.(mp3|m4a|wav|ogg|webm|aac)$/i.test(a.file_name || '');
   const isVideo = (a.mime_type || '').startsWith('video/');
@@ -4982,11 +5884,11 @@ function projectAssetItemHtml(a) {
   return `
     <div class="pa-item">
       <div class="pa-item-row">
-        ${url ? `<a class="pa-item-name" href="${url}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
+        ${url ? `<a class="pa-item-name" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener" title="${escapeHtmlAttr(a.file_name || '')}">${name}</a>`
               : `<span class="pa-item-name">${name}</span>`}
         ${del}
       </div>
-      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${url}"></audio>` : ''}
+      ${url && (isAudio || isVideo) ? `<audio controls preload="none" src="${escapeHtmlAttr(url)}"></audio>` : ''}
       <span class="pa-item-meta">${meta}</span>
     </div>`;
 }
@@ -5138,4 +6040,316 @@ async function deleteProjectAsset(id) {
   if (error) { showToast('Could not remove: ' + error.message, 'error'); return; }
   if (a.storage_path) await sb.storage.from(PROJECT_ASSETS_BUCKET).remove([a.storage_path]).catch(() => {});
   loadProjectAssets();
+}
+
+// ══════════════════════════════════════════════════════
+// TEAM — the manager creates and manages everyone's account
+// (admin-users edge function; the database refuses role changes from anyone else)
+// ══════════════════════════════════════════════════════
+const ADMIN_USERS_FUNCTION = 'admin-users';
+const ACCOUNT_TYPES = {
+  writer:         { label: 'Writer',         plural: 'Writers',         desc: 'Writes the scripts on the projects you assign them to.' },
+  editor:         { label: 'Editor',         plural: 'Editors',         desc: 'Produces and uploads the videos on the projects you assign them to.' },
+  video_reviewer: { label: 'Video reviewer', plural: 'Video reviewers', desc: 'Watches videos sent for review and approves them or asks for changes, alongside the client. No scripts.' },
+  client:         { label: 'Client',         plural: 'Client',          desc: 'Approves scripts and videos, leaves voice notes, and records reference material.' },
+  staff:          { label: 'Client staff',   plural: 'Client staff',    desc: 'Watches published training videos. Nothing else.' },
+  manager:        { label: 'Manager',        plural: 'Managers',        desc: 'Runs projects: assigns people, uploads and publishes. Full access.' },
+};
+const ACCOUNT_TYPE_ORDER = ['manager', 'client', 'video_reviewer', 'writer', 'editor', 'staff'];
+
+let teamAccounts = [];
+let teamModalState = null;   // { mode: 'add' | 'edit' | 'created', ... }
+
+async function callAdminUsers(body) {
+  await ensureFreshSession();
+  const { data, error } = await invokeEdge(ADMIN_USERS_FUNCTION, { body });
+  if (error) throw new Error(await parseFunctionError(error));
+  if (data?.error) throw new Error(data.error);
+  return data;
+}
+
+// Easy to read aloud or type from a phone: no 0/O, 1/l/I
+function generatePassword(len = 12) {
+  const chars = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.getRandomValues(new Uint32Array(len));
+  return Array.from(bytes, b => chars[b % chars.length]).join('');
+}
+
+function initialsOf(name) {
+  return String(name || '?').split(/[\s@._-]+/)
+    .map(w => w.replace(/[^\p{L}\p{N}]/gu, '')[0]).filter(Boolean).join('').toUpperCase().slice(0, 2) || '?';
+}
+
+async function showTeamPage(sidebarEl) {
+  if (!canManageScripts()) return;
+  currentPage = 'team';
+  document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
+  (sidebarEl || document.getElementById('sidebar-team-item'))?.classList.add('active');
+  closeSidebar?.();
+  const main = document.getElementById('main-content');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading team…</div>';
+  try {
+    teamAccounts = (await callAdminUsers({ action: 'list' })).accounts || [];
+  } catch (err) {
+    if (currentPage !== 'team') return;
+    main.innerHTML = `<div class="empty-state"><h3>Could not load the team</h3><p>${escapeHtml(err.message)}</p>
+      <button class="btn btn-ghost btn-sm" style="width:auto" onclick="showTeamPage()">Try again</button></div>`;
+    return;
+  }
+  if (currentPage !== 'team') return;
+  renderTeamPage();
+}
+
+function renderTeamPage() {
+  const main = document.getElementById('main-content');
+  const count = document.getElementById('count-team');
+  if (count) count.textContent = teamAccounts.filter(a => a.active).length;
+
+  const groups = ACCOUNT_TYPE_ORDER.map(type => {
+    const people = teamAccounts.filter(a => a.account_type === type)
+      .sort((a, b) => (b.active - a.active) || String(a.full_name || a.email).localeCompare(String(b.full_name || b.email)));
+    if (!people.length) return '';
+    return `
+      <section class="team-group">
+        <h2 class="team-group-title">${ACCOUNT_TYPES[type].plural} <span class="team-group-count">${people.length}</span></h2>
+        <div class="team-list">${people.map(teamRowHtml).join('')}</div>
+      </section>`;
+  }).join('');
+
+  main.innerHTML = `
+    <div class="page-header team-header">
+      <div>
+        <div class="page-title">Team</div>
+        <div class="page-sub">Everyone who can sign in. You create their accounts and share the sign-in details with them.</div>
+      </div>
+      <button class="btn btn-primary btn-sm team-add-btn" onclick="openTeamAdd()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add person
+      </button>
+    </div>
+    ${groups || '<div class="empty-state"><h3>No accounts yet</h3></div>'}`;
+}
+
+function teamRowHtml(a) {
+  const you = a.id === currentUser?.id;
+  const name = a.full_name || a.email || 'Unnamed';
+  const seen = !a.active ? 'Deactivated'
+    : a.last_sign_in_at ? `Active ${timeAgo(a.last_sign_in_at)}` : 'Hasn’t signed in yet';
+  return `
+    <button class="team-row ${a.active ? '' : 'inactive'}" onclick="openTeamEdit('${a.id}')">
+      <span class="team-avatar" aria-hidden="true">${escapeHtml(initialsOf(name))}</span>
+      <span class="team-who">
+        <span class="team-name">${escapeHtml(name)}${you ? ' <span class="team-you">you</span>' : ''}</span>
+        <span class="team-email">${escapeHtml(a.email || '')}</span>
+      </span>
+      <span class="team-seen ${a.active ? '' : 'off'}">${escapeHtml(seen)}</span>
+      <svg class="team-chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"/></svg>
+    </button>`;
+}
+
+// ── Modal ────────────────────────────────────────────────────
+function openTeamModal() {
+  document.getElementById('team-modal').classList.add('open');
+}
+function closeTeamModal(e) {
+  if (e && e.target !== document.getElementById('team-modal')) return;
+  document.getElementById('team-modal').classList.remove('open');
+  teamModalState = null;
+}
+
+function teamTypePickerHtml(selected, { lockedTo } = {}) {
+  return `<div class="team-types" role="radiogroup" aria-label="Account type">${
+    ['writer', 'editor', 'video_reviewer', 'client', 'staff', 'manager'].map(t => `
+      <label class="team-type ${t === selected ? 'on' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}">
+        <input type="radio" name="team-type" value="${t}" ${t === selected ? 'checked' : ''} ${lockedTo && lockedTo !== t ? 'disabled' : ''}
+               onchange="document.querySelectorAll('.team-type').forEach(el => el.classList.toggle('on', el.contains(this)))">
+        <span class="team-type-label">${ACCOUNT_TYPES[t].label}</span>
+        <span class="team-type-desc">${ACCOUNT_TYPES[t].desc}</span>
+      </label>`).join('')}</div>`;
+}
+
+function teamPasswordFieldHtml(value) {
+  return `
+    <div class="team-pass">
+      <input class="form-input" id="team-password" value="${escapeHtmlAttr(value)}" autocomplete="new-password" spellcheck="false">
+      <button type="button" class="btn btn-ghost btn-sm" onclick="document.getElementById('team-password').value = generatePassword()">New</button>
+    </div>
+    <div class="team-hint">At least 8 characters. You'll share it with them; they can keep it or you can reset it later.</div>`;
+}
+
+function setTeamStatus(text, cls = '') {
+  const el = document.getElementById('team-status');
+  if (!el) return;
+  el.textContent = text;
+  el.className = 'sc-editor-status ' + cls;
+}
+
+function openTeamAdd() {
+  teamModalState = { mode: 'add' };
+  document.getElementById('team-modal-body').innerHTML = `
+    <h3 class="team-modal-title" id="team-modal-title">Add a person</h3>
+    <p class="team-modal-sub">They sign in with this email and password. Nothing is emailed to them — you share the details.</p>
+    <div class="form-group"><label class="form-label" for="team-name">Name</label>
+      <input class="form-input" id="team-name" placeholder="e.g. Nimal Perera" autocomplete="off"></div>
+    <div class="form-group"><label class="form-label" for="team-email">Email</label>
+      <input class="form-input" id="team-email" type="email" inputmode="email" autocomplete="off" placeholder="name@example.com"></div>
+    <div class="form-group"><label class="form-label">What do they do?</label>${teamTypePickerHtml('writer')}</div>
+    <div class="form-group"><label class="form-label" for="team-password">Password</label>${teamPasswordFieldHtml(generatePassword())}</div>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-ghost btn-sm" onclick="closeTeamModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="team-save-btn" onclick="submitTeamAdd()">Create account</button>
+    </div>
+    <div class="sc-editor-status" id="team-status" aria-live="polite"></div>`;
+  openTeamModal();
+  setTimeout(() => document.getElementById('team-name')?.focus(), 50);
+}
+
+async function submitTeamAdd() {
+  const full_name = document.getElementById('team-name').value.trim();
+  const email = document.getElementById('team-email').value.trim();
+  const account_type = document.querySelector('input[name="team-type"]:checked')?.value;
+  const password = document.getElementById('team-password').value;
+  if (!full_name) { setTeamStatus('Enter their name.', 'err'); document.getElementById('team-name').focus(); return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { setTeamStatus('Enter a valid email address.', 'err'); document.getElementById('team-email').focus(); return; }
+  if (password.length < 8) { setTeamStatus('The password needs at least 8 characters.', 'err'); return; }
+
+  const btn = document.getElementById('team-save-btn');
+  btn.disabled = true; btn.textContent = 'Creating…';
+  setTeamStatus('');
+  try {
+    await callAdminUsers({ action: 'create', full_name, email, account_type, password });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Create account';
+    return;
+  }
+  // The credentials screen is the confirmation (a toast would sit on its buttons)
+  showTeamCredentials({ full_name, email, password, created: true });
+  allProfiles = [];                 // assignment lists reload with the new person
+  if (currentPage === 'team') showTeamPage();
+}
+
+// After creating an account or setting a password: the details to share
+function showTeamCredentials({ full_name, email, password, created }) {
+  teamModalState = { mode: 'created' };
+  const first = escapeHtml(full_name.split(' ')[0]);
+  const text = `Sign in to the LMP Training Library\n${location.origin}\nEmail: ${email}\nPassword: ${password}`;
+  document.getElementById('team-modal-body').innerHTML = `
+    <div class="team-done-ico" aria-hidden="true">✓</div>
+    <h3 class="team-modal-title" id="team-modal-title">${created ? 'Account created' : 'Password changed'}</h3>
+    <p class="team-modal-sub">Send ${first} these sign-in details. This is the only time the password is shown.</p>
+    <pre class="team-creds" id="team-creds">${escapeHtml(text)}</pre>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-ghost btn-sm" id="team-copy-btn">Copy details</button>
+      <button class="btn btn-primary btn-sm" onclick="closeTeamModal()">Done</button>
+    </div>`;
+  document.getElementById('team-copy-btn').onclick = async (e) => {
+    const b = e.currentTarget;
+    try { await navigator.clipboard.writeText(text); b.textContent = 'Copied ✓'; }
+    catch (_) { b.textContent = 'Select and copy above'; }
+    setTimeout(() => { if (document.body.contains(b)) b.textContent = 'Copy details'; }, 2000);
+  };
+  openTeamModal();
+}
+
+function openTeamEdit(id) {
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const you = a.id === currentUser?.id;
+  teamModalState = { mode: 'edit', id };
+  document.getElementById('team-modal-body').innerHTML = `
+    <h3 class="team-modal-title" id="team-modal-title">${escapeHtml(a.full_name || a.email || 'Account')}</h3>
+    <p class="team-modal-sub">${escapeHtml(a.email || '')}${a.active ? '' : ' · <strong style="color:#f87171">Deactivated</strong>'}</p>
+    <div class="form-group"><label class="form-label" for="team-name">Name</label>
+      <input class="form-input" id="team-name" value="${escapeHtmlAttr(a.full_name || '')}"></div>
+    <div class="form-group"><label class="form-label">What do they do?</label>
+      ${teamTypePickerHtml(a.account_type, you ? { lockedTo: 'manager' } : {})}
+      ${you ? '<div class="team-hint">You can’t change your own account type.</div>' : ''}</div>
+    <div class="sc-btn-row team-actions">
+      <button class="btn btn-primary btn-sm" id="team-save-btn" onclick="submitTeamEdit()">Save changes</button>
+    </div>
+    <div class="sc-editor-status" id="team-status" aria-live="polite"></div>
+
+    <div class="team-section">
+      <div class="form-label">Password</div>
+      <div class="team-hint" style="margin-bottom:8px">Set a new one if they've forgotten it.</div>
+      ${teamPasswordFieldHtml(generatePassword())}
+      <div class="sc-btn-row"><button class="btn btn-ghost btn-sm" id="team-pass-btn" onclick="submitTeamPassword()">Set new password</button></div>
+    </div>
+
+    ${you ? '' : `
+    <div class="team-section">
+      <div class="form-label">${a.active ? 'Deactivate' : 'Reactivate'}</div>
+      <div class="team-hint" style="margin-bottom:8px">${a.active
+        ? 'They can no longer sign in. Their notes and work stay. You can reactivate them any time.'
+        : 'Lets them sign in again with their current password.'}</div>
+      <div class="sc-btn-row"><button class="btn ${a.active ? 'btn-danger' : 'btn-ghost'} btn-sm" id="team-active-btn" onclick="submitTeamActive(${!a.active})">${a.active ? 'Deactivate account' : 'Reactivate account'}</button></div>
+    </div>`}`;
+  openTeamModal();
+}
+
+async function submitTeamEdit() {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const full_name = document.getElementById('team-name').value.trim();
+  const account_type = document.querySelector('input[name="team-type"]:checked')?.value;
+  if (!full_name) { setTeamStatus('Enter their name.', 'err'); return; }
+  const patch = { action: 'update', user_id: id };
+  if (full_name !== (a.full_name || '')) patch.full_name = full_name;
+  if (account_type && account_type !== a.account_type) patch.account_type = account_type;
+  if (Object.keys(patch).length === 2) { setTeamStatus('Nothing changed.'); return; }
+  if (patch.account_type === 'manager' && !confirm(`Make ${full_name} a manager? Managers have full access, including this page.`)) return;
+
+  const btn = document.getElementById('team-save-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await callAdminUsers(patch);
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Save changes';
+    return;
+  }
+  showToast('Saved', 'success');
+  closeTeamModal();
+  allProfiles = [];
+  showTeamPage();
+}
+
+async function submitTeamPassword() {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  const password = document.getElementById('team-password').value;
+  if (!a) return;
+  if (password.length < 8) { setTeamStatus('The password needs at least 8 characters.', 'err'); return; }
+  const btn = document.getElementById('team-pass-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await callAdminUsers({ action: 'password', user_id: id, password });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = 'Set new password';
+    return;
+  }
+  showTeamCredentials({ full_name: a.full_name || a.email, email: a.email, password, created: false });
+}
+
+async function submitTeamActive(active) {
+  const id = teamModalState?.id;
+  const a = teamAccounts.find(x => x.id === id);
+  if (!a) return;
+  const name = a.full_name || a.email;
+  if (!active && !confirm(`Deactivate ${name}? They won't be able to sign in.`)) return;
+  const btn = document.getElementById('team-active-btn');
+  btn.disabled = true; btn.textContent = active ? 'Reactivating…' : 'Deactivating…';
+  try {
+    await callAdminUsers({ action: 'active', user_id: id, active });
+  } catch (err) {
+    setTeamStatus(err.message, 'err');
+    btn.disabled = false; btn.textContent = active ? 'Reactivate account' : 'Deactivate account';
+    return;
+  }
+  showToast(active ? `${name} can sign in again` : `${name} is deactivated`, 'success');
+  closeTeamModal();
+  showTeamPage();
 }

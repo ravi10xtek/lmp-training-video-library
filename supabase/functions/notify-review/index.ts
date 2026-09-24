@@ -39,6 +39,7 @@ type NotifyBody = {
 type Profile = { role: string; is_reviewer: boolean | null; full_name: string | null };
 
 const SCRIPT_TYPES: ScriptType[] = ["script_sent", "script_changes", "script_approved", "script_assigned"];
+const VIDEO_TYPES: VideoType[] = ["video_uploaded", "round1_reviewed", "round2_reviewed", "video_ready", "more_changes_requested"];
 
 function json(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
@@ -122,24 +123,30 @@ async function deliver(
 // script_approved → Joe approved          → admins + writer + assigned editor
 // script_assigned → Ravi assigned someone → that person
 async function notifyScript(supabase: SupabaseClient, callerId: string, caller: Profile, body: NotifyBody) {
-  const { type, scriptId, scriptTitle, versionNo, assigneeId, assigneeRole } = body;
+  const { type, scriptId, versionNo, assigneeId, assigneeRole } = body;
   const v = versionNo ? `v${versionNo}` : "the latest version";
   const callerName = caller.full_name || (type === "script_sent" ? "The writer" : "Joe");
 
+  // Never trust the client for text that lands in someone else's inbox
   const { data: script } = await supabase
-    .from("scripts").select("writer_id, editor_id").eq("id", scriptId!).single();
+    .from("scripts").select("title, writer_id, editor_id").eq("id", scriptId!).single();
+  if (!script) return json(404, { error: "Script not found" });
+  const scriptTitle = script.title;
+  if (type === "script_assigned" && assigneeId !== script.writer_id && assigneeId !== script.editor_id) {
+    return json(400, { error: "That person is not assigned to this script" });
+  }
 
   const ids = new Set<string>();
   if (type === "script_assigned") {
     if (assigneeId) ids.add(assigneeId);
   } else if (type === "script_sent") {
-    const { data } = await supabase.from("profiles").select("id").eq("is_reviewer", true);
+    // Scripts are reviewed by the client only, not the video reviewer
+    const { data } = await supabase.from("profiles").select("id").eq("account_type", "client");
     (data || []).forEach((r) => ids.add(r.id));
   } else {
-    const { data } = await supabase.from("profiles").select("id").eq("role", "admin");
-    (data || []).forEach((r) => ids.add(r.id));
-    if (script?.writer_id) ids.add(script.writer_id);
-    if (type === "script_approved" && script?.editor_id) ids.add(script.editor_id);
+    (await managerIds(supabase)).forEach((id) => ids.add(id));
+    if (script.writer_id) ids.add(script.writer_id);
+    if (type === "script_approved" && script.editor_id) ids.add(script.editor_id);
   }
   ids.delete(callerId);
   const recipientIds = [...ids];
@@ -166,6 +173,12 @@ async function notifyScript(supabase: SupabaseClient, callerId: string, caller: 
     type: type!, title, message, scriptId, tag: `lmp-${type}-${scriptId}${assigneeId ? "-" + assigneeId : ""}`,
   });
   return json(200, { ok: true });
+}
+
+// The manager(s): admins who are not the client reviewer
+async function managerIds(supabase: SupabaseClient): Promise<string[]> {
+  const { data } = await supabase.from("profiles").select("id, is_reviewer").eq("role", "admin");
+  return (data || []).filter((r) => !r.is_reviewer).map((r) => r.id);
 }
 
 // Assigned writers/editors are plain accounts (role 'worker'); they may fire
@@ -203,50 +216,46 @@ Deno.serve(async (req) => {
     const { type } = body;
 
     if (SCRIPT_TYPES.includes(type as ScriptType)) {
-      if (!body.scriptId || !body.scriptTitle) {
-        return json(400, { error: "scriptId and scriptTitle are required" });
+      if (!body.scriptId) {
+        return json(400, { error: "scriptId is required" });
       }
-      if (!isStaff && !(await isScriptAssignee(supabase, caller.id, body.scriptId))) {
+      // A writer may only announce a version they sent; decisions and
+      // assignments come from staff.
+      if (!isStaff && (type !== "script_sent" || !(await isScriptAssignee(supabase, caller.id, body.scriptId)))) {
         return json(403, { error: "Not authorized" });
       }
       return await notifyScript(supabase, caller.id, callerProfile as Profile, body);
     }
 
-    if (!isStaff) return json(403, { error: "Not authorized" });
-
-    const videoId = body.videoId, videoTitle = body.videoTitle;
-    if (!type || !videoId || !videoTitle) {
-      return json(400, { error: "type, videoId, and videoTitle are required" });
+    const videoId = body.videoId;
+    if (!VIDEO_TYPES.includes(type as VideoType) || !videoId) {
+      return json(400, { error: "A known type and videoId are required" });
     }
 
-    // ── Update video status FIRST (must happen regardless of recipients) ──
-    if (type === "round1_reviewed" || type === "round2_reviewed") {
-      const { error: vidErr } = await supabase.from("videos").update({
-        review_round: type === "round2_reviewed" ? 2 : 1,
-        reviewed_at:  new Date().toISOString(),
-        reviewed_by:  caller.id,
-      }).eq("id", videoId);
-      if (vidErr) console.error("[notify-review] video update error:", vidErr);
-    } else if (type === "more_changes_requested") {
-      // Reset back to draft so the editor can revise again
-      const { error: vidErr } = await supabase.from("videos").update({
-        status:       "draft",
-        review_round: 1,
-      }).eq("id", videoId);
-      if (vidErr) console.error("[notify-review] video status reset error:", vidErr);
-    }
+    const { data: video } = await supabase.from("videos").select("title").eq("id", videoId).single();
+    if (!video) return json(404, { error: "Video not found" });
+    const videoTitle = video.title;
 
-    // ── Find recipients for notifications ──
-    let recipientsQuery = supabase.from("profiles").select("id");
+    // The project's editor (and writer) may announce their own video
+    const { data: project } = await supabase
+      .from("scripts").select("writer_id, editor_id").eq("video_id", videoId).limit(1).maybeSingle();
+    const isAssignee = !!project && (project.writer_id === caller.id || project.editor_id === caller.id);
+    // The editor can only say "sent to Joe"; the decisions are Joe's.
+    if (!isStaff && !(isAssignee && type === "video_ready")) return json(403, { error: "Not authorized" });
+
+    // ── Recipients ──
+    // Sent to Joe → the reviewers. Joe's decision → the manager(s) + the editor.
+    const ids = new Set<string>();
     if (type === "video_uploaded" || type === "video_ready") {
-      // Notify reviewers (Joe) when a new draft is uploaded or when Ravi marks done
-      recipientsQuery = recipientsQuery.eq("is_reviewer", true);
+      const { data } = await supabase.from("profiles").select("id").eq("is_reviewer", true);
+      (data || []).forEach((r) => ids.add(r.id));
     } else {
-      // round1_reviewed, round2_reviewed, more_changes_requested all notify other admins
-      recipientsQuery = recipientsQuery.eq("role", "admin").neq("id", caller.id);
+      (await managerIds(supabase)).forEach((id) => ids.add(id));
+      if (project?.editor_id) ids.add(project.editor_id);
     }
-    const { data: recipients } = await recipientsQuery;
-    if (!recipients?.length) return json(200, { ok: true, skipped: "no recipients" });
+    ids.delete(caller.id);
+    const recipients = [...ids].map((id) => ({ id }));
+    if (!recipients.length) return json(200, { ok: true, skipped: "no recipients" });
 
     // Build notification copy
     const callerName = callerProfile.full_name || "Reviewer";
@@ -254,7 +263,7 @@ Deno.serve(async (req) => {
       type === "video_uploaded"         ? `New video uploaded: ${videoTitle}` :
       type === "round1_reviewed"        ? `${callerName} reviewed: ${videoTitle}` :
       type === "round2_reviewed"        ? `${callerName} approved: ${videoTitle} — ready to publish` :
-      type === "more_changes_requested" ? `${callerName} requested more changes: ${videoTitle}` :
+      type === "more_changes_requested" ? `${callerName} wants changes: ${videoTitle}` :
                                           `Video ready for review: ${videoTitle}`;
     const notifMessage =
       type === "video_uploaded"
@@ -264,8 +273,8 @@ Deno.serve(async (req) => {
         : type === "round2_reviewed"
         ? `${callerName} has given final approval for "${videoTitle}". You can now publish it.`
         : type === "more_changes_requested"
-        ? `${callerName} reviewed "${videoTitle}" and needs more changes. Please revise and mark as Done again.`
-        : `"${videoTitle}" has been revised and is ready for your final review.`;
+        ? `${callerName} reviewed "${videoTitle}" and left notes. Make the changes, upload the new version and send it back.`
+        : `A new version of "${videoTitle}" is ready for your review.`;
 
     await deliver(supabase, recipients.map((r) => r.id), {
       type, title: notifTitle, message: notifMessage, videoId, tag: `lmp-${type}-${videoId}`,

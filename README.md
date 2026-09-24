@@ -87,6 +87,43 @@ Changing voice/model invalidates the cache (they're part of the hash).
 
 ---
 
+## Roles and permissions (enforced in the database)
+
+`database/roles_lockdown_migration.sql` moves the role rules out of the UI
+and into Postgres, and `database/accounts_migration.sql` adds the account
+types. Run both once per project (after the other migrations), then deploy
+the edge functions they pair with:
+
+```bash
+npx supabase functions deploy wasabi-upload-init wasabi-playback-url notify-review admin-users --project-ref <ref> --use-api
+```
+
+**Accounts are created by the manager** on the **Team** page (sidebar →
+Admin → Team): name, email, type and a generated password to share. The
+same page renames people, changes their type, sets a new password and
+deactivates / reactivates sign-in. Nobody signs themselves up, so turn off
+public signups in the dashboard (Authentication → Sign In / Providers →
+"Allow new users to sign up"); `admin-users` still creates accounts with the
+service key.
+
+| Who | How it is recognised | Can |
+|---|---|---|
+| Manager (Ravi) | `manager` (`role = 'admin'`) | everything, including the Team page |
+| Client (Joe) | `client` (`admin` + `is_reviewer`) | approve scripts (`decide_script`) and videos (`set_video_status`), notes, recordings |
+| Video reviewer | `video_reviewer` (`worker` + `is_reviewer`) | approve videos alongside Joe; no scripts, no recordings |
+| Writer | `writer`, on projects where `scripts.writer_id` = them | edit and send the script draft |
+| Editor | `editor`, on projects where `scripts.editor_id` = them | upload video versions (`record_video_upload`), send them for review, read and answer notes |
+| Client staff | `staff` | watch published training videos only |
+
+A project's writer must be a writer account and its editor an editor account
+(the manager can fill either).
+
+Nobody can change their own `role` / `is_reviewer`, and new signups are
+always `worker`. Every uploaded video file is a row in `video_versions`; a
+video can only go to Joe once the file for that version exists.
+
+---
+
 ## YouTube cleanup SQL
 
 After Wasabi playback is stable, run `database/youtube_cleanup.sql` to clear legacy YouTube fields.
