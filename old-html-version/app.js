@@ -626,7 +626,6 @@ function renderVideoCard(v, isAdmin) {
         ${v.video_type ? `<span class="card-tag ${escapeHtmlAttr(typeClass)}">${escapeHtml(v.video_type)}</span>` : ''}
         ${v.status !== 'published' ? `<span class="card-tag status-${v.status}">${statusLabel}</span>` : ''}
         ${roundBadge}
-        ${isAdmin ? scriptTagHtml(scriptForVideo(v.id)) : ''}
       </div>
       <div class="card-title">${escapeHtml(v.title)}</div>
       <div class="card-sub">${escapeHtml(v.subcategories?.name || v.categories?.name || '')}</div>
@@ -1163,7 +1162,7 @@ async function submitComment() {
     vidMyNotes++;            // so the footer goes straight to Add more / Done
     vidChangesAdding = false;
     resetComposer();
-    showToast('Comment posted', 'success');
+    showToast('Note saved', 'success');
     loadFeedback(currentVideoId, vidViewRound);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
@@ -2409,10 +2408,8 @@ function toggleNotifPanel(e) {
   const panel = document.getElementById('notif-panel');
   notifPanelOpen = !notifPanelOpen;
   panel.classList.toggle('hidden', !notifPanelOpen);
-  if (notifPanelOpen) {
-    renderNotifPanel();
-    markAllNotifsRead();
-  }
+  // Opening shows what's new; it doesn't silently mark it all read
+  if (notifPanelOpen) renderNotifPanel();
 }
 
 function renderNotifPanel() {
@@ -2422,11 +2419,11 @@ function renderNotifPanel() {
     return;
   }
   list.innerHTML = allNotifications.slice(0, 25).map(n => `
-    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
+    <div class="notif-item ${n.read ? 'read' : 'unread'}" onclick="markNotifRead('${n.id}');notifClick('${n.video_id || ''}', '${n.script_id || ''}')">
       <div class="notif-title">${escapeHtml(n.title)}</div>
       ${n.message ? `<div class="notif-msg">${escapeHtml(n.message)}</div>` : ''}
       <div class="notif-time">${timeAgo(n.created_at)}</div>
-      ${n.read ? `<button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>` : ''}
+      <button class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification" onclick="event.stopPropagation();dismissNotification('${n.id}')">✕</button>
     </div>
   `).join('');
 }
@@ -2446,11 +2443,50 @@ async function dismissNotification(id) {
 }
 
 async function markAllNotifsRead() {
-  const unreadIds = allNotifications.filter(n => !n.read).map(n => n.id);
-  if (!unreadIds.length) return;
-  await sb.from('notifications').update({ read: true }).in('id', unreadIds);
-  allNotifications.forEach(n => n.read = true);
+  const btn = document.getElementById('notif-mark-read');
+  if (!allNotifications.some(n => !n.read)) { renderNotifPanel(); return; }
+  const prev = allNotifications.map(n => n.read);
+  allNotifications.forEach(n => n.read = true);   // show it at once, undo if it fails
+  renderNotifPanel();
   renderNotificationBell();
+  if (btn) btn.disabled = true;
+  // Everything of mine that's unread, not only what's loaded in the panel
+  const { error } = await sb.from('notifications').update({ read: true })
+    .eq('user_id', currentUser.id).eq('read', false);
+  if (btn) btn.disabled = false;
+  if (error) {
+    allNotifications.forEach((n, i) => n.read = prev[i]);
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not mark as read: ' + error.message, 'error');
+  }
+}
+
+async function clearAllNotifs() {
+  if (!allNotifications.length) return;
+  if (!confirm('Clear all notifications?')) return;
+  const prev = allNotifications;
+  allNotifications = [];
+  renderNotifPanel();
+  renderNotificationBell();
+  const { error } = await sb.from('notifications').delete().eq('user_id', currentUser.id);
+  if (error) {
+    allNotifications = prev;
+    renderNotifPanel();
+    renderNotificationBell();
+    showToast('Could not clear: ' + error.message, 'error');
+  }
+}
+
+// Tapping a notification marks that one read
+function markNotifRead(id) {
+  const n = allNotifications.find(x => x.id === id);
+  if (!n || n.read) return;
+  n.read = true;
+  renderNotificationBell();
+  sb.from('notifications').update({ read: true }).eq('id', id).then(({ error }) => {
+    if (error) console.warn('[notifications] mark read', error.message);
+  });
 }
 
 function notifClick(videoId, scriptId) {
@@ -2517,8 +2553,7 @@ function vidSyncChangesUI() {
 }
 function vidAddMore() {
   vidChangesAdding = true;
-  vidSyncChangesUI();
-  document.getElementById('comment-text')?.focus();
+  vidSyncChangesUI();   // no focus on the text box: it pops the keyboard, and the client records
 }
 // Joe's notes are locked once the video leaves his review (Done / Mark as Complete)
 function vidNotesLocked() {
@@ -2620,7 +2655,7 @@ function updateReviewedBtnState(v) {
   sendBackBtn.disabled = false; sendBackBtn.innerHTML = SEND_BACK_BTN_HTML;
   if (completeBtn) { completeBtn.disabled = false; completeBtn.innerHTML = MARK_COMPLETE_BTN_HTML; }
   const done = document.getElementById('vid-done-btn');
-  if (done) { done.disabled = false; done.textContent = 'Done'; }
+  if (done) { done.disabled = false; done.textContent = 'Send to editor'; }
   const more = document.getElementById('vid-add-more-btn');
   if (more) more.disabled = false;
 
@@ -3616,6 +3651,8 @@ async function downloadRecording() {
   document.addEventListener('click', e => {
     if (!notifPanelOpen) return;
     const wrap = document.getElementById('notif-wrap');
+    // A click that re-drew the list leaves its target detached — that was inside
+    if (!e.target.isConnected) return;
     if (wrap && !wrap.contains(e.target)) {
       document.getElementById('notif-panel').classList.add('hidden');
       notifPanelOpen = false;
@@ -3806,12 +3843,6 @@ function scriptForVideo(videoId) {
 }
 
 // Tag shown on a video card for its linked script
-function scriptTagHtml(s) {
-  if (!s) return '';
-  if (s.status === 'approved') return `<span class="card-tag script-ok">Script ✓ v${s.current_version}</span>`;
-  return `<span class="card-tag script-wip">Script: ${SCRIPT_STATUS_META[s.status]?.label || s.status}</span>`;
-}
-
 function renderModalScriptLink(videoId) {
   const box = document.getElementById('modal-script-link');
   if (!box) return;
@@ -4291,8 +4322,7 @@ function scCancelChanges() {
 
 function scAddMore() {
   scChangesAdding = true;
-  scSyncChangesUI();
-  document.getElementById('sc-comment-text')?.focus();
+  scSyncChangesUI();   // no focus on the text box: it pops the keyboard, and the client records
 }
 
 // While Joe is writing "Needs changes" notes there is one main action at a time:
@@ -4449,7 +4479,7 @@ function renderScriptModal() {
   const reviewing = reviewer && s.status === 'sent' && isLatest;
   if (reviewing && !scChangesOpen) {
     html += `
-      <div class="workflow-section" id="sc-reviewer-section">
+      <div class="workflow-section sticky-actions" id="sc-reviewer-section">
         <div class="workflow-section-label">Your decision on v${latest.version}</div>
         <div class="reviewer-buttons">
           <button class="btn-more-changes" id="sc-changes-btn" onclick="scOpenChanges()">
@@ -4491,7 +4521,7 @@ function renderScriptModal() {
         <div class="workflow-section-label">Script text</div>
         <textarea class="form-input" id="sc-body" placeholder="# Intro&#10;&#10;Hi, I'm Joe, master plumber at Loch Monster Plumbing…&#10;&#10;# Step one&#10;&#10;First thing you do on site is…" oninput="scriptDraftDirty()">${escapeHtmlAttr(draftText)}</textarea>
         <div class="sc-editor-hint">${ctx}<br>Only paragraphs whose text changed get re-rendered — an edit to a few lines costs a few cents.</div>
-        <div class="sc-btn-row">
+        <div class="sc-btn-row sticky-actions">
           <button class="btn btn-ghost btn-sm" id="sc-save-btn" onclick="saveScriptDraft()">Save draft</button>
           <button class="btn btn-ghost btn-sm" id="sc-preview-btn" onclick="previewScriptDraft()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -4513,7 +4543,6 @@ function renderScriptModal() {
   if (!reviewing || scChangesOpen) html += `
     <div class="feedback-section" id="sc-feedback-section" style="display:block">
       <div class="feedback-header"><h3>Feedback on ${view ? `v${view.version}` : 'this script'}</h3></div>
-      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
       ${canComment ? `
       <div class="comment-composer" id="sc-composer">
         <textarea id="sc-comment-text" class="comment-input" rows="2" oninput="scSyncChangesUI()" placeholder="${reviewer ? 'Say what to change — a voice note is fastest' : 'Reply or leave a note…'}"></textarea>
@@ -4539,15 +4568,16 @@ function renderScriptModal() {
       </div>
       <div class="sc-rec-controls hidden" id="sc-rec-controls">
         <button class="btn btn-ghost btn-sm" id="sc-pause-btn" style="margin-top:0" onclick="toggleScriptRecordingPause()">Pause</button>
-        <button class="btn btn-danger btn-sm" id="sc-stop-btn" style="margin-top:0" onclick="toggleScriptRecording()">Stop</button>
+        <button class="btn btn-danger btn-sm" id="sc-stop-btn" style="margin-top:0" onclick="toggleScriptRecording()">Done</button>
       </div>` : ''}
       ${reviewing ? `
-      <div class="sc-changes-foot" id="sc-changes-foot">
+      <div class="sc-changes-foot sticky-actions" id="sc-changes-foot">
         <button class="btn btn-ghost btn-sm" id="sc-changes-cancel" style="margin-top:0" onclick="scCancelChanges()">Cancel</button>
         <button class="btn btn-ghost btn-sm hidden" id="sc-add-more-btn" style="margin-top:0" onclick="scAddMore()">Add more</button>
-        <button class="btn btn-primary btn-sm hidden" id="sc-comment-send-btn" style="margin-top:0" onclick="submitScriptComment()">Post</button>
-        <button class="btn btn-primary btn-sm hidden" id="sc-changes-btn" style="margin-top:0" onclick="scriptDecision('changes')">Done</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-comment-send-btn" style="margin-top:0" onclick="submitScriptComment()">Save</button>
+        <button class="btn btn-primary btn-sm hidden" id="sc-changes-btn" style="margin-top:0" onclick="scriptDecision('changes')">Send to writer</button>
       </div>` : ''}
+      <div class="feedback-list" id="sc-feedback-list"><div class="feedback-empty">Loading…</div></div>
     </div>`;
 
   // Close the script pane; the video pane holds the produced video and its assets
@@ -5135,7 +5165,7 @@ async function submitScriptComment() {
     scMyNotes++;             // so the footer goes straight to Add more / Done
     scChangesAdding = false;
     resetScriptComposer();
-    showToast('Note posted', 'success');
+    showToast('Note saved', 'success');
     await loadScriptFeedback();
   } catch (err) {
     showToast('Could not post: ' + (err?.message || 'Unknown error'), 'error');
@@ -5538,7 +5568,7 @@ function paEditorHtml(v) {
         <div class="upload-progress-track"><div class="upload-progress-bar" id="pa-up-bar"></div></div>
       </div>
       <div class="sc-editor-hint">${escapeHtml(ctx)}</div>
-      <div class="sc-btn-row">
+      <div class="sc-btn-row sticky-actions">
         <button class="btn btn-ghost btn-sm" id="pa-v-save" onclick="paSaveVideo()" ${manager ? '' : 'disabled'}>${uploaded ? `Replace v${n}` : `Upload v${n}`}</button>
         <button class="btn btn-primary btn-sm" id="pa-send-btn" onclick="paSendToJoe()" ${uploaded ? '' : 'disabled'}>${SEND_SVG} Send for review as v${n}</button>
       </div>

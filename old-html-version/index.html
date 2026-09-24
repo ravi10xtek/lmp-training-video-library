@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260924c">
+<link rel="stylesheet" href="styles.css?v=20260924d">
 </head>
 <body>
 
@@ -80,7 +80,10 @@
           <div class="notif-panel hidden" id="notif-panel">
             <div class="notif-panel-header">
               <span>Notifications</span>
-              <button onclick="markAllNotifsRead()">Mark all read</button>
+              <span class="notif-actions">
+                <button id="notif-mark-read" onclick="markAllNotifsRead()">Mark all read</button>
+                <button id="notif-clear" onclick="clearAllNotifs()">Clear all</button>
+              </span>
             </div>
             <div class="notif-list" id="notif-list"></div>
           </div>
@@ -248,9 +251,7 @@
           <h3 id="feedback-heading">Feedback &amp; comments</h3>
         </div>
 
-        <div class="feedback-list" id="feedback-list"></div>
-
-        <!-- Comment composer: text + optional audio + optional image -->
+        <!-- Comment composer: text + optional audio + optional image (above the notes) -->
         <div class="comment-composer" id="vid-composer">
           <textarea id="comment-text" class="comment-input" rows="2"
                     placeholder="Write a comment… add a voice note or image too" oninput="vidSyncChangesUI()"></textarea>
@@ -287,19 +288,20 @@
         </div>
         <div class="sc-rec-controls hidden" id="rec-controls">
           <button class="btn btn-ghost btn-sm" id="rec-pause-btn" style="margin-top:0" onclick="toggleRecordingPause()">Pause</button>
-          <button class="btn btn-danger btn-sm" style="margin-top:0" onclick="stopRecording()">Stop</button>
+          <button class="btn btn-danger btn-sm" style="margin-top:0" onclick="stopRecording()">Done</button>
         </div>
-        <!-- Joe's "Needs changes" footer: Cancel → Post → Add more / Done (same as the script stage) -->
-        <div class="sc-changes-foot hidden" id="video-changes-foot">
+        <!-- The reviewer's "Needs changes" footer: Cancel → Save → Add more / Send to editor (same as the script stage) -->
+        <div class="sc-changes-foot sticky-actions hidden" id="video-changes-foot">
           <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
           <button class="btn btn-ghost btn-sm hidden" id="vid-add-more-btn" style="margin-top:0" onclick="vidAddMore()">Add more</button>
-          <button class="btn btn-primary btn-sm hidden" id="vid-post-btn" style="margin-top:0" onclick="submitComment()">Post</button>
-          <button class="btn btn-primary btn-sm hidden" id="vid-done-btn" style="margin-top:0" onclick="sendBackForEdits()">Done</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-post-btn" style="margin-top:0" onclick="submitComment()">Save</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-done-btn" style="margin-top:0" onclick="sendBackForEdits()">Send to editor</button>
         </div>
+        <div class="feedback-list" id="feedback-list"></div>
       </div>
 
       <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
-      <div class="workflow-section hidden" id="reviewer-section">
+      <div class="workflow-section sticky-actions hidden" id="reviewer-section">
         <div class="workflow-section-label" id="reviewer-section-label">Your decision</div>
         <div class="reviewer-buttons">
           <button class="btn-more-changes" id="send-back-btn" onclick="openVideoChanges()">
@@ -694,6 +696,6 @@
   // Local dev only: load env.local.js (dev Supabase project) if present.
   if (['localhost', '127.0.0.1'].includes(location.hostname) || location.hostname.endsWith('.ngrok-free.dev')) document.write('<script src="env.local.js"><\/script>');
 </script>
-<script src="app.js?v=20260924c"></script>
+<script src="app.js?v=20260924d"></script>
 </body>
 </html>
