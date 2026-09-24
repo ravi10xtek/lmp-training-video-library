@@ -72,7 +72,8 @@ let editingVideoId = null;
 let pendingWasabiFile = null;
 let pendingThumbnail = null;
 let currentVideoId = null;
-let vidChangesOpen = false;   // Joe clicked "Send back for edits": video feedback is showing
+let vidChangesOpen = false;   // Joe clicked "Needs changes": video feedback is showing
+let vidViewRound   = null;    // version tab being read on the Video tab (null = current)
 let vidMyNotes = 0;           // Joe's notes in this review round (Cancel → Add more / Done)
 let vidChangesAdding = false; // …and clicked "Add more"
 let recPausedMs = 0, recPauseAt = 0;
@@ -418,7 +419,6 @@ function getFilteredVideos() {
 
 function renderVideos() {
   if (currentPage !== 'library') return;
-  parkVideoForm();
   const videos = getFilteredVideos();
   const isAdmin = currentProfile?.role === 'admin';
   const main = document.getElementById('main-content');
@@ -735,13 +735,17 @@ function closeVideoModal() {
 // ══════════════════════════════════════════════════════
 // ADMIN FEEDBACK — voice notes per video
 // ══════════════════════════════════════════════════════
-async function loadFeedback(videoId) {
+async function loadFeedback(videoId, viewRound) {
   const list = document.getElementById('feedback-list');
   list.innerHTML = '<div class="feedback-empty">Loading…</div>';
 
-  // Only show the current review cycle's feedback. When Ravi resubmits, the
-  // video's review_round increments, so prior-round notes are hidden (but kept).
-  const round = allVideos.find(x => x.id === videoId)?.review_round || 1;
+  // Feedback is scoped to one review cycle. The current cycle is the default;
+  // picking an earlier version tab reads that cycle's notes back (read-only).
+  const current = allVideos.find(x => x.id === videoId)?.review_round || 1;
+  const round = viewRound || current;
+
+  const heading = document.getElementById('feedback-heading');
+  if (heading) heading.textContent = `Feedback on v${round}`;
 
   const { data, error } = await sb
     .from('video_feedback')
@@ -839,7 +843,7 @@ async function deleteFeedback(id) {
     return;
   }
   showToast('Comment deleted', 'success');
-  if (currentVideoId) loadFeedback(currentVideoId);
+  if (currentVideoId) loadFeedback(currentVideoId, vidViewRound);
 }
 
 async function toggleRecording() {
@@ -1116,7 +1120,7 @@ async function submitComment() {
     resetComposer();
     showToast('Comment posted', 'success');
     vidChangesAdding = false;
-    loadFeedback(currentVideoId);
+    loadFeedback(currentVideoId, vidViewRound);
   } catch (err) {
     console.error('[feedback] submit failed:', err);
     const detail = err?.message || err?.error || err?.statusText || 'Unknown error';
@@ -1300,125 +1304,469 @@ function closeModal(e) {
 // ══════════════════════════════════════════════════════
 // ADMIN — ADD / EDIT VIDEO
 // ══════════════════════════════════════════════════════
-// Manage videos is a page, not a modal. The add/edit form markup still lives in
-// #admin-modal (never opened now); it is moved into the page while in use and
-// parked back before any page rewrites #main-content, so its inputs survive.
+// The add/edit form lives permanently in #video-drawer, a right-hand slide-over
+// that sits outside #main-content. Nothing has to move it around any more, so a
+// page re-render can never disturb a half-filled form.
 const VIDEO_STATUS_LABELS = {
   empty: 'Empty slot', raw: 'Raw', to_review: 'To Review', to_edit: 'To Edit',
   completed: 'Completed', published: 'Published',
 };
 
-function parkVideoForm() {
-  const form = document.getElementById('video-form');
-  const home = document.querySelector('#admin-modal .modal');
-  if (form && home && form.parentElement !== home) home.appendChild(form);
-}
+// ══════════════════════════════════════════════════════
+// MANAGE VIDEOS PAGE (admin only)
+// ══════════════════════════════════════════════════════
+// The page renders in two parts so that typing in the search box, flipping a
+// filter chip or changing a row's status never repaints more than it has to,
+// and never steals input focus:
+//   showManageVideosPage() → builds the shell once per visit
+//   renderManageTable()    → repaints chips, counts, bulk bar and rows
+let manageStatusFilter = 'all';
+let manageSearch = '';
+let manageSort = { key: 'updated', dir: 'desc' };
+let manageSelection = new Set();
+let manageFormOpen = false;
+let manageFormSnapshot = '';
+let manageSearchTimer = null;
+
+// Pipeline order — also the order statuses sort in
+const MANAGE_STATUS_ORDER = ['empty', 'raw', 'to_review', 'to_edit', 'completed', 'published'];
+
+const hasMedia = (v) => !!(v.storage_key || v.video_url);
+
+const MANAGE_STATUS_FILTERS = [
+  { key: 'all',       label: 'All',           match: () => true },
+  { key: 'empty',     label: 'Empty slots',   match: v => v.status === 'empty' },
+  { key: 'raw',       label: 'Raw',           match: v => v.status === 'raw' },
+  { key: 'to_review', label: 'To Review',     match: v => v.status === 'to_review' },
+  { key: 'to_edit',   label: 'To Edit',       match: v => v.status === 'to_edit' },
+  { key: 'completed', label: 'Completed',     match: v => v.status === 'completed' },
+  { key: 'published', label: 'Published',     match: v => v.status === 'published' },
+  // Slots that claim to hold footage but have no file behind them — these are
+  // what silently break playback, so they get their own shortcut.
+  { key: 'no_media',  label: 'Missing media', match: v => v.status !== 'empty' && !hasMedia(v) },
+];
+
+const MANAGE_SORTS = [
+  { key: 'updated-desc', label: 'Recently updated' },
+  { key: 'updated-asc',  label: 'Oldest updated' },
+  { key: 'title-asc',    label: 'Title A→Z' },
+  { key: 'title-desc',   label: 'Title Z→A' },
+  { key: 'status-asc',   label: 'Pipeline stage' },
+  { key: 'category-asc', label: 'Category' },
+];
 
 function showAdmin() {
   showManageVideosPage(document.getElementById('sidebar-manage-item'));
 }
 
-// Status filter on the Manage videos page (moved here from the sidebar — admin only)
-let manageStatusFilter = 'all';
-const MANAGE_STATUS_FILTERS = [
-  { key: 'all',       label: 'All',         match: () => true },
-  { key: 'published', label: 'Published',   match: v => v.status === 'published' },
-  { key: 'empty',     label: 'Empty slots', match: v => v.status === 'empty' || v.status === 'raw' },
-  { key: 'to_review', label: 'To Review',   match: v => v.status === 'to_review' },
-  { key: 'to_edit',   label: 'To Edit',     match: v => v.status === 'to_edit' },
-  { key: 'completed', label: 'Completed',   match: v => v.status === 'completed' },
-];
+function manageFilteredVideos() {
+  const filter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  const q = manageSearch.trim().toLowerCase();
+  let list = allVideos.filter(filter.match);
+
+  if (q) {
+    list = list.filter(v => [
+      v.title, v.categories?.name, v.subcategories?.name,
+      v.video_type, VIDEO_STATUS_LABELS[v.status], v.description,
+    ].filter(Boolean).join(' ').toLowerCase().includes(q));
+  }
+
+  const dir = manageSort.dir === 'asc' ? 1 : -1;
+  const keyOf = (v) => {
+    switch (manageSort.key) {
+      case 'title':    return (v.title || '').toLowerCase();
+      case 'category': return `${v.categories?.name || 'zzz'} ${v.subcategories?.name || ''}`.toLowerCase();
+      case 'status':   return String(MANAGE_STATUS_ORDER.indexOf(v.status)).padStart(2, '0');
+      default:         return v.updated_at || v.created_at || '';
+    }
+  };
+  return list.slice().sort((a, b) => {
+    const A = keyOf(a), B = keyOf(b);
+    if (A === B) return (a.title || '').localeCompare(b.title || '');
+    return A < B ? -dir : dir;
+  });
+}
 
 function showManageVideosPage(sidebarEl, statusFilter) {
   if (currentProfile?.role !== 'admin') return;
-  if (statusFilter) manageStatusFilter = statusFilter;
+  if (statusFilter && statusFilter !== manageStatusFilter) {
+    manageStatusFilter = statusFilter;
+    manageSelection.clear();
+  }
+
+  const shellAlive = currentPage === 'manage' && document.getElementById('manage-table-body');
   currentPage = 'manage';
-  parkVideoForm();
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   (sidebarEl || document.getElementById('sidebar-manage-item'))?.classList.add('active');
 
-  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
-  const shown = allVideos.filter(activeFilter.match);
-  const chips = MANAGE_STATUS_FILTERS.map(f => `
-    <button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''}" onclick="showManageVideosPage(null, '${f.key}')">
-      ${f.label} <span class="manage-chip-count">${allVideos.filter(f.match).length}</span>
-    </button>`).join('');
+  // Repaint in place when the page is already up — keeps an open form, the
+  // search text and the caret exactly where the admin left them.
+  if (shellAlive) { renderManageTable(); return; }
 
-  const rows = shown.map(v => `
-    <tr>
-      <td>${escapeHtml(v.title || 'Untitled')}</td>
-      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
-      <td>${escapeHtml(v.video_type || '—')}</td>
-      <td><span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || escapeHtml(v.status || '')}</span></td>
-      <td style="text-align:right"><button class="btn btn-ghost btn-sm" style="width:auto;margin-top:0;padding:4px 12px;font-size:12px" onclick="openEditVideo('${v.id}')">Edit</button></td>
-    </tr>`).join('');
+  const sortOpts = MANAGE_SORTS.map(s =>
+    `<option value="${s.key}" ${`${manageSort.key}-${manageSort.dir}` === s.key ? 'selected' : ''}>${s.label}</option>`).join('');
 
   document.getElementById('main-content').innerHTML = `
-    <div class="page-header" style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
+    <div class="page-header manage-header">
       <div>
         <div class="page-title">Manage videos</div>
-        <div class="page-sub">${shown.length} video${shown.length !== 1 ? 's' : ''}${activeFilter.key !== 'all' ? ` · ${activeFilter.label}` : ''}</div>
+        <div class="page-sub" id="manage-count"></div>
       </div>
       <button class="btn btn-primary btn-sm" style="width:auto;margin-top:0" onclick="openAddVideo()">+ Add video slot</button>
     </div>
-    <div class="manage-chips">${chips}</div>
-    <div id="manage-form-slot" class="manage-form-panel hidden"></div>
+
+    <div class="manage-toolbar">
+      <input class="form-input manage-search" id="manage-search" type="search" autocomplete="off"
+             placeholder="Search title, category, type…" value="${escapeHtmlAttr(manageSearch)}"
+             oninput="onManageSearch(this.value)" aria-label="Search videos">
+      <select class="form-select manage-sortby" aria-label="Sort by" onchange="setManageSort(this.value)">${sortOpts}</select>
+    </div>
+
+    <div class="manage-chips" id="manage-chips"></div>
+    <div class="manage-bulk hidden" id="manage-bulk"></div>
+
     <div class="manage-table-wrap">
       <table class="manage-table">
-        <thead><tr><th>Title</th><th>Category</th><th>Type</th><th>Status</th><th></th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="5" style="color:var(--muted)">No videos with this status.</td></tr>'}</tbody>
+        <thead><tr>
+          <th class="manage-check-col"><input type="checkbox" id="manage-check-all" onchange="toggleManageSelectAll(this.checked)" aria-label="Select all shown"></th>
+          <th>Title</th><th>Category</th><th>Type</th><th>Status</th><th>Updated</th><th></th>
+        </tr></thead>
+        <tbody id="manage-table-body"></tbody>
       </table>
     </div>`;
+
+  renderManageTable();
+}
+
+function renderManageTable() {
+  const body = document.getElementById('manage-table-body');
+  if (!body) return;
+
+  const shown = manageFilteredVideos();
+  const shownIds = new Set(shown.map(v => v.id));
+  // Drop selections that fell outside the current filter/search
+  [...manageSelection].forEach(id => { if (!shownIds.has(id)) manageSelection.delete(id); });
+
+  const activeFilter = MANAGE_STATUS_FILTERS.find(f => f.key === manageStatusFilter) || MANAGE_STATUS_FILTERS[0];
+  document.getElementById('manage-chips').innerHTML = MANAGE_STATUS_FILTERS.map(f => {
+    const n = allVideos.filter(f.match).length;
+    if (f.key === 'no_media' && n === 0) return '';   // nothing broken → no noise
+    return `<button class="manage-chip ${f.key === activeFilter.key ? 'active' : ''} ${f.key === 'no_media' ? 'warn' : ''}"
+              onclick="showManageVideosPage(null, '${f.key}')">${f.label} <span class="manage-chip-count">${n}</span></button>`;
+  }).join('');
+
+  const count = document.getElementById('manage-count');
+  if (count) {
+    const bits = [`${shown.length} of ${allVideos.length} video${allVideos.length !== 1 ? 's' : ''}`];
+    if (activeFilter.key !== 'all') bits.push(activeFilter.label);
+    if (manageSearch.trim()) bits.push(`matching “${escapeHtml(manageSearch.trim())}”`);
+    count.innerHTML = bits.join(' · ');
+  }
+
+  const statusOptions = (current) => MANAGE_STATUS_ORDER.map(s =>
+    `<option value="${s}" ${s === current ? 'selected' : ''}>${VIDEO_STATUS_LABELS[s]}</option>`).join('');
+
+  body.innerHTML = shown.map(v => {
+    const missing = v.status !== 'empty' && !hasMedia(v);
+    const thumb = v.thumbnail_url
+      ? `<img class="manage-thumb" src="${escapeHtmlAttr(v.thumbnail_url)}" alt="">`
+      : `<div class="manage-thumb manage-thumb-empty" aria-hidden="true"></div>`;
+    return `
+    <tr class="${manageSelection.has(v.id) ? 'selected' : ''} ${manageFormOpen && editingVideoId === v.id ? 'editing' : ''}">
+      <td class="manage-check-col"><input type="checkbox" ${manageSelection.has(v.id) ? 'checked' : ''}
+        onchange="toggleManageRow('${v.id}', this.checked)" aria-label="Select ${escapeHtmlAttr(v.title || 'Untitled')}"></td>
+      <td>
+        <div class="manage-title-cell">
+          ${thumb}
+          <div>
+            <div class="manage-title">${escapeHtml(v.title || 'Untitled')}</div>
+            <div class="manage-sub">
+              ${v.duration_seconds ? formatDuration(v.duration_seconds) : ''}
+              ${missing ? '<span class="manage-warn">No file attached</span>' : ''}
+            </div>
+          </div>
+        </div>
+      </td>
+      <td>${escapeHtml(v.categories?.name || '—')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</td>
+      <td>${escapeHtml(v.video_type || '—')}</td>
+      <td>
+        <select class="manage-status-select status-${v.status}" aria-label="Status"
+                onchange="setVideoStatus('${v.id}', this.value, this)">${statusOptions(v.status)}</select>
+      </td>
+      <td class="manage-updated">${(v.updated_at || v.created_at) ? timeAgo(v.updated_at || v.created_at) : '—'}</td>
+      <td style="text-align:right"><button class="btn btn-ghost btn-sm manage-edit-btn" onclick="openEditVideo('${v.id}')">Edit</button></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="7" class="manage-empty">${manageEmptyMessage(activeFilter)}</td></tr>`;
+
+  const all = document.getElementById('manage-check-all');
+  if (all) {
+    all.checked = shown.length > 0 && manageSelection.size === shown.length;
+    all.indeterminate = manageSelection.size > 0 && manageSelection.size < shown.length;
+  }
+  renderManageBulkBar();
+}
+
+function manageEmptyMessage(filter) {
+  if (manageSearch.trim()) {
+    return `Nothing matches “${escapeHtml(manageSearch.trim())}”. <a class="sc-link" onclick="onManageSearch('', true)">Clear the search</a>`;
+  }
+  if (filter.key === 'all') {
+    return `No videos yet. <a class="sc-link" onclick="openAddVideo()">Add the first slot</a>`;
+  }
+  return `Nothing in ${filter.label} right now. <a class="sc-link" onclick="showManageVideosPage(null, 'all')">Show all videos</a>`;
+}
+
+function onManageSearch(value, syncInput) {
+  manageSearch = value;
+  if (syncInput) {
+    const input = document.getElementById('manage-search');
+    if (input) input.value = value;
+  }
+  clearTimeout(manageSearchTimer);
+  manageSearchTimer = setTimeout(renderManageTable, 150);
+}
+
+function setManageSort(value) {
+  const [key, dir] = value.split('-');
+  manageSort = { key, dir };
+  renderManageTable();
+}
+
+// ── Selection + bulk actions ─────────────────────────────────
+function toggleManageRow(id, checked) {
+  if (checked) manageSelection.add(id); else manageSelection.delete(id);
+  renderManageTable();
+}
+
+function toggleManageSelectAll(checked) {
+  manageSelection.clear();
+  if (checked) manageFilteredVideos().forEach(v => manageSelection.add(v.id));
+  renderManageTable();
+}
+
+function clearManageSelection() {
+  manageSelection.clear();
+  renderManageTable();
+}
+
+function renderManageBulkBar() {
+  const bar = document.getElementById('manage-bulk');
+  if (!bar) return;
+  const n = manageSelection.size;
+  bar.classList.toggle('hidden', n === 0);
+  if (!n) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `
+    <span class="manage-bulk-count">${n} selected</span>
+    <select class="form-select manage-bulk-select" aria-label="Move selected to status"
+            onchange="bulkSetStatus(this.value); this.value = '';">
+      <option value="">Move to…</option>
+      ${MANAGE_STATUS_ORDER.map(s => `<option value="${s}">${VIDEO_STATUS_LABELS[s]}</option>`).join('')}
+    </select>
+    <button class="btn btn-ghost btn-sm manage-bulk-btn" onclick="clearManageSelection()">Clear</button>
+    <button class="btn btn-danger btn-sm manage-bulk-btn" onclick="bulkDeleteVideos()">Delete</button>`;
+}
+
+async function setVideoStatus(id, status, el) {
+  const v = allVideos.find(x => x.id === id);
+  if (!v || v.status === status) return;
+  const prev = v.status;
+  if (el) el.disabled = true;
+
+  await ensureFreshSession();
+  const stamp = new Date().toISOString();
+  const { error } = await sb.from('videos').update({ status, updated_at: stamp }).eq('id', id);
+
+  if (el) el.disabled = false;
+  if (error) {
+    if (el) el.value = prev;
+    showToast('Could not update status: ' + error.message, 'error');
+    return;
+  }
+  v.status = status;
+  v.updated_at = stamp;
+  showToast(`“${v.title || 'Untitled'}” moved to ${VIDEO_STATUS_LABELS[status]}`, 'success');
+  updateCounts();
+  renderManageTable();
+}
+
+async function bulkSetStatus(status) {
+  if (!status || !manageSelection.size) return;
+  const ids = [...manageSelection];
+  if (!confirm(`Move ${ids.length} video${ids.length !== 1 ? 's' : ''} to “${VIDEO_STATUS_LABELS[status]}”?`)) return;
+
+  await ensureFreshSession();
+  const stamp = new Date().toISOString();
+  const { error } = await sb.from('videos').update({ status, updated_at: stamp }).in('id', ids);
+  if (error) { showToast('Bulk update failed: ' + error.message, 'error'); return; }
+
+  ids.forEach(id => {
+    const v = allVideos.find(x => x.id === id);
+    if (v) { v.status = status; v.updated_at = stamp; }
+  });
+  manageSelection.clear();
+  showToast(`${ids.length} video${ids.length !== 1 ? 's' : ''} moved to ${VIDEO_STATUS_LABELS[status]}`, 'success');
+  updateCounts();
+  renderManageTable();
+}
+
+async function bulkDeleteVideos() {
+  const ids = [...manageSelection];
+  if (!ids.length) return;
+  const names = ids.slice(0, 3).map(id => allVideos.find(v => v.id === id)?.title || 'Untitled').join(', ');
+  const more = ids.length > 3 ? ` and ${ids.length - 3} more` : '';
+  if (!confirm(`Delete ${ids.length} video slot${ids.length !== 1 ? 's' : ''} (${names}${more})?\n\nThis cannot be undone.`)) return;
+
+  await ensureFreshSession();
+  const { error } = await sb.from('videos').delete().in('id', ids);
+  if (error) { showToast('Delete failed: ' + error.message, 'error'); return; }
+
+  manageSelection.clear();
+  showToast(`${ids.length} video${ids.length !== 1 ? 's' : ''} deleted`, 'success');
+  await loadVideos();
+  showManageVideosPage();
+}
+
+// ── Add / edit form ──────────────────────────────────────────
+// Snapshot of the form's values, so leaving it can warn about unsaved work.
+function videoFormSnapshot() {
+  const ids = ['v-title', 'v-category', 'v-subcat', 'v-type', 'v-status', 'v-wasabi-url', 'v-storage-key', 'v-desc'];
+  return ids.map(id => document.getElementById(id)?.value || '').join('\u0001')
+    + '\u0001' + (pendingWasabiFile ? pendingWasabiFile.name : '');
+}
+
+function videoSaveLabel() {
+  return editingVideoId ? 'Save changes' : 'Create slot';
+}
+
+function videoFormIsDirty() {
+  return manageFormOpen && !!manageFormSnapshot && videoFormSnapshot() !== manageFormSnapshot;
 }
 
 function mountVideoForm() {
-  if (currentPage !== 'manage' || !document.getElementById('manage-form-slot')) showManageVideosPage();
-  const slot = document.getElementById('manage-form-slot');
-  const form = document.getElementById('video-form');
-  if (!slot || !form) return;
-  slot.appendChild(form);
-  slot.classList.remove('hidden');
+  const drawer = document.getElementById('video-drawer');
+  if (!drawer) return;
+  manageFormOpen = true;
   document.getElementById('v-status-group').classList.toggle('hidden', currentProfile?.role !== 'admin');
-  slot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  drawer.classList.add('open');
+  document.body.classList.add('drawer-open');
+  document.querySelector('#video-drawer .drawer-body').scrollTop = 0;
+  // Mark the row being edited, if the list happens to be on screen behind it
+  if (currentPage === 'manage') renderManageTable();
+  setTimeout(() => document.getElementById('v-title')?.focus(), 220);
 }
 
-function closeVideoForm() {
-  parkVideoForm();
-  document.getElementById('manage-form-slot')?.classList.add('hidden');
+function closeVideoForm(force) {
+  if (!force && videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
+  manageFormOpen = false;
+  manageFormSnapshot = '';
+  editingVideoId = null;
+  ++videoPreviewToken;
+  const prev = document.getElementById('v-preview');
+  if (prev) { prev.querySelectorAll('video').forEach(el => el.pause()); prev.className = 'drawer-preview hidden'; prev.innerHTML = ''; }
+  document.getElementById('video-drawer')?.classList.remove('open');
+  document.body.classList.remove('drawer-open');
+  if (currentPage === 'manage') renderManageTable();
+}
+
+// Clicking the dimmed area outside the panel closes it (same guard as Cancel)
+function videoDrawerBackdrop(e) {
+  if (e.target === document.getElementById('video-drawer')) closeVideoForm();
+}
+
+// The drawer opens on the video itself: an admin's first question about a slot
+// is almost always "which one is this?", and the answer is the footage, not the
+// title field. A token guards the signed-URL lookup against a fast reopen.
+let videoPreviewToken = 0;
+
+async function renderVideoFormPreview(v) {
+  const box = document.getElementById('v-preview');
+  if (!box) return;
+  const token = ++videoPreviewToken;
+
+  if (!v || !hasMedia(v)) { box.className = 'drawer-preview hidden'; box.innerHTML = ''; return; }
+
+  box.className = 'drawer-preview';
+  box.innerHTML = '<div class="drawer-preview-msg">Loading video…</div>';
+  try {
+    const url = await resolveWasabiPlaybackUrl(v);
+    if (token !== videoPreviewToken) return;
+    if (!url) throw new Error('no playback url');
+    box.innerHTML = `<video controls playsinline preload="metadata"
+      ${v.thumbnail_url ? `poster="${escapeHtmlAttr(v.thumbnail_url)}"` : ''}><source src="${url}"></video>`;
+  } catch (err) {
+    if (token !== videoPreviewToken) return;
+    console.warn('[drawer preview]', err);
+    box.innerHTML = `<div class="drawer-preview-msg">Could not load the video.
+      <a class="sc-link" onclick="renderVideoFormPreview(allVideos.find(x => x.id === editingVideoId))">Retry</a></div>`;
+  }
+}
+
+// The sub-line under the drawer title, plus the "what file is on this slot"
+// summary. Both exist so an edit opens showing the slot's current state
+// instead of a set of blank-looking inputs.
+function renderVideoFormContext(v) {
+  renderVideoFormPreview(v);
+  const sub = document.getElementById('video-form-sub');
+  const media = document.getElementById('v-media-state');
+  if (sub) {
+    sub.innerHTML = v
+      ? `<span class="card-tag status-${v.status}">${VIDEO_STATUS_LABELS[v.status] || v.status}</span>
+         <span>${escapeHtml(v.categories?.name || 'No category')}${v.subcategories?.name ? ` › ${escapeHtml(v.subcategories.name)}` : ''}</span>
+         ${(v.updated_at || v.created_at) ? `<span>· updated ${timeAgo(v.updated_at || v.created_at)}</span>` : ''}`
+      : 'A new slot in the library — fill in what you know, the file can follow later.';
+  }
+  if (media) {
+    if (v && hasMedia(v)) {
+      media.className = 'drawer-media';
+      media.innerHTML = `<span class="drawer-media-ok">✓ File attached</span>
+        <code>${escapeHtml((v.storage_key || v.video_url || '').split('/').pop())}</code>
+        <span class="drawer-media-note">Uploading a new file replaces it.</span>`;
+    } else if (v) {
+      media.className = 'drawer-media warn';
+      media.innerHTML = '<span class="drawer-media-warn">No file on this slot yet</span>';
+    } else {
+      media.className = 'drawer-media hidden';
+      media.innerHTML = '';
+    }
+  }
 }
 
 function openAddVideo() {
+  if (videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
   editingVideoId = null;
   pendingWasabiFile = null;
   pendingThumbnail = null;
-  document.getElementById('admin-modal-title').textContent = 'Add video slot';
+  document.getElementById('admin-modal-title').textContent = 'New video slot';
   document.getElementById('v-title').value = '';
   document.getElementById('v-category').value = '';
   document.getElementById('v-subcat').innerHTML = '<option value="">Select sub-category…</option>';
   document.getElementById('v-type').value = '';
-  document.getElementById('v-status').value = 'empty';
+  // Raw = footage in hand but not yet submitted for review. Switch to
+  // "Empty slot" to plan a slot before there is anything to upload.
+  document.getElementById('v-status').value = 'raw';
   document.getElementById('v-wasabi-file').value = '';
   document.getElementById('v-wasabi-url').value = '';
   document.getElementById('v-storage-key').value = '';
   document.getElementById('v-desc').value = '';
   document.getElementById('delete-video-btn').classList.add('hidden');
+  document.getElementById('save-video-btn').textContent = videoSaveLabel();
+  renderVideoFormContext(null);
   hideUploadProgress();
   mountVideoForm();
+  manageFormSnapshot = videoFormSnapshot();
 }
 
 function openEditVideo(id) {
   const v = allVideos.find(x => x.id === id);
   if (!v) return;
+  if (id !== editingVideoId && videoFormIsDirty() && !confirm('Discard unsaved changes to this video?')) return;
 
   editingVideoId = id;
   pendingWasabiFile = null;
   pendingThumbnail = null;
-  document.getElementById('admin-modal-title').textContent = 'Edit video';
+  document.getElementById('admin-modal-title').textContent = v.title || 'Untitled';
   document.getElementById('v-title').value = v.title || '';
   document.getElementById('v-category').value = v.category_id || '';
-  loadSubcats(v.category_id).then(() => {
-    document.getElementById('v-subcat').value = v.subcategory_id || '';
-  });
   document.getElementById('v-type').value = v.video_type || '';
   document.getElementById('v-status').value = v.status || 'empty';
   document.getElementById('v-wasabi-file').value = '';
@@ -1426,14 +1774,42 @@ function openEditVideo(id) {
   document.getElementById('v-storage-key').value = v.storage_key || '';
   document.getElementById('v-desc').value = v.description || '';
   document.getElementById('delete-video-btn').classList.remove('hidden');
+  document.getElementById('save-video-btn').textContent = videoSaveLabel();
+  renderVideoFormContext(v);
   hideUploadProgress();
   mountVideoForm();
+  manageFormSnapshot = videoFormSnapshot();
+  // Sub-categories load asynchronously — re-take the baseline once they land,
+  // or the form looks dirty the moment the select is populated.
+  loadSubcats(v.category_id).then(() => {
+    document.getElementById('v-subcat').value = v.subcategory_id || '';
+    manageFormSnapshot = videoFormSnapshot();
+  });
 }
+
+// Esc closes the add/edit form (with the same unsaved-changes guard)
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && manageFormOpen) { e.stopPropagation(); closeVideoForm(); }
+});
 
 function handleWasabiFileSelected(files) {
   pendingWasabiFile = files && files.length ? files[0] : null;
   pendingThumbnail = null;
   hideUploadProgress();
+
+  // Preview the file that was just picked, so a wrong pick is obvious before
+  // it is uploaded. Falls back to the slot's existing video when cleared.
+  const box = document.getElementById('v-preview');
+  if (box) {
+    if (pendingWasabiFile) {
+      ++videoPreviewToken;
+      box.className = 'drawer-preview is-new';
+      box.innerHTML = `<video controls playsinline preload="metadata" src="${URL.createObjectURL(pendingWasabiFile)}"></video>
+        <div class="drawer-preview-tag">New file — not uploaded yet</div>`;
+    } else {
+      renderVideoFormPreview(allVideos.find(x => x.id === editingVideoId));
+    }
+  }
 
   if (pendingWasabiFile) {
     generateThumbnailDataUri(pendingWasabiFile)
@@ -1702,7 +2078,7 @@ async function saveVideo() {
   if (!payload.title) {
     showToast('Please enter a title', 'error');
     btn.disabled = false;
-    btn.textContent = 'Save video';
+    btn.textContent = videoSaveLabel();
     return;
   }
 
@@ -1724,16 +2100,18 @@ async function saveVideo() {
       hideUploadProgress();
       showToast('Upload failed: ' + (uploadErr.message || 'Unknown error'), 'error');
       btn.disabled = false;
-      btn.textContent = 'Save video';
+      btn.textContent = videoSaveLabel();
       return;
     }
     hideUploadProgress();
   }
 
-  if (!payload.storage_key && !payload.video_url) {
-    showToast('Upload a file or provide a Wasabi video URL/storage key', 'error');
+  // An "Empty slot" is a deliberately unfilled placeholder — it is the one
+  // status that is allowed to exist with no file behind it.
+  if (!payload.storage_key && !payload.video_url && payload.status !== 'empty') {
+    showToast('Upload a file, paste a Wasabi URL, or set the status to “Empty slot” to plan it for later', 'error');
     btn.disabled = false;
-    btn.textContent = 'Save video';
+    btn.textContent = videoSaveLabel();
     return;
   }
 
@@ -1744,8 +2122,9 @@ async function saveVideo() {
   } else {
     payload.created_by = currentUser.id;
     payload.review_round = 1;
-    // Starts as 'raw' — the team sees it and sends it to Joe with Submit for Review.
-    payload.status = 'raw';
+    // Honour the status the admin picked (defaults to Raw) instead of
+    // silently overriding it — the form's own field is the source of truth.
+    if (!payload.status) payload.status = 'raw';
     const { data: inserted, error: insertErr } = await sb.from('videos').insert(payload).select('id').single();
     error = insertErr;
     insertedId = inserted?.id;
@@ -1756,22 +2135,27 @@ async function saveVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     if (!editingVideoId && insertedId) {
-      showToast('Uploaded — submit it for review when ready', 'success');
+      showToast(payload.status === 'raw'
+        ? 'Saved as Raw — submit it for review when ready'
+        : `Saved as ${VIDEO_STATUS_LABELS[payload.status] || payload.status}`, 'success');
     } else {
       showToast('Video updated', 'success');
     }
-    closeVideoForm();
+    closeVideoForm(true);
     await loadVideos();
     if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
-  btn.textContent = 'Save video';
+  btn.textContent = videoSaveLabel();
 }
 
 async function deleteVideo() {
   if (!editingVideoId) return;
-  if (!confirm('Are you sure you want to delete this video slot? This cannot be undone.')) return;
+  const title = allVideos.find(v => v.id === editingVideoId)?.title || 'this video slot';
+  if (!confirm(`Delete “${title}”?
+
+This cannot be undone.`)) return;
 
   const btn = document.getElementById('delete-video-btn');
   btn.disabled = true;
@@ -1783,18 +2167,13 @@ async function deleteVideo() {
     showToast('Error: ' + error.message, 'error');
   } else {
     showToast('Video deleted', 'success');
-    closeVideoForm();
+    closeVideoForm(true);
     await loadVideos();
     if (currentPage === 'manage') showManageVideosPage();
   }
 
   btn.disabled = false;
-  btn.textContent = 'Delete Video';
-}
-
-function closeAdminModal(e) {
-  if (e.target === document.getElementById('admin-modal'))
-    document.getElementById('admin-modal').classList.remove('open');
+  btn.textContent = 'Delete';
 }
 
 // ══════════════════════════════════════════════════════
@@ -1988,8 +2367,8 @@ function notifClick(videoId, scriptId) {
 // REVIEWER — mark as reviewed & notify
 // ══════════════════════════════════════════════════════
 // Canonical reviewer-button labels (restored by updateReviewedBtnState).
-const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Send back for edits';
-const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Complete';
+const SEND_BACK_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg> Needs changes';
+const MARK_COMPLETE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Approve video';
 
 // Joe sends the video back to Ravi's TO EDIT folder with his feedback.
 // While Joe is deciding on a video, the feedback section stays hidden until he
@@ -2039,6 +2418,8 @@ function vidAddMore() {
 // Joe's notes are locked once the video leaves his review (Done / Mark as Complete)
 function vidNotesLocked() {
   const v = allVideos.find(x => x.id === currentVideoId);
+  // An earlier version is history — nothing on it can be added to or removed.
+  if (vidViewRound && vidViewRound < videoRound(v)) return true;
   return currentProfile?.is_reviewer === true && v?.status !== 'to_review';
 }
 function openVideoChanges() {
@@ -2121,16 +2502,17 @@ function updateReviewedBtnState(v) {
   const sendBackBtn = document.getElementById('send-back-btn');
   const completeBtn = document.getElementById('mark-complete-btn');
   const statusEl = document.getElementById('reviewer-status');
+  const labelEl = document.getElementById('reviewer-section-label');
   if (!sendBackBtn || !v) return;
 
   // Restore canonical labels + enabled state (recovers from a stuck "Saving…").
   sendBackBtn.disabled = false; sendBackBtn.innerHTML = SEND_BACK_BTN_HTML;
   if (completeBtn) { completeBtn.disabled = false; completeBtn.innerHTML = MARK_COMPLETE_BTN_HTML; }
 
-  const round = v.review_round || 1;
-  setStatusText(statusEl, round > 1
-    ? `Revision round ${round} — send back for more edits, or mark complete`
-    : 'Review this video — send back with feedback, or mark complete');
+  const round = videoRound(v);
+  if (labelEl) labelEl.textContent = `Your decision on v${round}`;
+  setStatusText(statusEl,
+    'Watch, then decide. "Needs changes" lets you leave notes for the editor; approving marks the video complete.');
 }
 
 // ── EDITOR ACTIONS ───────────────────────────────────
@@ -2143,8 +2525,14 @@ function setStatusText(el, text) {
 // Canonical labels for the workflow buttons. Click handlers overwrite these
 // with transient text ("Saving…" etc.); updateEditorBtnState restores them so
 // a failed/interrupted action never leaves a button stuck.
-const SUBMIT_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Submit for Review';
-const MARK_DONE_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg> Mark as Done';
+const SEND_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
+// Like the script stage, an editor sends a numbered version to Joe and he keeps
+// asking for changes until he approves one. v1 is the first submission; every
+// resubmission after a "Needs changes" is the next version.
+const videoRound     = (v) => v?.review_round || 1;
+const nextVideoVersion = (v) => v?.status === 'to_edit' ? videoRound(v) + 1 : videoRound(v);
+const SUBMIT_BTN_HTML    = (v) => `${SEND_SVG} Send to Joe as v${nextVideoVersion(v)}`;
+const MARK_DONE_BTN_HTML = (v) => `${SEND_SVG} Send to Joe as v${nextVideoVersion(v)}`;
 const PUBLISH_BTN_HTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22l-4-9-9-4 20-7z"/></svg> Publish Video';
 
 function updateEditorBtnState(v) {
@@ -2156,8 +2544,8 @@ function updateEditorBtnState(v) {
 
   // Restore canonical label + enabled state — recovers from any prior
   // transient "Saving…"/"Sending…"/"Publishing…" left by a failed action.
-  if (submitBtn)  { submitBtn.disabled  = false; submitBtn.innerHTML  = SUBMIT_BTN_HTML; }
-  markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML;
+  if (submitBtn)  { submitBtn.disabled  = false; submitBtn.innerHTML  = SUBMIT_BTN_HTML(v); }
+  markDoneBtn.disabled = false; markDoneBtn.innerHTML = MARK_DONE_BTN_HTML(v);
   if (publishBtn) { publishBtn.disabled = false; publishBtn.innerHTML = PUBLISH_BTN_HTML; }
 
   const showSubmit   = v.status === 'empty' || v.status === 'raw';
@@ -2168,12 +2556,16 @@ function updateEditorBtnState(v) {
   markDoneBtn.classList.toggle('hidden', !showMarkDone);
   publishBtn.classList.toggle('hidden', !showPublish);
 
+  const round = videoRound(v);
+  const labelEl = document.getElementById('editor-section-label');
+  if (labelEl) labelEl.textContent = showSubmit && round === 1 ? 'Video stage' : `Video · v${round}`;
+
   const text =
-    showSubmit   ? 'Upload done — submit for Joe to review' :
-    showMarkDone ? 'Joe requested changes — click when revisions are ready' :
-    showPublish  ? 'Approved by Joe — ready to publish' :
-    v.status === 'to_review' ? 'Waiting for Joe to review' :
-    v.status === 'published' ? 'Published ✓' : '';
+    showSubmit   ? `Upload done — send v${nextVideoVersion(v)} to Joe for review` :
+    showMarkDone ? `Joe asked for changes on v${round}. His notes are below — make them, then send v${round + 1}.` :
+    showPublish  ? `Joe approved v${round} — ready to publish` :
+    v.status === 'to_review' ? `v${round} is with Joe` :
+    v.status === 'published' ? `Published ✓ (approved on v${round})` : '';
   setStatusText(statusEl, text);
 }
 
@@ -2198,7 +2590,7 @@ async function submitForReview() {
   v.status = 'to_review';
   v.review_round = 1;
   const videoId = currentVideoId, title = v.title;
-  showToast('Submitted for review — Joe has been notified', 'success');
+  showToast('Sent to Joe as v1 — he has been notified', 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -2232,7 +2624,7 @@ async function markAsDone() {
   v.status = 'to_review';
   v.review_round = nextRound;
   const videoId = currentVideoId, title = v.title;
-  showToast('Marked as done — Joe has been notified', 'success');
+  showToast(`Sent to Joe as v${nextRound} — he has been notified`, 'success');
   closeVideoModal();
   await loadVideos();
 
@@ -2864,7 +3256,6 @@ async function showRecordingsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
-  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading recordings…</div>';
 
@@ -3093,7 +3484,6 @@ async function downloadRecording() {
       closeCaptureModal();
       closeScriptModal();
       closeScriptNewModal();
-      document.getElementById('admin-modal').classList.remove('open');
       document.getElementById('notif-panel')?.classList.add('hidden');
       notifPanelOpen = false;
       closeSidebar();
@@ -3323,7 +3713,6 @@ async function showScriptsPage(sidebarEl) {
   document.querySelectorAll('.sidebar-item').forEach(i => i.classList.remove('active'));
   if (sidebarEl) sidebarEl.classList.add('active');
 
-  parkVideoForm();
   const main = document.getElementById('main-content');
   main.innerHTML = '<div class="loading"><div class="spinner"></div> Loading projects…</div>';
   await loadScripts();
@@ -3826,11 +4215,13 @@ function projStatusChipsHtml(s, latest) {
     : `Script: ${meta.label}${latest ? ` · v${latest.version}` : ' · not sent yet'}`;
   const vs = s.videos?.status || null;
   const videoApproved = vs === 'completed' || vs === 'published';
+  // Same shape as the script chip: state plus the version it refers to
+  const vRound = s.videos ? videoRound(allVideos.find(x => x.id === s.videos.id) || s.videos) : 1;
   const videoText = !s.videos ? 'Video: no slot' :
-    videoApproved ? (vs === 'published' ? 'Video approved · published' : 'Video approved') :
-    vs === 'to_review' ? 'Video: with Joe' :
-    vs === 'to_edit'   ? 'Video: changes requested' :
-    (s.videos.storage_key || s.videos.video_url) && !isReviewerUser() ? 'Video: uploaded' : 'Video: not made yet';
+    videoApproved ? (vs === 'published' ? `Video approved · v${vRound} published` : `Video approved · v${vRound}`) :
+    vs === 'to_review' ? `Video: with Joe · v${vRound}` :
+    vs === 'to_edit'   ? `Video: changes requested on v${vRound}` :
+    (s.videos.storage_key || s.videos.video_url) && !isReviewerUser() ? 'Video: uploaded · not sent yet' : 'Video: not made yet';
   const videoCls = videoApproved ? 'sc-status-approved' : vs === 'to_review' ? 'sc-status-sent' : vs === 'to_edit' ? 'sc-status-changes' : 'sc-status-draft';
   return `
       <span class="card-tag sc-status-${s.status} sc-chip">${scriptApproved ? TICK_SVG : ''}${scriptText}</span>
@@ -4743,7 +5134,6 @@ function renderProjectHubHtml(s, client = false) {
           <div class="modal-meta-item"><strong>${escapeHtml(VIDEO_STATUS_LABELS[v.status] || v.status || '—')}</strong>Status</div>
           ${v.video_type ? `<div class="modal-meta-item"><strong>${escapeHtml(v.video_type)}</strong>Type</div>` : ''}
           ${v.duration_seconds ? `<div class="modal-meta-item"><strong>${formatDuration(v.duration_seconds)}</strong>Length</div>` : ''}
-          ${client ? '' : `<a class="sc-link" style="margin-left:auto;font-size:12px" onclick="openVideo('${v.id}')">Open in library</a>`}
         </div>
       </div>
       <div id="pa-workflow"></div>`;
@@ -4871,18 +5261,53 @@ async function loadProjectVideo() {
 const PA_WORKFLOW_IDS = ['feedback-section', 'reviewer-section', 'editor-section'];
 const paWorkflowMounted = () => !!document.getElementById('pa-workflow')?.querySelector('#feedback-section');
 
+// v1, v2, v3… — one tab per round the video has been through, coloured by how
+// that round ended. Mirrors the script stage's version tabs so both halves of a
+// project read the same way.
+function videoVersionTabsHtml(v) {
+  const round = videoRound(v);
+  const sent = !['empty', 'raw'].includes(v.status);
+  if (!sent || round < 1) return '';
+  const current = vidViewRound || round;
+
+  return `<div class="sc-version-tabs">` + Array.from({ length: round }, (_, i) => {
+    const n = i + 1;
+    const outcome = n < round ? 'changes'
+      : v.status === 'to_review' ? 'sent'
+      : v.status === 'to_edit' ? 'changes'
+      : ['completed', 'published'].includes(v.status) ? 'approved' : 'draft';
+    const color = outcome === 'approved' ? 'var(--teal)' : outcome === 'changes' ? '#60a5fa' : '#f5a524';
+    const title = outcome === 'approved' ? 'Approved' : outcome === 'changes' ? 'Changes requested' : 'With Joe';
+    return `<button class="sc-vtab ${n === current ? 'active' : ''}" title="v${n} — ${title}"
+              onclick="selectVideoVersion(${n})">v${n}<span class="dot" style="background:${color}"></span></button>`;
+  }).join('') + `</div>`;
+}
+
+function selectVideoVersion(n) {
+  const v = allVideos.find(x => x.id === currentVideoId);
+  if (!v) return;
+  vidViewRound = n >= videoRound(v) ? null : n;
+  const strip = document.getElementById('pa-version-tabs');
+  if (strip) strip.innerHTML = videoVersionTabsHtml(v);
+  loadFeedback(v.id, vidViewRound);
+  // Old rounds are read-only history
+  document.getElementById('vid-composer')?.classList.toggle('hidden', !!vidViewRound);
+}
+
 function paMountWorkflow() {
   const s = currentScript, v = s?.videos;
   const mount = document.getElementById('pa-workflow');
   if (!v || !mount) return;
   const full = allVideos.find(x => x.id === v.id) || v;
   currentVideoId = v.id;
+  vidViewRound = null;
+  mount.innerHTML = `<div id="pa-version-tabs">${videoVersionTabsHtml(full)}</div>`;
   PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el) mount.appendChild(el); });
 
   const isAdmin = currentProfile?.role === 'admin';
   const isReviewer = currentProfile?.is_reviewer === true;
   const fb = document.getElementById('feedback-section');
-  if (isAdmin || isReviewer) { fb.classList.remove('hidden'); loadFeedback(v.id); }
+  if (isAdmin || isReviewer) { fb.classList.remove('hidden'); loadFeedback(v.id, null); }
   else fb.classList.add('hidden');
 
   const rs = document.getElementById('reviewer-section');
@@ -4901,6 +5326,8 @@ function paUnmountWorkflow() {
   const home = document.querySelector('#video-modal .modal-info');
   PA_WORKFLOW_IDS.forEach(id => { const el = document.getElementById(id); if (el && home) home.appendChild(el); });
   resetComposer();
+  document.getElementById('vid-composer')?.classList.remove('hidden');
+  vidViewRound = null;
   currentVideoId = null;
 }
 
