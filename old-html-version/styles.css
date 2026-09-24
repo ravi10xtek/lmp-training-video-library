@@ -3106,3 +3106,5 @@ a.pa-item-name:hover { color: var(--teal); text-decoration: underline; }
   .team-modal .modal-info { padding: 20px 16px; }
   .team-add-btn { width: 100%; justify-content: center; }
 }
+
+.empty-state .btn { margin-top: 14px; }
