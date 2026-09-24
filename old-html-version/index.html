@@ -18,7 +18,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Work+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://unpkg.com/@supabase/supabase-js@2"></script>
-<link rel="stylesheet" href="styles.css?v=20260918a">
+<link rel="stylesheet" href="styles.css?v=20260924a">
 </head>
 <body>
 
@@ -283,6 +283,13 @@
           <button class="btn btn-ghost btn-sm" id="rec-pause-btn" style="margin-top:0" onclick="toggleRecordingPause()">Pause</button>
           <button class="btn btn-danger btn-sm" style="margin-top:0" onclick="stopRecording()">Stop</button>
         </div>
+        <!-- Joe's "Needs changes" footer: Cancel → Post → Add more / Done (same as the script stage) -->
+        <div class="sc-changes-foot hidden" id="video-changes-foot">
+          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
+          <button class="btn btn-ghost btn-sm hidden" id="vid-add-more-btn" style="margin-top:0" onclick="vidAddMore()">Add more</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-post-btn" style="margin-top:0" onclick="submitComment()">Post</button>
+          <button class="btn btn-primary btn-sm hidden" id="vid-done-btn" style="margin-top:0" onclick="sendBackForEdits()">Done</button>
+        </div>
       </div>
 
       <!-- REVIEWER ACTIONS (Joe only — is_reviewer = true) -->
@@ -297,12 +304,6 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
             Approve video
           </button>
-        </div>
-        <div class="sc-changes-foot hidden" id="video-changes-foot">
-          <button class="btn btn-ghost btn-sm" id="video-changes-cancel" style="margin-top:0" onclick="cancelVideoChanges()">Cancel</button>
-          <button class="btn btn-ghost btn-sm hidden" id="vid-add-more-btn" style="margin-top:0" onclick="vidAddMore()">Add more</button>
-          <button class="btn btn-primary btn-sm hidden" id="vid-post-btn" style="margin-top:0" onclick="submitComment()">Post</button>
-          <button class="btn btn-primary btn-sm hidden" id="vid-done-btn" style="margin-top:0" onclick="sendBackForEdits()">Done</button>
         </div>
         <div class="reviewer-status" id="reviewer-status"></div>
       </div>
@@ -679,6 +680,6 @@
   // Local dev only: load env.local.js (dev Supabase project) if present.
   if (['localhost', '127.0.0.1'].includes(location.hostname) || location.hostname.endsWith('.ngrok-free.dev')) document.write('<script src="env.local.js"><\/script>');
 </script>
-<script src="app.js?v=20260918a"></script>
+<script src="app.js?v=20260924a"></script>
 </body>
 </html>

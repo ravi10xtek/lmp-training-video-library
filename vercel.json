@@ -1,6 +1,32 @@
 {
   "rewrites": [
-    { "source": "/", "destination": "/old-html-version/index.html" },
-    { "source": "/(.*)", "destination": "/old-html-version/$1" }
+    {
+      "source": "/",
+      "destination": "/old-html-version/index.html"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/old-html-version/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
+      ]
+    },
+    {
+      "source": "/(index.html|app.js|styles.css|sw.js|manifest.json)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-cache"
+        }
+      ]
+    }
   ]
 }

@@ -2918,6 +2918,32 @@ a.pa-item-name:hover { color: var(--teal); text-decoration: underline; }
 .sc-step-n { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; background: rgba(255,255,255,0.08); }
 .sc-step.active .sc-step-n { background: var(--teal); color: #05202a; }
 #sc-pane-video .pa-hub { margin-top: 20px; }
+/* Video stage — mirrors the script stage (version tabs → player card → decision → editor → feedback) */
+#pa-stage .sc-version-tabs { margin-top: 0; margin-bottom: 12px; }
+.sc-vtab-draft { border-style: dashed; }
+.pa-player { margin-top: 0; }
+.pa-player .pa-video { border: none; border-radius: 0; }
+.pa-desc { font-size: 14px; color: var(--muted); line-height: 1.6; margin-top: 12px; }
+#pa-workflow .workflow-section, #pa-workflow .feedback-section, #pa-workflow .sc-locked { margin-top: 16px; }
+.pa-file {
+  position: relative;
+  display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px 10px; margin-top: 4px;
+  border: 1px dashed rgba(255,255,255,0.18); border-radius: 10px; cursor: pointer;
+  background: rgba(255,255,255,0.03); transition: border-color .15s, background .15s;
+}
+.pa-file:hover { border-color: rgba(0,242,254,0.45); background: rgba(0,242,254,0.04); }
+.pa-file input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.pa-file:focus-within { border-color: var(--teal); }
+.pa-file-btn {
+  flex: none; padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 600;
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); color: var(--white);
+}
+.pa-file-name { min-width: 0; font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pa-advanced { margin-top: 10px; font-size: 13px; color: var(--muted); }
+.pa-advanced summary { cursor: pointer; padding: 4px 0; }
+.pa-advanced .form-group { margin-top: 10px; }
+#pa-editor .upload-progress-wrap { margin-top: 12px; }
+.pa-wait { margin-top: 16px; padding: 12px 14px; border-radius: 10px; background: rgba(96,165,250,0.08); border: 1px solid rgba(96,165,250,0.25); color: var(--white); }
 .pa-derived { background: rgba(0,242,254,0.05); border: 1px solid rgba(0,242,254,0.18); border-radius: 10px; padding: 10px 12px !important; margin-bottom: 4px; }
 .pa-chip-auto { font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--teal); border: 1px solid rgba(0,242,254,0.35); border-radius: 999px; padding: 2px 7px; white-space: nowrap; }
 /* Otter recording on the Script tab; upload form + details + workflow on the Video tab */
